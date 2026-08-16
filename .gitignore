@@ -1,0 +1,55 @@
+# IDE
+# .vscode/      # commented to share info with others
+
+# MacOS
+*.DS_Store
+
+# Virtual env
+.venv/
+venv/
+environment/
+.envrc
+.venv
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Secrets
+.env
+.s3cfg
+
+# Python
+**.pyc
+**/__pycache__/**
+**/.ipynb_checkpoints/**
+*.pth
+**.egg-info/
+
+# Large data
+cache/
+.cache
+dataset/
+sample_dataset/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker
+docker/volume/
+docker/volumes/
+
+# Web
+node_modules/
+
+# Logs
+logs/
+
+# AI
+.agents/
+
+
+# Custom
+# Add here
