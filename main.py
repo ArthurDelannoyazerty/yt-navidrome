@@ -5,6 +5,7 @@ import shutil
 import re
 import requests
 import base64
+import subprocess
 from datetime import datetime
 from dotenv import load_dotenv, find_dotenv
 import yt_dlp
@@ -27,7 +28,7 @@ FAILED_FILE = "unprocessed_urls.txt"
 ACOUSTID_DELAY = 0.5  
 MATCH_THRESHOLD = 0.6 
 
-musicbrainzngs.set_useragent("YT-Navidrome-Pipeline", "1.3", "contact@example.com")
+musicbrainzngs.set_useragent("YT-Navidrome-Pipeline", "1.4", "contact@example.com")
 
 def setup_directories():
     os.makedirs(NAVIDROME_LIB_DIR, exist_ok=True)
@@ -43,10 +44,10 @@ def save_ledger(ledger_data):
         json.dump(ledger_data, f, indent=4)
 
 def sanitize_filename(name):
-    return re.sub(r'[\\/*?:"<>|]', "", name)
+    # Removes invalid characters for file and folder paths
+    return re.sub(r'[\\/*?:"<>|]', "", str(name)).strip()
 
 def get_playlist_metadata(api_key, playlist_id):
-    """Fetch the actual Title of the YouTube Playlist."""
     url = "https://www.googleapis.com/youtube/v3/playlists"
     params = {"part": "snippet", "id": playlist_id, "key": api_key}
     try:
@@ -146,20 +147,71 @@ def fetch_cover_art(release_mbid):
         print(f" -> Failed to fetch cover art: {e}")
     return None
 
+def calculate_replaygain(file_path):
+    """Uses ffmpeg to calculate EBU R128 loudness and returns ReplayGain value."""
+    try:
+        cmd = ['ffmpeg', '-nostats', '-i', file_path, '-filter_complex', 'ebur128', '-f', 'null', '-']
+        # ffmpeg logs to stderr
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        for line in result.stderr.splitlines():
+            if "I:" in line and "LUFS" in line:
+                match = re.search(r"I:\s+([-+0-9.]+)\s+LUFS", line)
+                if match:
+                    lufs = float(match.group(1))
+                    gain = -18.0 - lufs # Navidrome targets standard -18 LUFS for ReplayGain
+                    return f"{gain:+.2f} dB"
+    except Exception as e:
+        print(f" -> ReplayGain calculation failed: {e}")
+    return None
+
+def fetch_lyrics(title, artist, album, duration_sec):
+    """Fetch synced or plain lyrics from LRCLIB."""
+    headers = {"User-Agent": "YT-Navidrome-Pipeline/1.4"}
+    
+    # Attempt 1: Exact Match using duration
+    try:
+        url_get = "https://lrclib.net/api/get"
+        params = {"track_name": title, "artist_name": artist, "album_name": album, "duration": int(duration_sec)}
+        res = requests.get(url_get, params=params, headers=headers)
+        
+        if res.status_code == 200:
+            data = res.json()
+            return data.get("syncedLyrics") or data.get("plainLyrics")
+            
+        # Attempt 2: Fallback to searching if exact match fails
+        url_search = "https://lrclib.net/api/search"
+        search_params = {"q": f"{artist} {title}"}
+        res_search = requests.get(url_search, params=search_params, headers=headers)
+        if res_search.status_code == 200:
+            results = res_search.json()
+            if results and len(results) > 0:
+                # Return the top result's lyrics
+                return results[0].get("syncedLyrics") or results[0].get("plainLyrics")
+    except Exception as e:
+        print(f" -> Lyrics fetch error: {e}")
+    return None
+
 def tag_opus_file(file_path, metadata, yt_item):
+    """Tags the opus file and returns an info dictionary to help organize the folder structure."""
     audio = OggOpus(file_path)
     audio.delete()
+    
+    duration = audio.info.length
     
     dt_obj = datetime.strptime(yt_item["raw_date"], "%Y-%m-%dT%H:%M:%SZ")
     formatted_date = dt_obj.strftime("%Y-%m-%d")
     fallback_year = dt_obj.strftime("%Y")
     
-    final_title = yt_item["title"]
-    artists = ["Unknown Artist"]
-    primary_artist_str = "Unknown Artist"
+    info = {
+        "title": yt_item["title"],
+        "artists": ["Unknown Artist"],
+        "albumartist": "Unknown Artist",
+        "album": "Unknown Album",
+        "duration": duration
+    }
     
     if metadata:
-        final_title = metadata.get("title", final_title)
+        info["title"] = metadata.get("title", info["title"])
         
         if "artist-credit" in metadata and len(metadata["artist-credit"]) > 0:
             artists_list = []
@@ -167,16 +219,17 @@ def tag_opus_file(file_path, metadata, yt_item):
                 if isinstance(credit, dict) and "artist" in credit:
                     artists_list.append(credit["artist"]["name"])
             if artists_list:
-                artists = artists_list
-                primary_artist_str = artists_list[0]
+                info["artists"] = artists_list
+                info["albumartist"] = artists_list[0]
                  
-        audio["title"] = final_title
-        audio["artist"] = artists
-        audio["albumartist"] = primary_artist_str
+        audio["title"] = info["title"]
+        audio["artist"] = info["artists"]
+        audio["albumartist"] = info["albumartist"]
         
         if "release-list" in metadata and len(metadata["release-list"]) > 0:
             release = metadata["release-list"][0]
-            audio["album"] = release.get("title", "")
+            info["album"] = release.get("title", "Unknown Album")
+            audio["album"] = info["album"]
             
             release_date = release.get("date", "")
             audio["date"] = release_date[:4] if release_date else fallback_year
@@ -203,21 +256,25 @@ def tag_opus_file(file_path, metadata, yt_item):
             audio["genre"] = genres
             
     else:
-        audio["title"] = final_title
-        audio["artist"] = artists
-        audio["albumartist"] = primary_artist_str
+        audio["title"] = info["title"]
+        audio["artist"] = info["artists"]
+        audio["albumartist"] = info["albumartist"]
+        audio["album"] = info["album"]
         audio["date"] = fallback_year
 
-    # Track number has been completely removed to avoid playlist overlaps!
+    # Calculate and Inject ReplayGain Loudness Data
+    print(" -> Analyzing Loudness (ReplayGain)...")
+    rg_gain = calculate_replaygain(file_path)
+    if rg_gain:
+        audio["replaygain_track_gain"] = [rg_gain]
+
     audio["comment"] = f"YT Added: {formatted_date}"
     audio.save()
     
-    safe_artist = sanitize_filename(", ".join(artists) if isinstance(artists, list) else artists)
-    safe_title = sanitize_filename(final_title)
-    return f"{safe_artist} - {safe_title}.opus"
+    return info
 
 def generate_m3u_playlist(playlist_name, playlist_items, ledger):
-    """Generate a chronological playlist file named after the YouTube playlist."""
+    """Generate a playlist file pointing to the new organized folder structure."""
     safe_playlist_name = sanitize_filename(playlist_name)
     m3u_path = os.path.join(NAVIDROME_LIB_DIR, f"{safe_playlist_name}.m3u")
     
@@ -226,28 +283,27 @@ def generate_m3u_playlist(playlist_name, playlist_items, ledger):
         for item in playlist_items:
             vid_id = item["video_id"]
             if vid_id in ledger:
-                filename = os.path.basename(ledger[vid_id]["path"])
+                # The relative path from the ledger (e.g. Artist/Album/Song.opus)
+                # Force forward slash for universal compatibility in M3U
+                rel_path = ledger[vid_id]["rel_path"].replace("\\", "/") 
                 title = ledger[vid_id]["yt_title"]
                 
                 f.write(f"#EXTINF:-1,{title}\n")
-                f.write(f"{filename}\n")
+                f.write(f"{rel_path}\n")
                 
     print(f"\nGenerated Navidrome Playlist: '{safe_playlist_name}.m3u'")
-    print("(Note: Ensure AutoImportPlaylists=true is set in Navidrome configuration!)")
 
 def main():
     setup_directories()
     ledger = load_ledger()
     
-    # 1. Ask YouTube for the real name of the playlist
     yt_playlist_name = get_playlist_metadata(YT_API_KEY, PLAYLIST_ID)
     print(f"--- Playlist: {yt_playlist_name} ---")
     
-    # 2. Get the actual tracks
     playlist_items = get_playlist_items(YT_API_KEY, PLAYLIST_ID)
     
     for index, item in enumerate(playlist_items, start=1):
-        if index > 4: # Remove this line whenever you are ready to do the whole playlist!
+        if index > 4: # Remove this line to do the whole playlist
             break
             
         vid_id = item["video_id"]
@@ -256,7 +312,7 @@ def main():
         print(f"[{index}/{len(playlist_items)}] Processing: {yt_title}")
         
         if vid_id in ledger:
-            print(f" -> Already processed. Skipping. (Path: {ledger[vid_id]['path']})")
+            print(f" -> Already processed. Skipping. (Path: {ledger[vid_id]['rel_path']})")
             continue
             
         print(" -> Downloading audio...")
@@ -272,21 +328,50 @@ def main():
         mb_metadata = fingerprint_audio(temp_file)
         
         print(" -> Tagging...")
-        target_filename = tag_opus_file(temp_file, mb_metadata, yt_item=item)
-        target_path = os.path.join(NAVIDROME_LIB_DIR, target_filename)
+        tagged_info = tag_opus_file(temp_file, mb_metadata, item)
         
+        # --- Create Folder Hierarchy ---
+        folder_artist = sanitize_filename(tagged_info["albumartist"])
+        folder_album = sanitize_filename(tagged_info["album"])
+        file_title = sanitize_filename(tagged_info["title"])
+        file_artist = sanitize_filename(", ".join(tagged_info["artists"]))
+        
+        target_filename = f"{file_artist} - {file_title}.opus"
+        
+        # Path relative to the Library root (used for M3U playlist and saving)
+        rel_path = os.path.join(folder_artist, folder_album, target_filename)
+        target_path = os.path.join(NAVIDROME_LIB_DIR, rel_path)
+        
+        # Avoid overriding existing files
         if os.path.exists(target_path):
             base, ext = os.path.splitext(target_filename)
             target_filename = f"{base}_{vid_id}{ext}"
-            target_path = os.path.join(NAVIDROME_LIB_DIR, target_filename)
+            rel_path = os.path.join(folder_artist, folder_album, target_filename)
+            target_path = os.path.join(NAVIDROME_LIB_DIR, rel_path)
             
-        print(f" -> Moving to library: {target_filename}")
+        # Ensure target subdirectories exist
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            
+        print(f" -> Moving to library: {rel_path}")
         shutil.move(temp_file, target_path)
         
+        # --- Fetch and Save Lyrics ---
+        print(" -> Searching for Lyrics...")
+        lyrics = fetch_lyrics(tagged_info["title"], tagged_info["albumartist"], tagged_info["album"], tagged_info["duration"])
+        if lyrics:
+            # Save the .lrc file right next to the .opus file
+            lrc_path = os.path.splitext(target_path)[0] + ".lrc"
+            with open(lrc_path, "w", encoding="utf-8") as lf:
+                lf.write(lyrics)
+            print(" -> Lyrics found and saved!")
+        else:
+            print(" -> No lyrics found.")
+        
+        # Update and save ledger
         ledger[vid_id] = {
             "yt_title": yt_title,
             "processed_at": datetime.now().isoformat(),
-            "path": target_path,
+            "rel_path": rel_path,
             "mbid_matched": bool(mb_metadata)
         }
         save_ledger(ledger)
