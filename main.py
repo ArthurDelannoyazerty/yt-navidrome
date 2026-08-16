@@ -13,6 +13,7 @@ import acoustid
 import musicbrainzngs
 from mutagen.oggopus import OggOpus
 from mutagen.flac import Picture
+import random
 
 # --- LOAD ENVIRONMENT VARIABLES ---
 load_dotenv(find_dotenv())
@@ -28,7 +29,7 @@ FAILED_FILE = "unprocessed_urls.txt"
 ACOUSTID_DELAY = 0.5  
 MATCH_THRESHOLD = 0.6 
 
-musicbrainzngs.set_useragent("YT-Navidrome-Pipeline", "1.4", "contact@example.com")
+musicbrainzngs.set_useragent("YT-Navidrome-Pipeline", "1.5", "contact@example.com")
 
 def setup_directories():
     os.makedirs(NAVIDROME_LIB_DIR, exist_ok=True)
@@ -44,7 +45,6 @@ def save_ledger(ledger_data):
         json.dump(ledger_data, f, indent=4)
 
 def sanitize_filename(name):
-    # Removes invalid characters for file and folder paths
     return re.sub(r'[\\/*?:"<>|]', "", str(name)).strip()
 
 def get_playlist_metadata(api_key, playlist_id):
@@ -93,31 +93,92 @@ def get_playlist_items(api_key, playlist_id):
     print(f"Found {len(items)} tracks in the playlist.")
     return items
 
-def download_audio(video_id):
+def download_audio(video_id, attempt_retry=True):
     url = f"https://youtu.be/{video_id}"
     temp_filename = f"temp_{video_id}"
-    
-    ydl_opts = {
-        'format': 'bestaudio/best',
+    expected_output = f"{temp_filename}.opus"
+
+    if os.path.exists(expected_output):
+        try:
+            os.remove(expected_output)
+        except OSError:
+            pass
+
+    cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
+    postprocessors = [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'opus',
+        'preferredquality': '160',
+    }]
+
+    # Tier 1: Web / MWeb client
+    opts_tier1 = {
+        'format': 'ba/b',
         'outtmpl': f'{temp_filename}.%(ext)s',
         'noplaylist': True,
-        'extractor_args': {'youtube': ['player_client=android']},
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'opus',
-            'preferredquality': '160',
-        }],
         'quiet': True,
-        'no_warnings': True
+        'no_warnings': True,
+        'socket_timeout': 30,
+        'retries': 3,
+        'cookiefile': cookie_path if os.path.exists(cookie_path) else None,
+        'remote_components': ['ejs:github'],
+        'postprocessors': postprocessors,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web', 'mweb']
+            }
+        }
     }
 
+    # Tier 2: TV / Mobile Fallback client (less susceptible to BotGuard)
+    opts_tier2 = {
+        'format': 'ba/b',
+        'outtmpl': f'{temp_filename}.%(ext)s',
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'socket_timeout': 30,
+        'retries': 3,
+        'cookiefile': cookie_path if os.path.exists(cookie_path) else None,
+        'remote_components': ['ejs:github'],
+        'postprocessors': postprocessors,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv_embedded', 'tv', 'ios']
+            }
+        }
+    }
+
+    # Attempt Tier 1
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(opts_tier1) as ydl:
             ydl.download([url])
-        return f"{temp_filename}.opus"
+        if os.path.exists(expected_output):
+            return expected_output
     except Exception as e:
-        print(f"Download Error for {video_id}: {e}")
-        return None
+        err_msg = str(e)
+        if "Video unavailable" in err_msg:
+            print(f" -> Video unavailable/deleted: {video_id}")
+            return None
+
+    # Attempt Tier 2 (TV/iOS fallback)
+    try:
+        print(" -> Primary client flagged, trying TV/iOS fallback client...")
+        with yt_dlp.YoutubeDL(opts_tier2) as ydl:
+            ydl.download([url])
+        if os.path.exists(expected_output):
+            return expected_output
+    except Exception as e:
+        err_msg = str(e)
+        print(f" -> Fallback failed for {video_id}: {err_msg}")
+        
+        # If both tiers hit bot flag, return a special signal
+        if "Sign in to confirm" in err_msg or "bot" in err_msg.lower():
+            return "BOT_BLOCKED"
+
+    return None
+
 
 def fingerprint_audio(file_path):
     time.sleep(ACOUSTID_DELAY)
@@ -151,14 +212,13 @@ def calculate_replaygain(file_path):
     """Uses ffmpeg to calculate EBU R128 loudness and returns ReplayGain value."""
     try:
         cmd = ['ffmpeg', '-nostats', '-i', file_path, '-filter_complex', 'ebur128', '-f', 'null', '-']
-        # ffmpeg logs to stderr
         result = subprocess.run(cmd, capture_output=True, text=True)
         for line in result.stderr.splitlines():
             if "I:" in line and "LUFS" in line:
                 match = re.search(r"I:\s+([-+0-9.]+)\s+LUFS", line)
                 if match:
                     lufs = float(match.group(1))
-                    gain = -18.0 - lufs # Navidrome targets standard -18 LUFS for ReplayGain
+                    gain = -18.0 - lufs
                     return f"{gain:+.2f} dB"
     except Exception as e:
         print(f" -> ReplayGain calculation failed: {e}")
@@ -166,9 +226,8 @@ def calculate_replaygain(file_path):
 
 def fetch_lyrics(title, artist, album, duration_sec):
     """Fetch synced or plain lyrics from LRCLIB."""
-    headers = {"User-Agent": "YT-Navidrome-Pipeline/1.4"}
+    headers = {"User-Agent": "YT-Navidrome-Pipeline/1.5"}
     
-    # Attempt 1: Exact Match using duration
     try:
         url_get = "https://lrclib.net/api/get"
         params = {"track_name": title, "artist_name": artist, "album_name": album, "duration": int(duration_sec)}
@@ -178,21 +237,18 @@ def fetch_lyrics(title, artist, album, duration_sec):
             data = res.json()
             return data.get("syncedLyrics") or data.get("plainLyrics")
             
-        # Attempt 2: Fallback to searching if exact match fails
         url_search = "https://lrclib.net/api/search"
         search_params = {"q": f"{artist} {title}"}
         res_search = requests.get(url_search, params=search_params, headers=headers)
         if res_search.status_code == 200:
             results = res_search.json()
             if results and len(results) > 0:
-                # Return the top result's lyrics
                 return results[0].get("syncedLyrics") or results[0].get("plainLyrics")
     except Exception as e:
         print(f" -> Lyrics fetch error: {e}")
     return None
 
 def tag_opus_file(file_path, metadata, yt_item):
-    """Tags the opus file and returns an info dictionary to help organize the folder structure."""
     audio = OggOpus(file_path)
     audio.delete()
     
@@ -262,7 +318,6 @@ def tag_opus_file(file_path, metadata, yt_item):
         audio["album"] = info["album"]
         audio["date"] = fallback_year
 
-    # Calculate and Inject ReplayGain Loudness Data
     print(" -> Analyzing Loudness (ReplayGain)...")
     rg_gain = calculate_replaygain(file_path)
     if rg_gain:
@@ -274,7 +329,6 @@ def tag_opus_file(file_path, metadata, yt_item):
     return info
 
 def generate_m3u_playlist(playlist_name, playlist_items, ledger):
-    """Generate a playlist file pointing to the new organized folder structure."""
     safe_playlist_name = sanitize_filename(playlist_name)
     m3u_path = os.path.join(NAVIDROME_LIB_DIR, f"{safe_playlist_name}.m3u")
     
@@ -283,8 +337,6 @@ def generate_m3u_playlist(playlist_name, playlist_items, ledger):
         for item in playlist_items:
             vid_id = item["video_id"]
             if vid_id in ledger:
-                # The relative path from the ledger (e.g. Artist/Album/Song.opus)
-                # Force forward slash for universal compatibility in M3U
                 rel_path = ledger[vid_id]["rel_path"].replace("\\", "/") 
                 title = ledger[vid_id]["yt_title"]
                 
@@ -301,11 +353,9 @@ def main():
     print(f"--- Playlist: {yt_playlist_name} ---")
     
     playlist_items = get_playlist_items(YT_API_KEY, PLAYLIST_ID)
-    
-    for index, item in enumerate(playlist_items, start=1):
-        if index > 4: # Remove this line to do the whole playlist
-            break
-            
+    consecutive_downloads = 0
+
+    for index, item in enumerate(playlist_items, start=1):            
         vid_id = item["video_id"]
         yt_title = item["title"]
         
@@ -314,11 +364,28 @@ def main():
         if vid_id in ledger:
             print(f" -> Already processed. Skipping. (Path: {ledger[vid_id]['rel_path']})")
             continue
+
+        # Cooldown breather: every 30 downloads, pause for 60 seconds
+        consecutive_downloads += 1
+        if consecutive_downloads % 30 == 0:
+            print("\n☕ Taking a 60-second breather to protect YouTube session rate-limits...")
+            time.sleep(60)
+
+        # Standard randomized delay (6 to 12 seconds)
+        sleep_time = random.uniform(6.0, 12.0)
+        time.sleep(sleep_time)
             
         print(" -> Downloading audio...")
         temp_file = download_audio(vid_id)
         
-        if not temp_file or not os.path.exists(temp_file):
+        # Handle Rate Limit / Bot block with a pause & retry
+        if temp_file == "BOT_BLOCKED":
+            print("\n⚠️ YouTube Bot-Guard triggered! Pausing for 5 minutes to let the cooldown expire...")
+            time.sleep(300) # 5-minute cooldown
+            print("🔄 Resuming download after cooldown...")
+            temp_file = download_audio(vid_id) # Retry this video once
+
+        if not temp_file or not os.path.exists(str(temp_file)) or temp_file == "BOT_BLOCKED":
             print(" -> Download failed, logging to unprocessed_urls.txt")
             with open(FAILED_FILE, "a") as f:
                 f.write(f"https://youtu.be/{vid_id} - {yt_title}\n")
@@ -338,18 +405,15 @@ def main():
         
         target_filename = f"{file_artist} - {file_title}.opus"
         
-        # Path relative to the Library root (used for M3U playlist and saving)
         rel_path = os.path.join(folder_artist, folder_album, target_filename)
         target_path = os.path.join(NAVIDROME_LIB_DIR, rel_path)
         
-        # Avoid overriding existing files
         if os.path.exists(target_path):
             base, ext = os.path.splitext(target_filename)
             target_filename = f"{base}_{vid_id}{ext}"
             rel_path = os.path.join(folder_artist, folder_album, target_filename)
             target_path = os.path.join(NAVIDROME_LIB_DIR, rel_path)
             
-        # Ensure target subdirectories exist
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
             
         print(f" -> Moving to library: {rel_path}")
@@ -359,7 +423,6 @@ def main():
         print(" -> Searching for Lyrics...")
         lyrics = fetch_lyrics(tagged_info["title"], tagged_info["albumartist"], tagged_info["album"], tagged_info["duration"])
         if lyrics:
-            # Save the .lrc file right next to the .opus file
             lrc_path = os.path.splitext(target_path)[0] + ".lrc"
             with open(lrc_path, "w", encoding="utf-8") as lf:
                 lf.write(lyrics)
@@ -367,7 +430,6 @@ def main():
         else:
             print(" -> No lyrics found.")
         
-        # Update and save ledger
         ledger[vid_id] = {
             "yt_title": yt_title,
             "processed_at": datetime.now().isoformat(),
@@ -380,5 +442,6 @@ def main():
     generate_m3u_playlist(yt_playlist_name, playlist_items, ledger)
     print("Pipeline Execution Complete! 🚀")
 
+    
 if __name__ == "__main__":
     main()
