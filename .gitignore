@@ -53,3 +53,5 @@ logs/
 
 # Custom
 # Add here
+*.mp3
+*.opus
