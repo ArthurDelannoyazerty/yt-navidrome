@@ -93,7 +93,7 @@ def get_playlist_items(api_key, playlist_id):
     print(f"Found {len(items)} tracks in the playlist.")
     return items
 
-def download_audio(video_id, attempt_retry=True):
+def download_audio(video_id):
     url = f"https://youtu.be/{video_id}"
     temp_filename = f"temp_{video_id}"
     expected_output = f"{temp_filename}.opus"
@@ -105,6 +105,7 @@ def download_audio(video_id, attempt_retry=True):
             pass
 
     cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+    has_cookies = os.path.exists(cookie_path)
 
     postprocessors = [{
         'key': 'FFmpegExtractAudio',
@@ -112,8 +113,7 @@ def download_audio(video_id, attempt_retry=True):
         'preferredquality': '160',
     }]
 
-    # Tier 1: Web / MWeb client
-    opts_tier1 = {
+    base_opts = {
         'format': 'ba/b',
         'outtmpl': f'{temp_filename}.%(ext)s',
         'noplaylist': True,
@@ -121,38 +121,53 @@ def download_audio(video_id, attempt_retry=True):
         'no_warnings': True,
         'socket_timeout': 30,
         'retries': 3,
-        'cookiefile': cookie_path if os.path.exists(cookie_path) else None,
-        'remote_components': ['ejs:github'],
         'postprocessors': postprocessors,
+    }
+
+    # Attempt 1: Android Client (Fastest, least bot-flagged)
+    opts_android = {
+        **base_opts,
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'mweb']
+                'player_client': ['android', 'android_vr']
             }
         }
     }
 
-    # Tier 2: TV / Mobile Fallback client (less susceptible to BotGuard)
-    opts_tier2 = {
-        'format': 'ba/b',
-        'outtmpl': f'{temp_filename}.%(ext)s',
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'socket_timeout': 30,
-        'retries': 3,
-        'cookiefile': cookie_path if os.path.exists(cookie_path) else None,
-        'remote_components': ['ejs:github'],
-        'postprocessors': postprocessors,
+    # Attempt 2: Web / MWeb Client with Cookies
+    opts_web = {
+        **base_opts,
+        'cookiefile': cookie_path if has_cookies else None,
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embedded', 'tv', 'ios']
+                'player_client': ['web', 'mweb', 'ios']
             }
         }
     }
 
-    # Attempt Tier 1
+    # Attempt 3: iOS Client fallback without cookies
+    opts_ios = {
+        **base_opts,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios']
+            }
+        }
+    }
+
+    # Tier 1: Try Android
     try:
-        with yt_dlp.YoutubeDL(opts_tier1) as ydl:
+        with yt_dlp.YoutubeDL(opts_android) as ydl:
+            ydl.download([url])
+        if os.path.exists(expected_output):
+            return expected_output
+    except Exception:
+        pass
+
+    # Tier 2: Try Web / iOS with cookies
+    try:
+        print(" -> Primary client failed, trying Web/iOS with cookies...")
+        with yt_dlp.YoutubeDL(opts_web) as ydl:
             ydl.download([url])
         if os.path.exists(expected_output):
             return expected_output
@@ -162,23 +177,20 @@ def download_audio(video_id, attempt_retry=True):
             print(f" -> Video unavailable/deleted: {video_id}")
             return None
 
-    # Attempt Tier 2 (TV/iOS fallback)
+    # Tier 3: Try iOS without cookies
     try:
-        print(" -> Primary client flagged, trying TV/iOS fallback client...")
-        with yt_dlp.YoutubeDL(opts_tier2) as ydl:
+        print(" -> Web client failed, trying iOS fallback...")
+        with yt_dlp.YoutubeDL(opts_ios) as ydl:
             ydl.download([url])
         if os.path.exists(expected_output):
             return expected_output
     except Exception as e:
         err_msg = str(e)
-        print(f" -> Fallback failed for {video_id}: {err_msg}")
-        
-        # If both tiers hit bot flag, return a special signal
+        print(f" -> All download clients failed for {video_id}: {err_msg}")
         if "Sign in to confirm" in err_msg or "bot" in err_msg.lower():
             return "BOT_BLOCKED"
 
     return None
-
 
 def fingerprint_audio(file_path):
     time.sleep(ACOUSTID_DELAY)
@@ -365,28 +377,28 @@ def main():
             print(f" -> Already processed. Skipping. (Path: {ledger[vid_id]['rel_path']})")
             continue
 
-        # Cooldown breather: every 30 downloads, pause for 60 seconds
+        # Cooldown breather: every 25 downloads, pause for 45 seconds
         consecutive_downloads += 1
-        if consecutive_downloads % 30 == 0:
-            print("\n☕ Taking a 60-second breather to protect YouTube session rate-limits...")
-            time.sleep(60)
+        if consecutive_downloads % 25 == 0:
+            print("\n☕ Taking a 45-second breather to protect YouTube rate limits...")
+            time.sleep(45)
 
-        # Standard randomized delay (6 to 12 seconds)
-        sleep_time = random.uniform(6.0, 12.0)
+        # Standard randomized delay (4 to 8 seconds)
+        sleep_time = random.uniform(4.0, 8.0)
         time.sleep(sleep_time)
             
         print(" -> Downloading audio...")
         temp_file = download_audio(vid_id)
         
-        # Handle Rate Limit / Bot block with a pause & retry
+        # Handle Rate Limit / Bot block
         if temp_file == "BOT_BLOCKED":
-            print("\n⚠️ YouTube Bot-Guard triggered! Pausing for 5 minutes to let the cooldown expire...")
-            time.sleep(300) # 5-minute cooldown
-            print("🔄 Resuming download after cooldown...")
-            temp_file = download_audio(vid_id) # Retry this video once
+            print("\n⚠️ YouTube Bot-Guard triggered! Pausing for 2 minutes...")
+            time.sleep(120)
+            print("🔄 Retrying download once...")
+            temp_file = download_audio(vid_id)
 
         if not temp_file or not os.path.exists(str(temp_file)) or temp_file == "BOT_BLOCKED":
-            print(" -> Download failed, logging to unprocessed_urls.txt")
+            print(f" -> Download failed for {vid_id}, logging to unprocessed_urls.txt and continuing...")
             with open(FAILED_FILE, "a") as f:
                 f.write(f"https://youtu.be/{vid_id} - {yt_title}\n")
             continue
@@ -442,6 +454,5 @@ def main():
     generate_m3u_playlist(yt_playlist_name, playlist_items, ledger)
     print("Pipeline Execution Complete! 🚀")
 
-    
 if __name__ == "__main__":
     main()
