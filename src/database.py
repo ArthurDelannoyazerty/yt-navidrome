@@ -54,6 +54,54 @@ def get_user_playlists(user_id: str):
     conn.close()
     return [r[0] for r in rows]
 
+# Append these functions to src/database.py
+
+def get_dashboard_tracks(user_id: str = None, limit: int = 100):
+    """Fetches the latest tracks from the database."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    
+    if user_id:
+        c.execute('''
+            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id
+            FROM tracks WHERE user_id = ?
+            ORDER BY rowid DESC LIMIT ?
+        ''', (user_id, limit))
+    else:
+        c.execute('''
+            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id
+            FROM tracks
+            ORDER BY rowid DESC LIMIT ?
+        ''', (limit,))
+        
+    rows = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return rows
+
+def get_track_by_uuid(track_uuid: str):
+    """Fetches a single track's data."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT * FROM tracks WHERE track_uuid = ?', (track_uuid,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_failed_tracks(user_id: str = None):
+    """Fetches all tracks that failed or were blocked by bot checks."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    if user_id:
+        c.execute("SELECT * FROM tracks WHERE user_id = ? AND status IN ('FAILED', 'BOT_BLOCKED')", (user_id,))
+    else:
+        c.execute("SELECT * FROM tracks WHERE status IN ('FAILED', 'BOT_BLOCKED')")
+    rows = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return rows
+
 def add_track_to_queue(item: dict, user_id: str):
     """Adds a resolved track dictionary to SQLite."""
     conn = sqlite3.connect(DB_FILE)

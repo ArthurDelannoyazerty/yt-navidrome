@@ -50,6 +50,50 @@ async def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), 
     background_tasks.add_task(unpack_and_enqueue, url_list, user_id)
     return {"message": f"Processing {len(url_list)} URL(s) in the background. Check logs."}
 
+
+@app.get("/api/tracks")
+async def get_tracks(user_id: str = None):
+    tracks = database.get_dashboard_tracks(user_id=user_id)
+    # Compute summary stats
+    stats = {"total": len(tracks), "completed": 0, "downloading": 0, "failed": 0}
+    for t in tracks:
+        status = t.get("status")
+        if status == "COMPLETED":
+            stats["completed"] += 1
+        elif status in ("DOWNLOADING", "PENDING"):
+            stats["downloading"] += 1
+        elif status in ("FAILED", "BOT_BLOCKED"):
+            stats["failed"] += 1
+    return {"tracks": tracks, "stats": stats}
+
+@app.post("/api/retry/{track_uuid}")
+async def retry_track(track_uuid: str, background_tasks: BackgroundTasks):
+    track = database.get_track_by_uuid(track_uuid)
+    if not track:
+        return {"error": "Track not found."}
+    
+    item = {
+        "url": track["source_url"],
+        "title": track["title"],
+        "playlist_name": track["playlist_name"],
+        "discovery_date": track["discovery_date"]
+    }
+    background_tasks.add_task(process_track, item, track_uuid, track["user_id"])
+    return {"message": f"Retrying {track['title']}"}
+
+@app.post("/api/retry-all-failed")
+async def retry_all_failed(background_tasks: BackgroundTasks, user_id: str = None):
+    failed_tracks = database.get_failed_tracks(user_id=user_id)
+    for track in failed_tracks:
+        item = {
+            "url": track["source_url"],
+            "title": track["title"],
+            "playlist_name": track["playlist_name"],
+            "discovery_date": track["discovery_date"]
+        }
+        background_tasks.add_task(process_track, item, track["track_uuid"], track["user_id"])
+    return {"message": f"Retrying {len(failed_tracks)} failed tracks."}
+
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
     await websocket.accept()
