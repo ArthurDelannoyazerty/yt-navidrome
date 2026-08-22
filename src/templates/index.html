@@ -137,7 +137,9 @@
                         <td style="color: #f87171; font-size: 12px;">${t.error_msg || '—'}</td>
                         <td>
                             ${['FAILED', 'BOT_BLOCKED'].includes(t.status) ? 
-                                `<button class="btn-sm" onclick="retryTrack('${t.track_uuid}')">Retry</button>` : '—'}
+                                `<button class="btn-sm" onclick="retryTrack('${t.track_uuid}')">Retry</button>` : ''}
+                            ${t.status === 'COMPLETED' ? 
+                                `<button class="btn-sm" style="background: #ca8a04;" onclick="forceRetryTrack('${t.track_uuid}')">🔄 Force Retry</button>` : ''}
                         </td>
                     </tr>
                 `).join('');
@@ -149,6 +151,13 @@
         async function retryTrack(uuid) {
             await fetch(`/api/retry/${uuid}`, { method: 'POST' });
             refreshDashboard();
+        }
+
+        async function forceRetryTrack(uuid) {
+            if (confirm("Are you sure? This will delete the current file and redownload it.")) {
+                await fetch(`/api/force-retry/${uuid}`, { method: 'POST' });
+                refreshDashboard();
+            }
         }
 
         async function retryAllFailed() {

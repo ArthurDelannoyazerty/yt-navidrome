@@ -91,6 +91,8 @@ def calculate_replaygain(file_path: str):
         print(f"ReplayGain calculation failed: {e}")
     return None
 
+
+
 def fetch_lyrics(title: str, artist: str, album: str, duration_sec: float):
     """Retrieves synced or plain lyrics from LRCLIB."""
     headers = {"User-Agent": "Navidrome-Ingestor/2.0"}
@@ -117,18 +119,49 @@ def fetch_lyrics(title: str, artist: str, album: str, duration_sec: float):
 
 # --- RESILIENT DOWNLOADER WITH TENACITY ---
 
+def download_via_cobalt(url: str, track_uuid: str):
+    """Fallback engine using the Cobalt API to bypass strict IP blocks."""
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    payload = {
+        "url": url,
+        "isAudioOnly": True,
+        "aFormat": "opus"
+    }
+    try:
+        # Request a download tunnel/redirect from Cobalt
+        res = requests.post("https://api.cobalt.tools/", json=payload, headers=headers, timeout=15)
+        res.raise_for_status()
+        data = res.json()
+        
+        dl_url = data.get("url")
+        if not dl_url:
+            raise Exception(f"Cobalt API returned no URL: {data}")
+            
+        temp_filename = f"temp_{track_uuid}.opus"
+        # Download the actual file stream
+        with requests.get(dl_url, stream=True) as r:
+            r.raise_for_status()
+            with open(temp_filename, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        return temp_filename
+    except Exception as e:
+        raise DownloadBotError(f"Cobalt fallback failed: {e}")
+
+
 @retry(
     stop=stop_after_attempt(3), 
     wait=wait_exponential(multiplier=3, min=3, max=15),
     retry=retry_if_exception_type(DownloadNetworkError)
 )
 def download_audio_file(url: str, track_uuid: str):
-    """Downloads audio via yt-dlp with network retries and error discrimination."""
+    """Downloads audio via yt-dlp. If blocked by YouTube, falls back to Cobalt."""
     temp_filename = f"temp_{track_uuid}"
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': f'{temp_filename}.%(ext)s',
         'noplaylist': True,
+        'username': 'oauth2',  # Triggers device flow in terminal once
         'extractor_args': {'youtube': ['player_client=android']},
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -145,8 +178,10 @@ def download_audio_file(url: str, track_uuid: str):
         return f"{temp_filename}.opus"
     except yt_dlp.utils.DownloadError as e:
         err = str(e).lower()
-        if "sign in to confirm you are not a bot" in err or "403" in err or "http error 429" in err:
-            raise DownloadBotError("YouTube bot protection triggered.")
+        if "sign in" in err or "403" in err or "429" in err or "bot" in err:
+            print(f"[{track_uuid[:6]}] 🛑 yt-dlp blocked. Falling back to Cobalt API...")
+            return download_via_cobalt(url, track_uuid)
+            
         elif "unavailable" in err or "private" in err or "removed" in err:
             raise DownloadUnavailableError("Video unavailable or removed.")
         else:

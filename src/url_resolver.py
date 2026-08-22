@@ -99,7 +99,7 @@ class URLResolver:
             res = requests.get(f"https://api.spotify.com/v1/tracks/{track_id}", headers=headers).json()
             artists = ", ".join([a["name"] for a in res.get("artists", [])])
             title = res.get("name", "")
-            search_query = f"ytsearch1:{artists} - {title}"
+            search_query = f"ytmsearch1:{artists} - {title}"
             return [{
                 "url": search_query,
                 "title": f"{artists} - {title}",

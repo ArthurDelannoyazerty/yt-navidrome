@@ -126,3 +126,15 @@ def update_track_status(track_uuid, status, file_path=None, error_msg=None):
               (status, file_path, error_msg, track_uuid))
     conn.commit()
     conn.close()
+
+def reset_track_for_redownload(track_uuid: str):
+    """Resets a track to PENDING and clears errors/paths for a fresh run."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        UPDATE tracks 
+        SET status='PENDING', error_msg=NULL, file_path=NULL 
+        WHERE track_uuid=?
+    ''', (track_uuid,))
+    conn.commit()
+    conn.close()

@@ -81,6 +81,32 @@ async def retry_track(track_uuid: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(process_track, item, track_uuid, track["user_id"])
     return {"message": f"Retrying {track['title']}"}
 
+@app.post("/api/force-retry/{track_uuid}")
+async def force_retry_track(track_uuid: str, background_tasks: BackgroundTasks):
+    """Deletes existing local file (if any) and forces a fresh pipeline run."""
+    track = database.get_track_by_uuid(track_uuid)
+    if not track:
+        return {"error": "Track not found."}
+    
+    # Clean up old file if it exists
+    if track.get("file_path") and os.path.exists(track["file_path"]):
+        try:
+            os.remove(track["file_path"])
+        except OSError:
+            pass
+
+    # Reset DB status to PENDING
+    database.reset_track_for_redownload(track_uuid)
+    
+    item = {
+        "url": track["source_url"],
+        "title": track["title"],
+        "playlist_name": track["playlist_name"],
+        "discovery_date": track["discovery_date"]
+    }
+    background_tasks.add_task(process_track, item, track_uuid, track["user_id"])
+    return {"message": f"Force retrying {track['title']}"}
+
 @app.post("/api/retry-all-failed")
 async def retry_all_failed(background_tasks: BackgroundTasks, user_id: str = None):
     failed_tracks = database.get_failed_tracks(user_id=user_id)
