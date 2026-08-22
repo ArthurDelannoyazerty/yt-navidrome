@@ -25,6 +25,35 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Append these functions to src/database.py
+
+def get_completed_playlist_tracks(playlist_name: str, user_id: str):
+    """Fetches all completed tracks for a specific playlist in insertion/discovery order."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        SELECT title, file_path 
+        FROM tracks 
+        WHERE playlist_name = ? AND user_id = ? AND status = 'COMPLETED' AND file_path IS NOT NULL
+        ORDER BY rowid ASC
+    ''', (playlist_name, user_id))
+    rows = c.fetchall()
+    conn.close()
+    return [{"title": r[0], "file_path": r[1]} for r in rows]
+
+def get_user_playlists(user_id: str):
+    """Returns a list of all distinct playlist names for a user."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        SELECT DISTINCT playlist_name 
+        FROM tracks 
+        WHERE user_id = ? AND playlist_name IS NOT NULL
+    ''', (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
 def add_track_to_queue(item: dict, user_id: str):
     """Adds a resolved track dictionary to SQLite."""
     conn = sqlite3.connect(DB_FILE)
