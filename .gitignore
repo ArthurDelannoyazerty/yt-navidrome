@@ -57,3 +57,6 @@ logs/
 *.opus
 
 ledger.json
+
+cookies.txt
+unprocessed_urls.txt
