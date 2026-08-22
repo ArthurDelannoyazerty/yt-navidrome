@@ -394,6 +394,14 @@ async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: di
         audio["NAVIDROME_PIPELINE_ID"] = [track_uuid]
         audio["DISCOVERY_DATE"] = [discovery_date]
 
+        # --- PERMANENT PERSONAL METADATA ---
+        audio["comment"] = [f"Discovery Date: {discovery_date}"]
+        audio["DISCOVERY_DATE"] = [discovery_date]
+        audio["NAVIDROME_PIPELINE_ID"] = [track_uuid]
+        audio["SOURCE_URL"] = [track_info.get("url", "")]
+        if track_info.get("playlist_name"):
+            audio["SOURCE_PLAYLIST"] = [track_info["playlist_name"]]
+
         # Embed ReplayGain
         rg_gain = await asyncio.to_thread(calculate_replaygain, temp_file)
         if rg_gain:

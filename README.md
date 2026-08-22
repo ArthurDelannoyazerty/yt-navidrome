@@ -9,5 +9,3 @@ for the yt api keys, go to https://console.cloud.google.com , create a project, 
 
 
 
-nix-shell -p deno ffmpeg chromaprint uv --run 'uv run --with yt-dlp --with pyacoustid --with musicbrainzngs --with mutagen --with requests --with python-dotenv python main.py'
-
