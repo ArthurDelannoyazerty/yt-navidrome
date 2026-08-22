@@ -82,10 +82,13 @@
 
     <!-- Dashboard & Table -->
     <div class="panel">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
             <h3>Queue & Track Ledger</h3>
-            <button class="btn-sm" onclick="retryAllFailed()" style="background: #dc2626;">Retry All Failed</button>
-        </div>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn-sm" onclick="batchApproveBest()" style="background: #059669;">⚡ Auto-Approve All (Best)</button>
+                <button class="btn-sm" onclick="batchApproveOriginal()" style="background: #4b5563;">🏷️ Keep Original All</button>
+                <button class="btn-sm" onclick="retryAllFailed()" style="background: #dc2626;">Retry All Failed</button>
+            </div>
 
         <div class="stats-bar">
             <div class="stat-card">Total<div class="stat-val" id="stat-total">0</div></div>
@@ -301,6 +304,20 @@
             const ingestData = await ingestRes.json();
             document.getElementById("statusMsg").innerText = "Sync triggered! Check logs.";
             refreshDashboard();
+        }
+
+        async function batchApproveBest() {
+            if (confirm("Auto-approve all pending tracks with their top MusicBrainz match?")) {
+                await fetch('/api/batch-approve-best', { method: 'POST' });
+                refreshDashboard();
+            }
+        }
+
+        async function batchApproveOriginal() {
+            if (confirm("Apply clean YouTube titles to all pending tracks (bypass MusicBrainz)?")) {
+                await fetch('/api/batch-approve-original', { method: 'POST' });
+                refreshDashboard();
+            }
         }
 
         // Initialize UI

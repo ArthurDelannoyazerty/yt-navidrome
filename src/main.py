@@ -164,6 +164,49 @@ async def approve_track(track_uuid: str, background_tasks: BackgroundTasks, requ
     database.update_track_status(track_uuid, 'DOWNLOADING', error_msg="Applying Tags...")
     return {"message": "Approval accepted. Tagging and moving track."}
 
+
+@app.post("/api/batch-approve-best")
+async def batch_approve_best(background_tasks: BackgroundTasks, user_id: str = None):
+    """Auto-approves all pending tracks using their highest-scoring candidate."""
+    conn = database.sqlite3.connect(database.DB_FILE)
+    conn.row_factory = database.sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM tracks WHERE status = 'NEEDS_APPROVAL'")
+    tracks = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    from worker import process_track_phase_2
+    count = 0
+    for t in tracks:
+        try:
+            choices = json.loads(t.get("metadata_choices") or "[]")
+            chosen_metadata = choices[0]["raw_data"] if choices else None
+            background_tasks.add_task(process_track_phase_2, t["track_uuid"], t["file_path"], chosen_metadata, t)
+            database.update_track_status(t["track_uuid"], 'DOWNLOADING', error_msg="Batch Approving...")
+            count += 1
+        except Exception:
+            pass
+
+    return {"message": f"Approving {count} track(s) with best match."}
+
+@app.post("/api/batch-approve-original")
+async def batch_approve_original(background_tasks: BackgroundTasks, user_id: str = None):
+    """Bypasses MusicBrainz for all pending tracks and applies original clean YouTube titles."""
+    conn = database.sqlite3.connect(database.DB_FILE)
+    conn.row_factory = database.sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM tracks WHERE status = 'NEEDS_APPROVAL'")
+    tracks = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    from worker import process_track_phase_2
+    for t in tracks:
+        background_tasks.add_task(process_track_phase_2, t["track_uuid"], t["file_path"], None, t)
+        database.update_track_status(t["track_uuid"], 'DOWNLOADING', error_msg="Batch Approving...")
+
+    return {"message": f"Bypassing MusicBrainz for {len(tracks)} track(s)."}
+
+
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
     await websocket.accept()
