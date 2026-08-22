@@ -51,25 +51,29 @@ class URLResolver:
         items = []
         today = datetime.now().strftime("%Y-%m-%d")
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                return []
-            
-            playlist_title = info.get("title", "YouTube_Playlist")
-            entries = info.get("entries", [])
-            
-            for entry in entries:
-                if not entry:
-                    continue
-                video_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
-                items.append({
-                    "url": video_url,
-                    "title": entry.get("title", "Unknown Title"),
-                    "playlist_name": playlist_title,
-                    "discovery_date": today
-                })
-        return items
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    return []
+                
+                playlist_title = info.get("title", "YouTube_Playlist")
+                entries = info.get("entries", [])
+                
+                for entry in entries:
+                    if not entry:
+                        continue
+                    video_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
+                    items.append({
+                        "url": video_url,
+                        "title": entry.get("title", "Unknown Title"),
+                        "playlist_name": playlist_title,
+                        "discovery_date": today
+                    })
+            return items
+        except Exception as e:
+            # We will catch this in main.py to log it
+            raise Exception(f"YouTube/yt-dlp error: {str(e)}")
 
     @staticmethod
     def _get_spotify_token():

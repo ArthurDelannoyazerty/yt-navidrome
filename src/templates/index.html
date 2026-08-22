@@ -6,17 +6,17 @@
     <style>
         * { box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #0f111a; color: #e1e4ea; padding: 24px; }
-        h2, h3 { margin-top: 0; color: #ffffff; }
+        h2, h3, h4 { margin-top: 0; color: #ffffff; margin-bottom: 10px;}
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
         .panel { background: #1a1d27; padding: 20px; border-radius: 10px; border: 1px solid #282c3f; }
-        textarea { width: 100%; height: 160px; background: #0f111a; border: 1px solid #3b4261; color: #fff; padding: 12px; border-radius: 6px; resize: vertical; font-family: monospace; }
+        textarea { width: 100%; height: 80px; background: #0f111a; border: 1px solid #3b4261; color: #fff; padding: 12px; border-radius: 6px; resize: vertical; font-family: monospace; }
         select, button { padding: 10px 16px; border-radius: 6px; border: none; font-weight: bold; cursor: pointer; }
         select { background: #282c3f; color: white; width: 100%; margin-bottom: 12px; }
         button.btn-primary { background: #4f46e5; color: white; width: 100%; margin-top: 8px; }
         button.btn-primary:hover { background: #4338ca; }
         button.btn-sm { padding: 4px 10px; font-size: 12px; background: #374151; color: white; }
         button.btn-sm:hover { background: #4b5563; }
-        #logs { background: #08090d; color: #10b981; height: 230px; overflow-y: scroll; padding: 12px; font-family: monospace; font-size: 13px; border-radius: 6px; white-space: pre-wrap; }
+        #logs { background: #08090d; color: #10b981; height: 350px; overflow-y: scroll; padding: 12px; font-family: monospace; font-size: 13px; border-radius: 6px; white-space: pre-wrap; }
         
         /* Stats Bar */
         .stats-bar { display: flex; gap: 15px; margin-bottom: 15px; }
@@ -31,6 +31,7 @@
         .badge-COMPLETED { background: #065f46; color: #34d399; }
         .badge-DOWNLOADING, .badge-PENDING { background: #1e40af; color: #60a5fa; }
         .badge-FAILED, .badge-BOT_BLOCKED { background: #7f1d1d; color: #f87171; }
+        .badge-NEEDS_APPROVAL { background: #b45309; color: #fde047; }
     </style>
 </head>
 <body>
@@ -39,18 +40,37 @@
     <div class="grid">
         <!-- Ingestion Form -->
         <div class="panel">
-            <h3>Add Tracks or Playlists</h3>
-            <form id="ingestForm">
-                <label>Target User (Subfolder):</label>
-                <select name="user_id">
-                    <option value="admin">admin</option>
-                    <option value="guest">guest</option>
-                </select>
-                <label>YouTube / Spotify URLs (One per line):</label>
-                <textarea name="urls" placeholder="https://www.youtube.com/playlist?list=...&#10;https://open.spotify.com/playlist/..."></textarea>
-                <button type="submit" class="btn-primary">Validate & Ingest</button>
+            <label style="font-weight: bold; color: #9ca3af;">Target User Subfolder:</label>
+            <select id="currentUser" onchange="loadMonitoredUrls()" style="margin-bottom: 20px;">
+                <option value="admin">admin</option>
+                <option value="guest">guest</option>
+            </select>
+
+            <!-- Quick Add -->
+            <h4>⚡ Quick Ingest (One-off)</h4>
+            <form id="quickIngestForm" style="margin-bottom: 25px;">
+                <textarea name="urls" placeholder="Paste single YouTube / Spotify URLs here..."></textarea>
+                <button type="submit" class="btn-primary">Ingest Now</button>
             </form>
-            <p id="statusMsg" style="color: #60a5fa; margin-top: 10px;"></p>
+
+            <hr style="border: 1px solid #282c3f; margin-bottom: 20px;">
+
+            <!-- Monitored URLs -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h4 style="margin: 0;">📡 Monitored Playlists</h4>
+                <button onclick="syncMonitoredUrls()" class="btn-sm" style="background: #4f46e5;">🔄 Sync All Now</button>
+            </div>
+            
+            <form id="addUrlForm" style="display: flex; gap: 10px; margin-bottom: 15px;">
+                <input type="text" name="label" placeholder="Label (e.g. Chill Mix)" style="width: 25%; padding: 8px; border-radius: 4px; background:#0f111a; border: 1px solid #3b4261; color:white;" required>
+                <input type="text" name="url" placeholder="https://youtube.com/playlist?list=..." style="flex: 1; padding: 8px; border-radius: 4px; background:#0f111a; border: 1px solid #3b4261; color:white;" required>
+                <button type="submit" class="btn-sm" style="background: #10b981;">Save</button>
+            </form>
+
+            <div id="urlList" style="max-height: 150px; overflow-y: auto; background: #08090d; padding: 10px; border-radius: 6px;">
+                <!-- Loaded via JS -->
+            </div>
+            <p id="statusMsg" style="color: #60a5fa; margin-top: 10px; font-size: 13px;"></p>
         </div>
 
         <!-- Live WebSocket Logs -->
@@ -92,17 +112,6 @@
     </div>
 
     <script>
-        // --- FORM SUBMIT ---
-        document.getElementById("ingestForm").onsubmit = async (e) => {
-            e.preventDefault();
-            const formData = new FormData(e.target);
-            const res = await fetch('/ingest', { method: 'POST', body: formData });
-            const data = await res.json();
-            document.getElementById("statusMsg").innerText = data.message;
-            e.target.reset();
-            refreshDashboard();
-        };
-
         // --- WEBSOCKET LOGS ---
         const ws = new WebSocket(`ws://${window.location.host}/ws/logs`);
         const logBox = document.getElementById("logs");
@@ -111,7 +120,23 @@
             logBox.scrollTop = logBox.scrollHeight;
         };
 
+        // --- QUICK INGEST FORM ---
+        document.getElementById("quickIngestForm").onsubmit = async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            formData.append("user_id", document.getElementById("currentUser").value);
+            
+            const res = await fetch('/ingest', { method: 'POST', body: formData });
+            const data = await res.json();
+            document.getElementById("statusMsg").innerText = data.message;
+            e.target.reset();
+            refreshDashboard();
+        };
+
         // --- DASHBOARD TABLE & RETRIES ---
+        // Global store to hold the JSON choices temporarily in the browser
+        window.pendingChoices = {};
+
         async function refreshDashboard() {
             try {
                 const res = await fetch('/api/tracks');
@@ -128,24 +153,73 @@
                     return;
                 }
 
-                tbody.innerHTML = tracks.map(t => `
-                    <tr>
-                        <td><strong>${t.title || 'Unknown'}</strong><br><small style="color: #6b7280;">${t.source_url}</small></td>
-                        <td>${t.playlist_name || '—'}</td>
-                        <td>${t.discovery_date || '—'}</td>
-                        <td><span class="badge badge-${t.status}">${t.status}</span></td>
-                        <td style="color: #f87171; font-size: 12px;">${t.error_msg || '—'}</td>
-                        <td>
-                            ${['FAILED', 'BOT_BLOCKED'].includes(t.status) ? 
-                                `<button class="btn-sm" onclick="retryTrack('${t.track_uuid}')">Retry</button>` : ''}
-                            ${t.status === 'COMPLETED' ? 
-                                `<button class="btn-sm" style="background: #ca8a04;" onclick="forceRetryTrack('${t.track_uuid}')">🔄 Force Retry</button>` : ''}
-                        </td>
-                    </tr>
-                `).join('');
+                tbody.innerHTML = tracks.map(t => {
+                    let actionHTML = '—';
+                    
+                    if (['FAILED', 'BOT_BLOCKED'].includes(t.status)) {
+                        actionHTML = `<button class="btn-sm" onclick="retryTrack('${t.track_uuid}')">Retry</button>`;
+                    } else if (t.status === 'COMPLETED') {
+                        actionHTML = `<button class="btn-sm" style="background: #ca8a04;" onclick="forceRetryTrack('${t.track_uuid}')">🔄 Redownload</button>`;
+                    } else if (t.status === 'NEEDS_APPROVAL') {
+                        try {
+                            const choices = JSON.parse(t.metadata_choices || '[]');
+                            window.pendingChoices[t.track_uuid] = choices; // Store for later
+                            
+                            let options = choices.map((c, idx) => 
+                                `<option value='${idx}'>${c.artist} - ${c.title} (${c.album})</option>`
+                            ).join('');
+                            
+                            // Add a fallback in case AcoustID totally hallucinated
+                            options += `<option value='fallback'>⚠️ Keep Original YT Title (No Match)</option>`;
+
+                            actionHTML = `
+                                <div style="display:flex; flex-direction:column; gap:5px; width: 220px;">
+                                    <select id="approve-select-${t.track_uuid}" style="font-size:11px; padding:4px; margin:0;">
+                                        ${options}
+                                    </select>
+                                    <button class="btn-sm" style="background: #10b981;" onclick="approveTrack('${t.track_uuid}')">✅ Validate</button>
+                                </div>
+                            `;
+                        } catch (e) {
+                            actionHTML = `<span style="color:red; font-size:12px;">Data Error</span>`;
+                        }
+                    }
+
+                    return `
+                        <tr>
+                            <td><strong>${t.title || 'Unknown'}</strong><br><small style="color: #6b7280;">${t.source_url}</small></td>
+                            <td>${t.playlist_name || '—'}</td>
+                            <td>${t.discovery_date || '—'}</td>
+                            <td><span class="badge badge-${t.status}">${t.status.replace('_', ' ')}</span></td>
+                            <td style="color: #f87171; font-size: 12px;">${t.error_msg || '—'}</td>
+                            <td>${actionHTML}</td>
+                        </tr>
+                    `;
+                }).join('');
             } catch (err) {
                 console.error("Dashboard refresh error:", err);
             }
+        }
+
+        async function approveTrack(uuid) {
+            const selectEl = document.getElementById(`approve-select-${uuid}`);
+            const selectedIdx = selectEl.value;
+            let chosenMetadata = null;
+            
+            // If they didn't choose the "fallback", extract the raw MusicBrainz JSON data
+            if (selectedIdx !== 'fallback') {
+                chosenMetadata = window.pendingChoices[uuid][selectedIdx].raw_data;
+            }
+            
+            await fetch(`/api/approve/${uuid}`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(chosenMetadata)
+            });
+            
+            // Remove from global store and refresh UI immediately
+            delete window.pendingChoices[uuid];
+            refreshDashboard();
         }
 
         async function retryTrack(uuid) {
@@ -164,8 +238,66 @@
             await fetch('/api/retry-all-failed', { method: 'POST' });
             refreshDashboard();
         }
+        
+        // --- MONITORED URLS SYSTEM ---
+        async function loadMonitoredUrls() {
+            const userId = document.getElementById("currentUser").value;
+            const res = await fetch(`/api/monitored-urls/${userId}`);
+            const data = await res.json();
+            const list = document.getElementById("urlList");
+            
+            if (data.urls.length === 0) {
+                list.innerHTML = "<small style='color: #6b7280;'>No URLs monitored yet.</small>";
+                return;
+            }
+            
+            list.innerHTML = data.urls.map(u => `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #282c3f;">
+                    <div>
+                        <strong style="color: #e1e4ea;">${u.label}</strong><br>
+                        <small style="color: #6b7280;">${u.url}</small>
+                    </div>
+                    <button class="btn-sm" style="background: #7f1d1d;" onclick="deleteUrl(${u.id})">Del</button>
+                </div>
+            `).join("");
+        }
 
-        // Auto-refresh the dashboard table every 4 seconds
+        document.getElementById("addUrlForm").onsubmit = async (e) => {
+            e.preventDefault();
+            const userId = document.getElementById("currentUser").value;
+            const formData = new FormData(e.target);
+            formData.append("user_id", userId);
+            
+            await fetch('/api/monitored-urls', { method: 'POST', body: formData });
+            e.target.reset();
+            loadMonitoredUrls();
+        };
+
+        async function deleteUrl(id) {
+            await fetch(`/api/monitored-urls/${id}`, { method: 'DELETE' });
+            loadMonitoredUrls();
+        }
+
+        async function syncMonitoredUrls() {
+            const userId = document.getElementById("currentUser").value;
+            const res = await fetch(`/api/monitored-urls/${userId}`);
+            const data = await res.json();
+            
+            if (data.urls.length === 0) return alert("No URLs to sync!");
+            
+            const urlsString = data.urls.map(u => u.url).join("\n");
+            const formData = new FormData();
+            formData.append("user_id", userId);
+            formData.append("urls", urlsString);
+            
+            const ingestRes = await fetch('/ingest', { method: 'POST', body: formData });
+            const ingestData = await ingestRes.json();
+            document.getElementById("statusMsg").innerText = "Sync triggered! Check logs.";
+            refreshDashboard();
+        }
+
+        // Initialize UI
+        loadMonitoredUrls();
         setInterval(refreshDashboard, 4000);
         refreshDashboard();
     </script>

@@ -6,9 +6,12 @@ DB_FILE = "library.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    
+    # Users Table
     c.execute('''CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT)''')
     c.execute("INSERT OR IGNORE INTO users (id, username) VALUES ('1', 'admin')")
     
+    # Tracks Table (with metadata_choices)
     c.execute('''
         CREATE TABLE IF NOT EXISTS tracks (
             track_uuid TEXT PRIMARY KEY,
@@ -16,12 +19,24 @@ def init_db():
             title TEXT,
             playlist_name TEXT,
             discovery_date TEXT,
-            status TEXT,          -- PENDING, DOWNLOADING, COMPLETED, FAILED, BOT_BLOCKED
+            status TEXT,          -- PENDING, DOWNLOADING, COMPLETED, FAILED, BOT_BLOCKED, NEEDS_APPROVAL
             error_msg TEXT,
             file_path TEXT,
+            metadata_choices TEXT, -- Stores JSON string of MusicBrainz options
             user_id TEXT
         )
     ''')
+    
+    # Monitored URLs Table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS monitored_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            url TEXT UNIQUE,
+            label TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -64,13 +79,13 @@ def get_dashboard_tracks(user_id: str = None, limit: int = 100):
     
     if user_id:
         c.execute('''
-            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id
+            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices
             FROM tracks WHERE user_id = ?
             ORDER BY rowid DESC LIMIT ?
         ''', (user_id, limit))
     else:
         c.execute('''
-            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id
+            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices
             FROM tracks
             ORDER BY rowid DESC LIMIT ?
         ''', (limit,))
@@ -138,3 +153,41 @@ def reset_track_for_redownload(track_uuid: str):
     ''', (track_uuid,))
     conn.commit()
     conn.close()
+
+def get_monitored_urls(user_id: str):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, url, label FROM monitored_urls WHERE user_id = ?', (user_id,))
+    rows = [{"id": r[0], "url": r[1], "label": r[2]} for r in c.fetchall()]
+    conn.close()
+    return rows
+
+def add_monitored_url(user_id: str, url: str, label: str):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute('INSERT INTO monitored_urls (user_id, url, label) VALUES (?, ?, ?)', (user_id, url, label))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass # Already exists
+    finally:
+        conn.close()
+
+def delete_monitored_url(url_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('DELETE FROM monitored_urls WHERE id = ?', (url_id,))
+    conn.commit()
+    conn.close()
+
+def update_track_metadata_choices(track_uuid, choices_json, temp_file_path):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        UPDATE tracks 
+        SET status='NEEDS_APPROVAL', metadata_choices=?, file_path=? 
+        WHERE track_uuid=?
+    ''', (choices_json, temp_file_path, track_uuid))
+    conn.commit()
+    conn.close()
+

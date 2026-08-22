@@ -9,7 +9,7 @@ import requests
 from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from playlist_sync import sync_playlist_file
-
+import json
 import yt_dlp
 import acoustid
 import musicbrainzngs
@@ -121,16 +121,25 @@ def fetch_lyrics(title: str, artist: str, album: str, duration_sec: float):
 
 def download_via_cobalt(url: str, track_uuid: str):
     """Fallback engine using the Cobalt API to bypass strict IP blocks."""
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    headers = {
+        "Accept": "application/json", 
+        "Content-Type": "application/json",
+        "User-Agent": "Navidrome-Ingestor/2.0"
+    }
+    # Updated to Cobalt's v11 API Schema
     payload = {
         "url": url,
-        "isAudioOnly": True,
-        "aFormat": "opus"
+        "downloadMode": "audio",
+        "audioFormat": "opus"
     }
     try:
         # Request a download tunnel/redirect from Cobalt
         res = requests.post("https://api.cobalt.tools/", json=payload, headers=headers, timeout=15)
-        res.raise_for_status()
+        
+        # Capture exact error text if Cobalt rejects us (instead of a generic 400 error)
+        if not res.ok:
+            raise Exception(f"HTTP {res.status_code} - {res.text}")
+            
         data = res.json()
         
         dl_url = data.get("url")
@@ -152,7 +161,8 @@ def download_via_cobalt(url: str, track_uuid: str):
 @retry(
     stop=stop_after_attempt(3), 
     wait=wait_exponential(multiplier=3, min=3, max=15),
-    retry=retry_if_exception_type(DownloadNetworkError)
+    retry=retry_if_exception_type(DownloadNetworkError),
+    reraise=True  
 )
 def download_audio_file(url: str, track_uuid: str):
     """Downloads audio via yt-dlp. If blocked by YouTube, falls back to Cobalt."""
@@ -161,8 +171,8 @@ def download_audio_file(url: str, track_uuid: str):
         'format': 'bestaudio/best',
         'outtmpl': f'{temp_filename}.%(ext)s',
         'noplaylist': True,
-        'username': 'oauth2',  # Triggers device flow in terminal once
-        'extractor_args': {'youtube': ['player_client=android']},
+        # 'tv,mweb' is currently the most robust anti-403 bypass for yt-dlp
+        'extractor_args': {'youtube': ['client=tv,mweb']},
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'opus',
@@ -178,38 +188,114 @@ def download_audio_file(url: str, track_uuid: str):
         return f"{temp_filename}.opus"
     except yt_dlp.utils.DownloadError as e:
         err = str(e).lower()
-        if "sign in" in err or "403" in err or "429" in err or "bot" in err:
+        if "sign in" in err or "403" in err or "429" in err or "bot" in err or "oauth" in err:
             print(f"[{track_uuid[:6]}] 🛑 yt-dlp blocked. Falling back to Cobalt API...")
             return download_via_cobalt(url, track_uuid)
-            
         elif "unavailable" in err or "private" in err or "removed" in err:
             raise DownloadUnavailableError("Video unavailable or removed.")
         else:
             raise DownloadNetworkError(f"Network error during download: {e}")
 
-# --- MAIN TASK PROCESSING PIPELINE ---
 
+def get_consensus_metadata(file_path: str, query_title: str):
+    """
+    Returns a tuple: (is_consensus_reached: bool, metadata_result)
+    metadata_result is either a single dict (if consensus) or a list of dicts (if conflicting).
+    """
+    time.sleep(ACOUSTID_DELAY)
+    candidates = []
+    
+    # 1. Try AcoustID
+    try:
+        results = acoustid.match(ACOUSTID_API_KEY, file_path)
+        for score, recording_id, title, artist in results:
+            if score >= MATCH_THRESHOLD:
+                mb_data = musicbrainzngs.get_recording_by_id(recording_id, includes=["artists", "releases"])
+                rec = mb_data.get('recording')
+                if rec:
+                    candidates.append({
+                        "id": rec["id"],
+                        "title": rec.get("title", title),
+                        "artist": rec.get("artist-credit", [{}])[0].get("artist", {}).get("name", artist),
+                        "album": rec.get("release-list", [{}])[0].get("title", "Singles"),
+                        "raw_data": rec
+                    })
+    except Exception as e:
+        print(f"AcoustID error: {e}")
+
+    # 2. Text-Based Fallback (if AcoustID fails or gives too many choices)
+    try:
+        search_res = musicbrainzngs.search_recordings(query=query_title, limit=2)
+        for rec in search_res.get("recording-list", []):
+            candidates.append({
+                "id": rec["id"],
+                "title": rec.get("title", "Unknown"),
+                "artist": rec.get("artist-credit", [{}])[0].get("artist", {}).get("name", "Unknown"),
+                "album": rec.get("release-list", [{}])[0].get("title", "Singles"),
+                "raw_data": rec
+            })
+    except Exception as e:
+        print(f"Text-Search error: {e}")
+
+    # Deduplicate candidates by MusicBrainz ID
+    unique_candidates = {c["id"]: c for c in candidates}.values()
+    final_list = list(unique_candidates)
+
+    if len(final_list) == 1:
+        return True, final_list[0]["raw_data"]
+    elif len(final_list) > 1:
+        return False, final_list # Needs human approval
+    else:
+        return True, None # No matches found anywhere, use fallback metadata
+
+# --- PHASE 1: DOWNLOAD & FINGERPRINT ---
 async def process_track(item: dict, track_uuid: str, user_id: str):
     url = item["url"]
     display_title = item.get("title", url)
-    discovery_date = item.get("discovery_date") or datetime.now().strftime("%Y-%m-%d")
-
+    
     await log(f"[{track_uuid[:6]}] 📥 Starting: {display_title}")
     database.update_track_status(track_uuid, 'DOWNLOADING')
 
     temp_file = None
     try:
-        # Run blocking download in default executor
         temp_file = await asyncio.to_thread(download_audio_file, url, track_uuid)
-        
         if not temp_file or not os.path.exists(temp_file):
-            raise Exception("File extraction failed; no output file generated.")
+            raise Exception("File extraction failed.")
 
         await log(f"[{track_uuid[:6]}] 🔍 Fingerprinting audio...")
-        mb_metadata = await asyncio.to_thread(fingerprint_audio, temp_file)
+        is_consensus, metadata_result = await asyncio.to_thread(get_consensus_metadata, temp_file, display_title)
 
-        # Tag and read metadata
-        await log(f"[{track_uuid[:6]}] 🏷️ Writing metadata & calculating ReplayGain...")
+        if not is_consensus:
+            # Pause pipeline and wait for human
+            await log(f"[{track_uuid[:6]}] ⚠️ Multiple metadata matches found. Pending approval.")
+            choices_json = json.dumps(metadata_result)
+            database.update_track_metadata_choices(track_uuid, choices_json, temp_file)
+            return  # Stop execution here!
+
+        # If consensus is reached, seamlessly proceed to Phase 2
+        await process_track_phase_2(track_uuid, temp_file, metadata_result, item)
+
+    except DownloadBotError as e:
+        # We now log the exact error string so we can see why Cobalt failed!
+        database.update_track_status(track_uuid, 'BOT_BLOCKED', error_msg=str(e))
+        await log(f"[{track_uuid[:6]}] 🛑 {str(e)}")
+    except DownloadUnavailableError:
+        database.update_track_status(track_uuid, 'FAILED', error_msg="Unavailable / Private")
+        await log(f"[{track_uuid[:6]}] ❌ Video is private or unavailable.")
+    except Exception as e:
+        database.update_track_status(track_uuid, 'FAILED', error_msg=str(e))
+        await log(f"[{track_uuid[:6]}] ⚠️ Processing error: {e}")
+        if temp_file and os.path.exists(temp_file):
+            os.remove(temp_file)
+
+# --- PHASE 2: TAG, NORMALIZE, AND MOVE ---
+async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: dict, track_info: dict):
+    try:
+        user_id = track_info.get("user_id", "admin")
+        discovery_date = track_info.get("discovery_date") or datetime.now().strftime("%Y-%m-%d")
+        display_title = track_info.get("title", "Unknown Title")
+
+        await log(f"[{track_uuid[:6]}] 🏷️ Applying Tags & ReplayGain...")
         audio = OggOpus(temp_file)
         audio.delete()
         duration = audio.info.length
@@ -222,7 +308,7 @@ async def process_track(item: dict, track_uuid: str, user_id: str):
             "date": discovery_date[:4]
         }
 
-        # Apply MusicBrainz metadata if matched
+        # Apply chosen metadata
         if mb_metadata:
             parsed_info["title"] = mb_metadata.get("title", parsed_info["title"])
             if "artist-credit" in mb_metadata and mb_metadata["artist-credit"]:
@@ -249,26 +335,22 @@ async def process_track(item: dict, track_uuid: str, user_id: str):
                         pic.data = cover_data
                         audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
 
-        # Write core Vorbis tags
+        # Write Vorbis tags
         audio["title"] = [parsed_info["title"]]
         audio["artist"] = [parsed_info["artist"]]
         audio["albumartist"] = [parsed_info["albumartist"]]
         audio["album"] = [parsed_info["album"]]
         audio["date"] = [parsed_info["date"]]
         audio["comment"] = [f"Discovery Date: {discovery_date}"]
-        
-        # Ingestion & Tracking ID (prevents losing the file when manually moved)
         audio["NAVIDROME_PIPELINE_ID"] = [track_uuid]
         audio["DISCOVERY_DATE"] = [discovery_date]
 
-        # Calculate ReplayGain
         rg_gain = await asyncio.to_thread(calculate_replaygain, temp_file)
         if rg_gain:
             audio["replaygain_track_gain"] = [rg_gain]
 
         audio.save()
 
-        # Build Organized Folder Hierarchy: library / user / Artist / Album / Track.opus
         folder_artist = sanitize_filename(parsed_info["albumartist"])
         folder_album = sanitize_filename(parsed_info["album"])
         file_name = sanitize_filename(f"{parsed_info['artist']} - {parsed_info['title']}.opus")
@@ -284,7 +366,7 @@ async def process_track(item: dict, track_uuid: str, user_id: str):
 
         shutil.move(temp_file, final_path)
 
-        # Set file system timestamp (mtime) to discovery date so Navidrome sorts by it
+        # Set mtime
         try:
             dt_obj = datetime.strptime(discovery_date, "%Y-%m-%d")
             mtime = dt_obj.timestamp()
@@ -292,14 +374,8 @@ async def process_track(item: dict, track_uuid: str, user_id: str):
         except Exception:
             pass
 
-        # Fetch and save Lyrics (.lrc alongside the .opus file)
-        lyrics = await asyncio.to_thread(
-            fetch_lyrics, 
-            parsed_info["title"], 
-            parsed_info["artist"], 
-            parsed_info["album"], 
-            duration
-        )
+        # Lyrics
+        lyrics = await asyncio.to_thread(fetch_lyrics, parsed_info["title"], parsed_info["artist"], parsed_info["album"], duration)
         if lyrics:
             lrc_path = os.path.splitext(final_path)[0] + ".lrc"
             with open(lrc_path, "w", encoding="utf-8") as lf:
@@ -308,26 +384,19 @@ async def process_track(item: dict, track_uuid: str, user_id: str):
         database.update_track_status(track_uuid, 'COMPLETED', file_path=final_path)
         await log(f"[{track_uuid[:6]}] ✅ Saved: {parsed_info['artist']} - {parsed_info['title']}")
 
-        # --- AUTO PLAYLIST SYNC ---
-        playlist_name = item.get("playlist_name")
+        # Playlist Sync
+        playlist_name = track_info.get("playlist_name")
         if playlist_name:
             m3u_path = await asyncio.to_thread(sync_playlist_file, playlist_name, user_id)
             if m3u_path:
                 await log(f"[{track_uuid[:6]}] 📋 Updated playlist: {os.path.basename(m3u_path)}")
 
-    except DownloadBotError:
-        database.update_track_status(track_uuid, 'BOT_BLOCKED', error_msg="YouTube Bot Block")
-        await log(f"[{track_uuid[:6]}] 🛑 Anti-bot protection encountered.")
-    except DownloadUnavailableError:
-        database.update_track_status(track_uuid, 'FAILED', error_msg="Unavailable / Private")
-        await log(f"[{track_uuid[:6]}] ❌ Video is private or unavailable.")
     except Exception as e:
-        database.update_track_status(track_uuid, 'FAILED', error_msg=str(e))
-        await log(f"[{track_uuid[:6]}] ⚠️ Processing error: {e}")
+        database.update_track_status(track_uuid, 'FAILED', error_msg=f"Phase 2 error: {e}")
+        await log(f"[{track_uuid[:6]}] ⚠️ Phase 2 Tagging error: {e}")
     finally:
-        # Cleanup temporary files if any remain
         if temp_file and os.path.exists(temp_file):
             try:
                 os.remove(temp_file)
-            except Exception:
+            except:
                 pass

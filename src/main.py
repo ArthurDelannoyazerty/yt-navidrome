@@ -3,6 +3,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 import os
 import asyncio
+import json
 
 import database
 from url_resolver import URLResolver
@@ -25,7 +26,12 @@ async def unpack_and_enqueue(raw_urls: list[str], user_id: str):
     """Background task to resolve playlists and push individual tracks to worker."""
     for raw_url in raw_urls:
         await log(f"🔍 Analyzing link: {raw_url}")
-        resolved_items = URLResolver.resolve_url(raw_url)
+        
+        try:
+            resolved_items = URLResolver.resolve_url(raw_url)
+        except Exception as e:
+            await log(f"❌ Cannot resolve {raw_url}: {e}")
+            continue
         
         if not resolved_items:
             await log(f"⚠️ Could not extract tracks from: {raw_url}")
@@ -119,6 +125,44 @@ async def retry_all_failed(background_tasks: BackgroundTasks, user_id: str = Non
         }
         background_tasks.add_task(process_track, item, track["track_uuid"], track["user_id"])
     return {"message": f"Retrying {len(failed_tracks)} failed tracks."}
+
+@app.get("/api/monitored-urls/{user_id}")
+async def api_get_monitored_urls(user_id: str):
+    return {"urls": database.get_monitored_urls(user_id)}
+
+@app.post("/api/monitored-urls")
+async def api_add_monitored_url(user_id: str = Form(...), url: str = Form(...), label: str = Form("Playlist")):
+    database.add_monitored_url(user_id, url.strip(), label.strip())
+    return {"message": "Saved"}
+
+@app.delete("/api/monitored-urls/{url_id}")
+async def api_delete_monitored_url(url_id: int):
+    database.delete_monitored_url(url_id)
+    return {"message": "Deleted"}
+
+@app.post("/api/approve/{track_uuid}")
+async def approve_track(track_uuid: str, background_tasks: BackgroundTasks, request: Request):
+    """Receives chosen metadata from the UI and resumes Phase 2 of the worker."""
+    track = database.get_track_by_uuid(track_uuid)
+    if not track or track["status"] != "NEEDS_APPROVAL":
+        return {"error": "Track not pending approval."}
+    
+    # Parse the incoming JSON metadata choice
+    chosen_metadata = await request.json()
+    
+    # We import phase2 here to avoid circular imports if necessary
+    from worker import process_track_phase_2
+    
+    background_tasks.add_task(
+        process_track_phase_2, 
+        track_uuid, 
+        track["file_path"], 
+        chosen_metadata, 
+        track
+    )
+    
+    database.update_track_status(track_uuid, 'DOWNLOADING', error_msg="Applying Tags...")
+    return {"message": "Approval accepted. Tagging and moving track."}
 
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
