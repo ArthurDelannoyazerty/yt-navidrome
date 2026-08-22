@@ -432,8 +432,18 @@ async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: di
             with open(lrc_path, "w", encoding="utf-8") as lf:
                 lf.write(lyrics)
 
-        database.update_track_status(track_uuid, 'COMPLETED', file_path=final_path)
-        await log(f"[{track_uuid[:6]}] ✅ Saved: {parsed_info['artist']} - {parsed_info['title']}")
+        # Extract MBID if present
+        mbid = mb_metadata.get("id") if mb_metadata else None
+        matched_title = f"{parsed_info['artist']} - {parsed_info['title']}"
+
+        database.update_track_status(
+            track_uuid, 
+            'COMPLETED', 
+            file_path=final_path, 
+            matched_title=matched_title, 
+            mbid=mbid
+        )
+        await log(f"[{track_uuid[:6]}] ✅ Saved: {matched_title}")
 
         # Sync Playlist
         playlist_name = track_info.get("playlist_name")
@@ -451,3 +461,147 @@ async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: di
                 os.remove(temp_file)
             except:
                 pass
+
+async def retag_existing_track(track_uuid: str, mbid: str = None, custom_artist: str = None, custom_title: str = None, custom_album: str = None):
+    """Re-tags an existing file on disk using a specific MBID or manual text, and moves it to the right folder."""
+    track = database.get_track_by_uuid(track_uuid)
+    if not track or not track.get("file_path") or not os.path.exists(track["file_path"]):
+        await log(f"[{track_uuid[:6]}] ❌ Cannot retag: file not found on disk.")
+        return False
+
+    old_file_path = track["file_path"]
+    user_id = track.get("user_id", "admin")
+    discovery_date = track.get("discovery_date") or datetime.now().strftime("%Y-%m-%d")
+
+    await log(f"[{track_uuid[:6]}] 🛠️ Manually updating metadata...")
+
+    parsed_info = {
+        "title": custom_title or track.get("title") or "Unknown Title",
+        "artist": custom_artist or "Unknown Artist",
+        "albumartist": custom_artist or "Unknown Artist",
+        "album": custom_album or "Singles",
+        "date": discovery_date[:4]
+    }
+
+    cover_data = None
+    # 1. If MusicBrainz ID is provided, fetch official data & art
+    if mbid:
+        try:
+            mb_data = await asyncio.to_thread(musicbrainzngs.get_recording_by_id, mbid.strip(), includes=["artists", "releases"])
+            rec = mb_data.get('recording')
+            if rec:
+                parsed_info["title"] = rec.get("title", parsed_info["title"])
+                if "artist-credit" in rec and rec["artist-credit"]:
+                    credit = rec["artist-credit"][0]
+                    if isinstance(credit, dict) and "artist" in credit:
+                        parsed_info["artist"] = credit["artist"]["name"]
+                        parsed_info["albumartist"] = credit["artist"]["name"]
+
+                if "release-list" in rec and rec["release-list"]:
+                    release = rec["release-list"][0]
+                    parsed_info["album"] = release.get("title", "Singles")
+                    if release.get("date"):
+                        parsed_info["date"] = release["date"][:4]
+                    
+                    # Fetch Cover Art
+                    release_id = release.get("id")
+                    if release_id:
+                        cover_data = await asyncio.to_thread(fetch_cover_art, release_id)
+        except Exception as e:
+            await log(f"[{track_uuid[:6]}] ⚠️ MusicBrainz ID lookup failed: {e}")
+
+    # Override with manual text if explicitly passed
+    if custom_title: parsed_info["title"] = custom_title
+    if custom_artist: 
+        parsed_info["artist"] = custom_artist
+        parsed_info["albumartist"] = custom_artist
+    if custom_album: parsed_info["album"] = custom_album
+
+    try:
+        # 2. Write Tags into Opus File
+        audio = OggOpus(old_file_path)
+        audio.delete()
+        duration = audio.info.length
+
+        audio["title"] = [parsed_info["title"]]
+        audio["artist"] = [parsed_info["artist"]]
+        audio["albumartist"] = [parsed_info["albumartist"]]
+        audio["album"] = [parsed_info["album"]]
+        audio["date"] = [parsed_info["date"]]
+        audio["comment"] = [f"Discovery Date: {discovery_date}"]
+        audio["NAVIDROME_PIPELINE_ID"] = [track_uuid]
+        audio["DISCOVERY_DATE"] = [discovery_date]
+
+        if cover_data:
+            pic = Picture()
+            pic.type = 3
+            pic.mime = "image/jpeg"
+            pic.desc = "Front Cover"
+            pic.data = cover_data
+            audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
+
+        # Recalculate ReplayGain
+        rg_gain = await asyncio.to_thread(calculate_replaygain, old_file_path)
+        if rg_gain:
+            audio["replaygain_track_gain"] = [rg_gain]
+
+        audio.save()
+
+        # 3. Move File to New Hierarchy: user / Artist / Album / Track.opus
+        folder_artist = sanitize_filename(parsed_info["albumartist"])
+        folder_album = sanitize_filename(parsed_info["album"])
+        file_name = sanitize_filename(f"{parsed_info['artist']} - {parsed_info['title']}.opus")
+
+        user_dir = os.path.join(NAVIDROME_LIB_DIR, sanitize_filename(user_id))
+        target_dir = os.path.join(user_dir, folder_artist, folder_album)
+        os.makedirs(target_dir, exist_ok=True)
+
+        new_final_path = os.path.join(target_dir, file_name)
+        if old_file_path != new_final_path:
+            shutil.move(old_file_path, new_final_path)
+
+        # Move/Rename .lrc lyrics if exists
+        old_lrc = os.path.splitext(old_file_path)[0] + ".lrc"
+        new_lrc = os.path.splitext(new_final_path)[0] + ".lrc"
+        if os.path.exists(old_lrc):
+            shutil.move(old_lrc, new_lrc)
+        else:
+            # Try fetching lyrics with updated tags
+            lyrics = await asyncio.to_thread(fetch_lyrics, parsed_info["title"], parsed_info["artist"], parsed_info["album"], duration)
+            if lyrics:
+                with open(new_lrc, "w", encoding="utf-8") as lf:
+                    lf.write(lyrics)
+
+        # Set filesystem mtime
+        try:
+            dt_obj = datetime.strptime(discovery_date, "%Y-%m-%d")
+            mtime = dt_obj.timestamp()
+            os.utime(new_final_path, (mtime, mtime))
+        except Exception:
+            pass
+
+        # 4. Update Database
+        matched_title = f"{parsed_info['artist']} - {parsed_info['title']}"
+        actual_mbid = mbid.strip() if mbid else None
+
+        conn = database.sqlite3.connect(database.DB_FILE)
+        c = conn.cursor()
+        c.execute('''
+            UPDATE tracks 
+            SET matched_title=?, mbid=?, file_path=?, status='COMPLETED', error_msg=NULL 
+            WHERE track_uuid=?
+        ''', (matched_title, actual_mbid, new_final_path, track_uuid))
+        conn.commit()
+        conn.close()
+
+        await log(f"[{track_uuid[:6]}] ✨ Tags updated & file relocated: {parsed_info['artist']} - {parsed_info['title']}")
+
+        # 5. Playlist Sync
+        playlist_name = track.get("playlist_name")
+        if playlist_name:
+            await asyncio.to_thread(sync_playlist_file, playlist_name, user_id)
+
+        return True
+    except Exception as e:
+        await log(f"[{track_uuid[:6]}] ❌ Retagging error: {e}")
+        return False

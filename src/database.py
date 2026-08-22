@@ -6,12 +6,9 @@ DB_FILE = "library.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
-    # Users Table
     c.execute('''CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT)''')
     c.execute("INSERT OR IGNORE INTO users (id, username) VALUES ('1', 'admin')")
     
-    # Tracks Table (with metadata_choices)
     c.execute('''
         CREATE TABLE IF NOT EXISTS tracks (
             track_uuid TEXT PRIMARY KEY,
@@ -19,15 +16,16 @@ def init_db():
             title TEXT,
             playlist_name TEXT,
             discovery_date TEXT,
-            status TEXT,          -- PENDING, DOWNLOADING, COMPLETED, FAILED, BOT_BLOCKED, NEEDS_APPROVAL
+            status TEXT,
             error_msg TEXT,
             file_path TEXT,
-            metadata_choices TEXT, -- Stores JSON string of MusicBrainz options
-            user_id TEXT
+            metadata_choices TEXT,
+            user_id TEXT,
+            matched_title TEXT,
+            mbid TEXT
         )
     ''')
     
-    # Monitored URLs Table
     c.execute('''
         CREATE TABLE IF NOT EXISTS monitored_urls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +34,13 @@ def init_db():
             label TEXT
         )
     ''')
-    
+
+    for col in ["matched_title", "mbid"]:
+        try:
+            c.execute(f"ALTER TABLE tracks ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass # Column already exists
+
     conn.commit()
     conn.close()
 
@@ -72,29 +76,52 @@ def get_user_playlists(user_id: str):
 # Append these functions to src/database.py
 
 def get_dashboard_tracks(user_id: str = None, limit: int = 50):
-    """Fetches tracks, pinning active/failed ones to the top, followed by recent completed ones."""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     
-    # ORDER BY CASE logic: 
-    # Active/Pending/Failed (0) show up first. Completed (1) show up below them.
     if user_id:
         c.execute('''
-            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices
+            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices, matched_title, mbid
             FROM tracks WHERE user_id = ?
             ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC 
             LIMIT ?
         ''', (user_id, limit))
     else:
         c.execute('''
-            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices
+            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices, matched_title, mbid
             FROM tracks
             ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC 
             LIMIT ?
         ''', (limit,))
         
     rows = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return rows
+
+def search_tracks(query: str, user_id: str = None):
+    """Searches tracks by Title, Source URL, or UUID."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    search_term = f"%{query.strip()}%"
+    
+    if user_id:
+        c.execute('''
+            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, file_path, user_id
+            FROM tracks 
+            WHERE user_id = ? AND (title LIKE ? OR source_url LIKE ? OR track_uuid LIKE ?)
+            LIMIT 10
+        ''', (user_id, search_term, search_term, search_term))
+    else:
+        c.execute('''
+            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, file_path, user_id
+            FROM tracks 
+            WHERE title LIKE ? OR source_url LIKE ? OR track_uuid LIKE ?
+            LIMIT 10
+        ''', (search_term, search_term, search_term))
+        
+    rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
@@ -138,11 +165,18 @@ def add_track_to_queue(item: dict, user_id: str):
     finally:
         conn.close()
 
-def update_track_status(track_uuid, status, file_path=None, error_msg=None):
+def update_track_status(track_uuid, status, file_path=None, error_msg=None, matched_title=None, mbid=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("UPDATE tracks SET status=?, file_path=?, error_msg=? WHERE track_uuid=?", 
-              (status, file_path, error_msg, track_uuid))
+    c.execute('''
+        UPDATE tracks 
+        SET status=?, 
+            file_path=COALESCE(?, file_path), 
+            error_msg=?,
+            matched_title=COALESCE(?, matched_title),
+            mbid=COALESCE(?, mbid)
+        WHERE track_uuid=?
+    ''', (status, file_path, error_msg, matched_title, mbid, track_uuid))
     conn.commit()
     conn.close()
 

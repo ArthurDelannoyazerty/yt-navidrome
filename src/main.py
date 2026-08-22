@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 import os
 import asyncio
 import json
-
+from worker import retag_existing_track
 import database
 from url_resolver import URLResolver
 from worker import process_track, log_queue, log
@@ -56,6 +56,23 @@ async def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), 
     background_tasks.add_task(unpack_and_enqueue, url_list, user_id)
     return {"message": f"Processing {len(url_list)} URL(s) in the background. Check logs."}
 
+@app.get("/api/search-track")
+async def api_search_track(q: str, user_id: str = None):
+    results = database.search_tracks(q, user_id=user_id)
+    return {"results": results}
+
+@app.post("/api/retag/{track_uuid}")
+async def api_retag_track(track_uuid: str, background_tasks: BackgroundTasks, request: Request):
+    data = await request.json()
+    background_tasks.add_task(
+        retag_existing_track,
+        track_uuid,
+        mbid=data.get("mbid"),
+        custom_artist=data.get("artist"),
+        custom_title=data.get("title"),
+        custom_album=data.get("album")
+    )
+    return {"message": "Retag task dispatched."}
 
 @app.get("/api/tracks")
 async def get_tracks(user_id: str = None):
