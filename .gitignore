@@ -55,6 +55,7 @@ logs/
 # Add here
 *.mp3
 *.opus
+*.m3u
 
 ledger.json
 

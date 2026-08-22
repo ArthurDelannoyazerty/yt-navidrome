@@ -142,10 +142,17 @@
                 const res = await fetch('/api/tracks');
                 const { tracks, stats } = await res.json();
 
+                // 1. Always update the numbers at the top
                 document.getElementById('stat-total').innerText = stats.total;
                 document.getElementById('stat-completed').innerText = stats.completed;
                 document.getElementById('stat-downloading').innerText = stats.downloading;
                 document.getElementById('stat-failed').innerText = stats.failed;
+
+                // 2. Prevent dropdown disappearing bug
+                // If a user has a dropdown focused, abort the table redraw so we don't interrupt them.
+                if (document.activeElement && document.activeElement.tagName === 'SELECT') {
+                    return; 
+                }
 
                 const tbody = document.getElementById('track-table-body');
                 if (tracks.length === 0) {

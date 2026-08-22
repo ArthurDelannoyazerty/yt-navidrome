@@ -71,23 +71,27 @@ def get_user_playlists(user_id: str):
 
 # Append these functions to src/database.py
 
-def get_dashboard_tracks(user_id: str = None, limit: int = 100):
-    """Fetches the latest tracks from the database."""
+def get_dashboard_tracks(user_id: str = None, limit: int = 50):
+    """Fetches tracks, pinning active/failed ones to the top, followed by recent completed ones."""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     
+    # ORDER BY CASE logic: 
+    # Active/Pending/Failed (0) show up first. Completed (1) show up below them.
     if user_id:
         c.execute('''
             SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices
             FROM tracks WHERE user_id = ?
-            ORDER BY rowid DESC LIMIT ?
+            ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC 
+            LIMIT ?
         ''', (user_id, limit))
     else:
         c.execute('''
             SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices
             FROM tracks
-            ORDER BY rowid DESC LIMIT ?
+            ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC 
+            LIMIT ?
         ''', (limit,))
         
     rows = [dict(row) for row in c.fetchall()]
