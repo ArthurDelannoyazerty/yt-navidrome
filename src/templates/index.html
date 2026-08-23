@@ -150,8 +150,14 @@
         const ws = new WebSocket(`ws://${window.location.host}/ws/logs`);
         const logBox = document.getElementById("logs");
         ws.onmessage = (event) => {
-            logBox.innerHTML += event.data + "\n";
-            logBox.scrollTop = logBox.scrollHeight;
+            const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 40;
+            const line = document.createElement("div");
+            line.textContent = event.data;              // text node, never parsed as HTML
+            logBox.appendChild(line);
+            while (logBox.childElementCount > 800) {    // ring buffer: survives 28k-line bulk runs
+                logBox.removeChild(logBox.firstChild);
+            }
+            if (atBottom) logBox.scrollTop = logBox.scrollHeight;
         };
 
         // --- QUICK INGEST FORM ---
@@ -291,9 +297,11 @@
         }
 
         async function retryAllFailed() {
-            await fetch('/api/retry-all-failed', { method: 'POST' });
+            const userId = document.getElementById("currentUser").value;
+            await fetch(`/api/retry-all-failed?user_id=${encodeURIComponent(userId)}`, { method: 'POST' });
             refreshDashboard();
         }
+
         
         // --- MONITORED URLS SYSTEM ---
         async function loadMonitoredUrls() {
@@ -353,17 +361,17 @@
         }
 
         async function batchApproveBest() {
-            if (confirm("Auto-approve all pending tracks with their top MusicBrainz match?")) {
-                await fetch('/api/batch-approve-best', { method: 'POST' });
-                refreshDashboard();
-            }
+            if (!confirm("Auto-approve all pending tracks with their top MusicBrainz match?")) return;
+            const userId = document.getElementById("currentUser").value;
+            await fetch(`/api/batch-approve-best?user_id=${encodeURIComponent(userId)}`, { method: 'POST' });
+            refreshDashboard();
         }
 
         async function batchApproveOriginal() {
-            if (confirm("Apply clean YouTube titles to all pending tracks (bypass MusicBrainz)?")) {
-                await fetch('/api/batch-approve-original', { method: 'POST' });
-                refreshDashboard();
-            }
+            if (!confirm("Apply clean YouTube titles to all pending tracks (bypass MusicBrainz)?")) return;
+            const userId = document.getElementById("currentUser").value;
+            await fetch(`/api/batch-approve-original?user_id=${encodeURIComponent(userId)}`, { method: 'POST' });
+            refreshDashboard();
         }
 
         function escapeHtml(text) {

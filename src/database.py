@@ -257,6 +257,23 @@ def get_completed_playlist_tracks(playlist_name: str, user_id: str):
     conn.close()
     return [{"title": r[0], "file_path": r[1]} for r in rows]
 
+def get_status_stats(user_id: str | None = None) -> dict:
+    """True global counts via GROUP BY — correct regardless of any dashboard LIMIT."""
+    conn = _conn()
+    sql = "SELECT status, COUNT(*) FROM tracks"
+    params: list = []
+    if user_id:
+        sql += " WHERE user_id=?"
+        params.append(user_id)
+    counts = {r[0]: r[1] for r in conn.execute(sql + " GROUP BY status", params)}
+    conn.close()
+    return {
+        "total": sum(counts.values()),
+        "completed": counts.get("COMPLETED", 0),
+        "downloading": counts.get("DOWNLOADING", 0) + counts.get("PENDING", 0),
+        "pending_approval": counts.get("NEEDS_APPROVAL", 0),
+        "failed": counts.get("FAILED", 0) + counts.get("BOT_BLOCKED", 0),
+    }
 
 def get_user_playlists(user_id: str):
     conn = _conn()

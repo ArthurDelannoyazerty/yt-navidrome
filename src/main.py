@@ -100,7 +100,16 @@ async def lifespan(app: FastAPI):
     if recovered:
         await log(f"♻️ Recovered {recovered} interrupted track(s) -> marked FAILED (use Retry).")
 
+    # Temp files referenced by NEEDS_APPROVAL rows are Phase 2 inputs — protect them.
+    protected = set()
+    for r in database.get_tracks_by_status("NEEDS_APPROVAL"):
+        p = r.get("file_path")
+        if p:
+            protected.add(p)
+            protected.add(os.path.splitext(p)[0])  # pre-extraction original (.webm/.m4a)
     for f in glob.glob(os.path.join(BASE_DIR, "temp_*")):
+        if f in protected:
+            continue
         try:
             os.remove(f)
         except OSError:
@@ -114,7 +123,10 @@ async def lifespan(app: FastAPI):
     broadcaster = spawn(log_broadcaster())
 
     scheduler_task = None
-    interval = float(os.getenv("SYNC_INTERVAL_HOURS", "0"))
+    try:
+        interval = float((os.getenv("SYNC_INTERVAL_HOURS") or "0").split("#", 1)[0].strip() or 0)
+    except ValueError:
+        interval = 0.0
     if interval > 0:
         scheduler_task = spawn(sync_scheduler(interval))
         await log(f"⏰ Auto-sync scheduler active: every {interval}h.")
@@ -147,10 +159,10 @@ async def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), 
     return {"message": f"Processing {len(url_list)} URL(s) in the background. Check logs."}
 
 
-@app.get("/api/search-track")
-async def api_search_track(q: str, user_id: str = None):
-    return {"results": database.search_tracks(q, user_id=user_id)}
-
+@app.get("/api/tracks")
+async def get_tracks(user_id: str = None):
+    tracks = database.get_dashboard_tracks(user_id=user_id)
+    return {"tracks": tracks, "stats": database.get_status_stats(user_id=user_id)}
 
 @app.post("/api/retag/{track_uuid}")
 async def api_retag_track(track_uuid: str, background_tasks: BackgroundTasks, request: Request):

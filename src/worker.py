@@ -22,20 +22,25 @@ from mutagen.flac import Picture
 import database
 
 # ================= CONFIGURATION (rate-limit aware, 2026) =================
-ACOUSTID_API_KEY = os.getenv("ACOUSTID_API_KEY", "")
-NAVIDROME_LIB_DIR = os.getenv("NAVIDROME_LIB_DIR", "./navidrome_library")
-MATCH_THRESHOLD = 0.75
-RG_TARGET_LUFS = -18.0
-LRCLIB_MIN_SIMILARITY = 0.60
-USER_AGENT = "Navidrome-Ingestor/2.1 (personal homelab; contact@homelab.local)"
 
-# Concurrency: 3 parallel tracks keeps YouTube (~1000 player req/hr guests),
-# MusicBrainz (1 rps) and AcoustID (3 rps) simultaneously happy.
-PIPELINE_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_TRACKS", "3")))
+def _env_float(name: str, default: float) -> float:
+    """Tolerates stray inline comments ('2   # note') -> degrades to default, never crashes."""
+    raw = (os.getenv(name) or "").split("#", 1)[0].strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        print(f"⚠️ Invalid {name}={raw!r}; using default {default}")
+        return default
+
+def _env_int(name: str, default: int) -> int:
+    return int(_env_float(name, default))
+
+
+PIPELINE_SEMAPHORE = asyncio.Semaphore(_env_int("MAX_CONCURRENT_TRACKS", 3))
 
 # Anti-bot pacing: guest sessions tolerate ~300 videos/hour; accounts ~2000.
-DOWNLOAD_SLEEP_MIN = float(os.getenv("DOWNLOAD_SLEEP_MIN", "2"))
-DOWNLOAD_SLEEP_MAX = float(os.getenv("DOWNLOAD_SLEEP_MAX", "6"))
+DOWNLOAD_SLEEP_MIN = _env_float("DOWNLOAD_SLEEP_MIN", 2)
+DOWNLOAD_SLEEP_MAX = _env_float("DOWNLOAD_SLEEP_MAX", 6)
 PLAYER_CLIENTS = ([c.strip() for c in os.getenv("YT_PLAYER_CLIENTS", "").split(",") if c.strip()]
                   or ["default"])
 YT_COOKIES_FILE = os.getenv("YT_DLP_COOKIES_FILE", "")
@@ -45,7 +50,18 @@ COBALT_API_URL = os.getenv("COBALT_API_URL", "").rstrip("/")
 COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
 
 # AcoustID hard limit: 3 req/s free tier -> serialize with min interval.
-ACOUSTID_MIN_INTERVAL = max(float(os.getenv("ACOUSTID_MIN_INTERVAL", "0.4")), 0.34)
+ACOUSTID_MIN_INTERVAL = max(_env_float("ACOUSTID_MIN_INTERVAL", 0.4), 0.34)
+
+
+ACOUSTID_API_KEY = os.getenv("ACOUSTID_API_KEY", "")
+NAVIDROME_LIB_DIR = os.getenv("NAVIDROME_LIB_DIR", "./navidrome_library")
+MATCH_THRESHOLD = 0.75
+RG_TARGET_LUFS = -18.0
+LRCLIB_MIN_SIMILARITY = 0.60
+USER_AGENT = "Navidrome-Ingestor/2.1 (personal homelab; contact@homelab.local)"
+
+
+# AcoustID hard limit: 3 req/s free tier -> serialize with min interval.
 _acoustid_lock = threading.Lock()
 _acoustid_last_call = [0.0]
 
@@ -254,6 +270,7 @@ def download_audio_file(url: str, track_uuid: str):
         'format': 'bestaudio/best',
         'outtmpl': f'{temp_filename}.%(ext)s',
         'noplaylist': True,
+        'playlistend': 1,   # HARD CAP: music.youtube.com/search URLs are PLAYLISTS in yt-dlp
         'extractor_args': {'youtube': {'player_client': PLAYER_CLIENTS}},  # FIXED format
         'sleep_interval': DOWNLOAD_SLEEP_MIN,
         'max_sleep_interval': DOWNLOAD_SLEEP_MAX,
