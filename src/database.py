@@ -1,177 +1,130 @@
+import os
 import sqlite3
 import uuid
 
-DB_FILE = "library.db"
+DB_FILE = os.getenv("LIBRARY_DB", "library.db")
+
+
+def _conn():
+    """WAL mode + busy timeout: safe under concurrent workers."""
+    conn = sqlite3.connect(DB_FILE, timeout=15)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = _conn()
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY, username TEXT)''')
     c.execute("INSERT OR IGNORE INTO users (id, username) VALUES ('1', 'admin')")
-    
+
+    # Per-user isolation: same song can exist for two different users.
     c.execute('''
         CREATE TABLE IF NOT EXISTS tracks (
             track_uuid TEXT PRIMARY KEY,
-            source_url TEXT UNIQUE,
+            source_url TEXT NOT NULL,
             title TEXT,
             playlist_name TEXT,
             discovery_date TEXT,
-            status TEXT,
+            status TEXT DEFAULT 'PENDING',
             error_msg TEXT,
             file_path TEXT,
             metadata_choices TEXT,
-            user_id TEXT,
+            user_id TEXT NOT NULL DEFAULT 'admin',
             matched_title TEXT,
-            mbid TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS monitored_urls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            url TEXT UNIQUE,
-            label TEXT
+            mbid TEXT,
+            UNIQUE(user_id, source_url)
         )
     ''')
 
-    for col in ["matched_title", "mbid"]:
-        try:
-            c.execute(f"ALTER TABLE tracks ADD COLUMN {col} TEXT")
-        except sqlite3.OperationalError:
-            pass # Column already exists
+    # A song living in two playlists of the same user => both .m3u files include it.
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS playlist_memberships (
+            track_uuid TEXT NOT NULL REFERENCES tracks(track_uuid) ON DELETE CASCADE,
+            playlist_name TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            PRIMARY KEY (track_uuid, playlist_name, user_id)
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS monitored_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            url TEXT NOT NULL,
+            label TEXT,
+            UNIQUE(user_id, url)
+        )
+    ''')
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tracks_user_status ON tracks(user_id, status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pm_playlist ON playlist_memberships(user_id, playlist_name)")
 
     conn.commit()
     conn.close()
 
-# Append these functions to src/database.py
 
-def get_completed_playlist_tracks(playlist_name: str, user_id: str):
-    """Fetches all completed tracks for a specific playlist in insertion/discovery order."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        SELECT title, file_path 
-        FROM tracks 
-        WHERE playlist_name = ? AND user_id = ? AND status = 'COMPLETED' AND file_path IS NOT NULL
-        ORDER BY rowid ASC
-    ''', (playlist_name, user_id))
-    rows = c.fetchall()
-    conn.close()
-    return [{"title": r[0], "file_path": r[1]} for r in rows]
-
-def get_user_playlists(user_id: str):
-    """Returns a list of all distinct playlist names for a user."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        SELECT DISTINCT playlist_name 
-        FROM tracks 
-        WHERE user_id = ? AND playlist_name IS NOT NULL
-    ''', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-# Append these functions to src/database.py
-
-def get_dashboard_tracks(user_id: str = None, limit: int = 50):
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    
-    if user_id:
-        c.execute('''
-            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices, matched_title, mbid
-            FROM tracks WHERE user_id = ?
-            ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC 
-            LIMIT ?
-        ''', (user_id, limit))
-    else:
-        c.execute('''
-            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, error_msg, file_path, user_id, metadata_choices, matched_title, mbid
-            FROM tracks
-            ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC 
-            LIMIT ?
-        ''', (limit,))
-        
-    rows = [dict(row) for row in c.fetchall()]
-    conn.close()
-    return rows
-
-def search_tracks(query: str, user_id: str = None):
-    """Searches tracks by Title, Source URL, or UUID."""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    search_term = f"%{query.strip()}%"
-    
-    if user_id:
-        c.execute('''
-            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, file_path, user_id
-            FROM tracks 
-            WHERE user_id = ? AND (title LIKE ? OR source_url LIKE ? OR track_uuid LIKE ?)
-            LIMIT 10
-        ''', (user_id, search_term, search_term, search_term))
-    else:
-        c.execute('''
-            SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, file_path, user_id
-            FROM tracks 
-            WHERE title LIKE ? OR source_url LIKE ? OR track_uuid LIKE ?
-            LIMIT 10
-        ''', (search_term, search_term, search_term))
-        
-    rows = [dict(r) for r in c.fetchall()]
-    conn.close()
-    return rows
-
-def get_track_by_uuid(track_uuid: str):
-    """Fetches a single track's data."""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute('SELECT * FROM tracks WHERE track_uuid = ?', (track_uuid,))
-    row = c.fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-def get_failed_tracks(user_id: str = None):
-    """Fetches all tracks that failed or were blocked by bot checks."""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    if user_id:
-        c.execute("SELECT * FROM tracks WHERE user_id = ? AND status IN ('FAILED', 'BOT_BLOCKED')", (user_id,))
-    else:
-        c.execute("SELECT * FROM tracks WHERE status IN ('FAILED', 'BOT_BLOCKED')")
-    rows = [dict(row) for row in c.fetchall()]
-    conn.close()
-    return rows
+# ---------- QUEUE ----------
 
 def add_track_to_queue(item: dict, user_id: str):
-    """Adds a resolved track dictionary to SQLite."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+    """Inserts track + playlist membership. Returns uuid, or None if (user, url) already known."""
+    conn = _conn()
     track_uuid = str(uuid.uuid4())
     try:
-        c.execute('''
-            INSERT INTO tracks (track_uuid, source_url, title, playlist_name, discovery_date, status, user_id) 
+        conn.execute('''
+            INSERT INTO tracks (track_uuid, source_url, title, playlist_name, discovery_date, status, user_id)
             VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
-        ''', (track_uuid, item["url"], item["title"], item.get("playlist_name"), item.get("discovery_date"), user_id))
+        ''', (track_uuid, item["url"], item.get("title"),
+              item.get("playlist_name"), item.get("discovery_date"), user_id))
+        if item.get("playlist_name"):
+            conn.execute('''
+                INSERT OR IGNORE INTO playlist_memberships (track_uuid, playlist_name, user_id)
+                VALUES (?, ?, ?)
+            ''', (track_uuid, item["playlist_name"], user_id))
         conn.commit()
         return track_uuid
     except sqlite3.IntegrityError:
-        return None  # URL already exists in database
+        # Known URL for this user: still record the playlist membership if new.
+        if item.get("playlist_name"):
+            try:
+                conn.execute('''
+                    INSERT OR IGNORE INTO playlist_memberships (track_uuid, playlist_name, user_id)
+                    VALUES ((SELECT track_uuid FROM tracks WHERE user_id=? AND source_url=?), ?, ?)
+                ''', (user_id, item["url"], item["playlist_name"], user_id))
+                conn.commit()
+            except sqlite3.IntegrityError:
+                pass
+        return None
     finally:
         conn.close()
 
-def update_track_status(track_uuid, status, file_path=None, error_msg=None, matched_title=None, mbid=None):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        UPDATE tracks 
-        SET status=?, 
-            file_path=COALESCE(?, file_path), 
+
+# ---------- STATUS ENGINE (atomic claims prevent double-dispatch races) ----------
+
+def claim_track(track_uuid: str, from_statuses: list, to_status: str, error_msg: str = None) -> bool:
+    """Atomically transitions a track ONLY if it's currently in one of from_statuses."""
+    conn = _conn()
+    ph = ",".join("?" for _ in from_statuses)
+    cur = conn.execute(
+        f'''UPDATE tracks SET status=?, error_msg=COALESCE(?, error_msg)
+            WHERE track_uuid=? AND status IN ({ph})''',
+        (to_status, error_msg, track_uuid, *from_statuses))
+    conn.commit()
+    ok = cur.rowcount == 1
+    conn.close()
+    return ok
+
+
+def update_track_status(track_uuid, status, file_path=None, error_msg=None,
+                        matched_title=None, mbid=None):
+    conn = _conn()
+    conn.execute('''
+        UPDATE tracks
+        SET status=?,
+            file_path=COALESCE(?, file_path),
             error_msg=?,
             matched_title=COALESCE(?, matched_title),
             mbid=COALESCE(?, mbid)
@@ -180,52 +133,170 @@ def update_track_status(track_uuid, status, file_path=None, error_msg=None, matc
     conn.commit()
     conn.close()
 
-def reset_track_for_redownload(track_uuid: str):
-    """Resets a track to PENDING and clears errors/paths for a fresh run."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        UPDATE tracks 
-        SET status='PENDING', error_msg=NULL, file_path=NULL 
-        WHERE track_uuid=?
-    ''', (track_uuid,))
-    conn.commit()
-    conn.close()
-
-def get_monitored_urls(user_id: str):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, url, label FROM monitored_urls WHERE user_id = ?', (user_id,))
-    rows = [{"id": r[0], "url": r[1], "label": r[2]} for r in c.fetchall()]
-    conn.close()
-    return rows
-
-def add_monitored_url(user_id: str, url: str, label: str):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    try:
-        c.execute('INSERT INTO monitored_urls (user_id, url, label) VALUES (?, ?, ?)', (user_id, url, label))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        pass # Already exists
-    finally:
-        conn.close()
-
-def delete_monitored_url(url_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('DELETE FROM monitored_urls WHERE id = ?', (url_id,))
-    conn.commit()
-    conn.close()
 
 def update_track_metadata_choices(track_uuid, choices_json, temp_file_path):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        UPDATE tracks 
-        SET status='NEEDS_APPROVAL', metadata_choices=?, file_path=? 
+    conn = _conn()
+    conn.execute('''
+        UPDATE tracks SET status='NEEDS_APPROVAL', metadata_choices=?, file_path=?
         WHERE track_uuid=?
     ''', (choices_json, temp_file_path, track_uuid))
     conn.commit()
     conn.close()
 
+
+def reset_track_for_redownload(track_uuid: str):
+    conn = _conn()
+    conn.execute('''
+        UPDATE tracks SET status='PENDING', error_msg=NULL, file_path=NULL,
+            matched_title=NULL, mbid=NULL, metadata_choices=NULL
+        WHERE track_uuid=?
+    ''', (track_uuid,))
+    conn.commit()
+    conn.close()
+
+
+def fail_interrupted() -> int:
+    """Startup recovery: anything mid-flight when the server died becomes retryable."""
+    conn = _conn()
+    cur = conn.execute('''
+        UPDATE tracks SET status='FAILED', error_msg='Interrupted by server restart'
+        WHERE status IN ('PENDING', 'DOWNLOADING')
+    ''')
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n
+
+
+def update_retag_result(track_uuid, matched_title, mbid, file_path):
+    conn = _conn()
+    conn.execute('''
+        UPDATE tracks SET matched_title=?, mbid=?, file_path=?,
+            status='COMPLETED', error_msg=NULL
+        WHERE track_uuid=?
+    ''', (matched_title, mbid, file_path, track_uuid))
+    conn.commit()
+    conn.close()
+
+
+# ---------- READERS ----------
+
+def get_tracks_by_status(status: str, user_id: str = None):
+    conn = _conn()
+    if user_id:
+        rows = conn.execute("SELECT * FROM tracks WHERE status=? AND user_id=?",
+                            (status, user_id)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM tracks WHERE status=?", (status,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_failed_tracks(user_id: str = None):
+    conn = _conn()
+    if user_id:
+        rows = conn.execute(
+            "SELECT * FROM tracks WHERE user_id=? AND status IN ('FAILED','BOT_BLOCKED')",
+            (user_id,)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM tracks WHERE status IN ('FAILED','BOT_BLOCKED')").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_track_by_uuid(track_uuid: str):
+    conn = _conn()
+    row = conn.execute("SELECT * FROM tracks WHERE track_uuid=?", (track_uuid,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_dashboard_tracks(user_id: str = None, limit: int = 200):
+    conn = _conn()
+    cols = ("track_uuid, source_url, title, playlist_name, discovery_date, status, "
+            "error_msg, file_path, user_id, metadata_choices, matched_title, mbid")
+    order = ("ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC LIMIT ?")
+    if user_id:
+        rows = conn.execute(f"SELECT {cols} FROM tracks WHERE user_id=? {order}",
+                            (user_id, limit)).fetchall()
+    else:
+        rows = conn.execute(f"SELECT {cols} FROM tracks {order}", (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def search_tracks(query: str, user_id: str = None):
+    conn = _conn()
+    term = f"%{query.strip()}%"
+    sql = '''SELECT track_uuid, source_url, title, playlist_name, discovery_date, status, file_path, user_id
+             FROM tracks
+             WHERE (title LIKE ? OR source_url LIKE ? OR track_uuid LIKE ?)'''
+    params = [term, term, term]
+    if user_id:
+        sql += " AND user_id = ?"
+        params.append(user_id)
+    sql += " LIMIT 10"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_completed_playlist_tracks(playlist_name: str, user_id: str):
+    """All completed tracks belonging to this playlist, in true chronological order."""
+    conn = _conn()
+    rows = conn.execute('''
+        SELECT t.title, t.file_path
+        FROM tracks t
+        JOIN playlist_memberships pm
+            ON pm.track_uuid = t.track_uuid AND pm.user_id = t.user_id
+        WHERE pm.playlist_name = ? AND pm.user_id = ?
+          AND t.status = 'COMPLETED' AND t.file_path IS NOT NULL
+        ORDER BY t.discovery_date ASC, t.rowid ASC
+    ''', (playlist_name, user_id)).fetchall()
+    conn.close()
+    return [{"title": r[0], "file_path": r[1]} for r in rows]
+
+
+def get_user_playlists(user_id: str):
+    conn = _conn()
+    rows = conn.execute('''SELECT DISTINCT playlist_name FROM playlist_memberships
+                           WHERE user_id = ?''', (user_id,)).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+# ---------- MONITORED URLS ----------
+
+def get_monitored_urls(user_id: str):
+    conn = _conn()
+    rows = conn.execute("SELECT id, url, label FROM monitored_urls WHERE user_id=?",
+                        (user_id,)).fetchall()
+    conn.close()
+    return [{"id": r[0], "url": r[1], "label": r[2]} for r in rows]
+
+
+def get_all_monitored_urls():
+    conn = _conn()
+    rows = conn.execute("SELECT user_id, url, label FROM monitored_urls ORDER BY user_id").fetchall()
+    conn.close()
+    return [{"user_id": r[0], "url": r[1], "label": r[2]} for r in rows]
+
+
+def add_monitored_url(user_id: str, url: str, label: str):
+    conn = _conn()
+    try:
+        conn.execute("INSERT INTO monitored_urls (user_id, url, label) VALUES (?, ?, ?)",
+                     (user_id, url, label))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass  # already monitored by THIS user (other users may monitor the same URL)
+    finally:
+        conn.close()
+
+
+def delete_monitored_url(url_id: int):
+    conn = _conn()
+    conn.execute("DELETE FROM monitored_urls WHERE id=?", (url_id,))
+    conn.commit()
+    conn.close()

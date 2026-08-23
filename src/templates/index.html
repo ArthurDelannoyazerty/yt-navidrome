@@ -41,7 +41,7 @@
         <!-- Ingestion Form -->
         <div class="panel">
             <label style="font-weight: bold; color: #9ca3af;">Target User Subfolder:</label>
-            <select id="currentUser" onchange="loadMonitoredUrls()" style="margin-bottom: 20px;">
+            <select id="currentUser" onchange="loadMonitoredUrls(); refreshDashboard()" style="margin-bottom: 20px;">
                 <option value="admin">admin</option>
                 <option value="guest">guest</option>
             </select>
@@ -173,7 +173,8 @@
 
         async function refreshDashboard() {
             try {
-                const res = await fetch('/api/tracks');
+                const userId = document.getElementById("currentUser").value;
+                const res = await fetch(`/api/tracks?user_id=${encodeURIComponent(userId)}`);
                 const { tracks, stats } = await res.json();
 
                 // 1. Always update the numbers at the top
@@ -366,7 +367,12 @@
         }
 
         function escapeHtml(text) {
-            return (text || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+            return (text || '').toString()
+                .replace(/\\/g, '\\\\')
+                .replace(/'/g, "\\'")
+                .replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
         }
 
         function openFixModal(uuid, title, sourceUrl) {

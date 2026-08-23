@@ -1,13 +1,14 @@
 import os
 import re
 import time
-import shutil
+import json
 import base64
-import asyncio
+import shutil
+import difflib
+import threading
 import subprocess
 import requests
-import json
-import difflib
+import asyncio
 from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from playlist_sync import sync_playlist_file
@@ -20,170 +21,250 @@ from mutagen.flac import Picture
 
 import database
 
-# --- CONFIGURATION ---
+# ================= CONFIGURATION (rate-limit aware, 2026) =================
 ACOUSTID_API_KEY = os.getenv("ACOUSTID_API_KEY", "")
 NAVIDROME_LIB_DIR = os.getenv("NAVIDROME_LIB_DIR", "./navidrome_library")
 MATCH_THRESHOLD = 0.75
-ACOUSTID_DELAY = 0.5
+RG_TARGET_LUFS = -18.0
+LRCLIB_MIN_SIMILARITY = 0.60
+USER_AGENT = "Navidrome-Ingestor/2.1 (personal homelab; contact@homelab.local)"
 
-musicbrainzngs.set_useragent("Navidrome-Ingestor", "2.0", "contact@homelab.local")
+# Concurrency: 3 parallel tracks keeps YouTube (~1000 player req/hr guests),
+# MusicBrainz (1 rps) and AcoustID (3 rps) simultaneously happy.
+PIPELINE_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_TRACKS", "3")))
 
-# Asynchronous log queue for Web UI live streaming
+# Anti-bot pacing: guest sessions tolerate ~300 videos/hour; accounts ~2000.
+DOWNLOAD_SLEEP_MIN = float(os.getenv("DOWNLOAD_SLEEP_MIN", "2"))
+DOWNLOAD_SLEEP_MAX = float(os.getenv("DOWNLOAD_SLEEP_MAX", "6"))
+PLAYER_CLIENTS = ([c.strip() for c in os.getenv("YT_PLAYER_CLIENTS", "").split(",") if c.strip()]
+                  or ["default"])
+YT_COOKIES_FILE = os.getenv("YT_DLP_COOKIES_FILE", "")
+
+# Cobalt fallback MUST be self-hosted (public cobalt.tools requires paid keys).
+COBALT_API_URL = os.getenv("COBALT_API_URL", "").rstrip("/")
+COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
+
+# AcoustID hard limit: 3 req/s free tier -> serialize with min interval.
+ACOUSTID_MIN_INTERVAL = max(float(os.getenv("ACOUSTID_MIN_INTERVAL", "0.4")), 0.34)
+_acoustid_lock = threading.Lock()
+_acoustid_last_call = [0.0]
+
+musicbrainzngs.set_useragent("Navidrome-Ingestor", "2.1", "contact@homelab.local")
+try:
+    musicbrainzngs.set_rate_limit(True)  # enforce MusicBrainz 1 req/s inside the library
+except Exception:
+    pass
+
+# Asynchronous log queue consumed & broadcast by main.py
 log_queue = asyncio.Queue()
+
 
 async def log(msg: str):
     print(msg)
     await log_queue.put(msg)
+
 
 # Custom Exceptions
 class DownloadBotError(Exception): pass
 class DownloadUnavailableError(Exception): pass
 class DownloadNetworkError(Exception): pass
 
-# --- AUDIO & METADATA HELPERS ---
+
+# ================= HELPERS =================
 
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", str(name)).strip()
 
-def clean_title_and_artist(raw: str) -> tuple[str, str]:
-    """Strips YouTube clutter and parses into (Artist, Title)."""
-    # Remove bracketed junk: [Official Video], (Lyrics), [NCS Release], etc.
-    cleaned = re.sub(
-        r'[\(\[\{].*?(official|music video|video|lyrics|lyric|audio|hq|hd|4k|60fps|remastered|ncs release|visualizer|clip|full album|explicit)[\)\]\}]', 
-        '', raw, flags=re.IGNORECASE
-    )
-    # Remove standalone junk words
-    cleaned = re.sub(r'\b(official video|official music video|official audio|ncs release|lyrics|4k|hd|hq)\b', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' -_[](){}:|')
 
-    # Split by standard artist/title delimiters
-    delimiters = [' - ', ' – ', ' — ', ' | ', ' // ', ': ']
-    for d in delimiters:
+def clean_title_and_artist(raw: str) -> tuple[str, str]:
+    cleaned = re.sub(
+        r'[\(\[\{].*?(official|music video|video|lyrics|lyric|audio|hq|hd|4k|60fps|remastered|ncs release|visualizer|clip|full album|explicit)[\)\]\}]',
+        '', raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\b(official video|official music video|official audio|ncs release|lyrics|4k|hd|hq)\b',
+                     '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' -_[](){}:|')
+    for d in [' - ', ' – ', ' — ', ' | ', ' // ', ': ']:
         if d in cleaned:
             parts = cleaned.split(d, 1)
             return parts[0].strip(), parts[1].strip()
-    
     return "", cleaned.strip()
 
+
 def string_similarity(a: str, b: str) -> float:
-    """Calculates fuzzy string similarity ratio between 0.0 and 1.0."""
-    return difflib.SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+    return difflib.SequenceMatcher(None, (a or "").lower().strip(), (b or "").lower().strip()).ratio()
+
 
 def is_duration_match(mb_length_ms, actual_sec: float, tolerance: int = 15) -> bool:
-    """Returns False if the MusicBrainz recording length differs by more than tolerance seconds."""
     if not mb_length_ms:
-        return True # Cannot rule out if duration not listed in MusicBrainz
-    mb_sec = int(mb_length_ms) / 1000.0
-    return abs(mb_sec - actual_sec) <= tolerance
+        return True
+    return abs(int(mb_length_ms) / 1000.0 - actual_sec) <= tolerance
+
+
+def _acoustid_throttle():
+    """Global serialization: AcoustID free tier = max 3 requests/second."""
+    with _acoustid_lock:
+        wait = ACOUSTID_MIN_INTERVAL - (time.time() - _acoustid_last_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _acoustid_last_call[0] = time.time()
+
+
+def cleanup_empty_parent_dirs(start_path: str):
+    """Missing Piece #3: remove Artist/Album dirs left empty after a move/retag."""
+    lib_root = os.path.abspath(NAVIDROME_LIB_DIR)
+    d = os.path.dirname(os.path.abspath(start_path))
+    try:
+        while d.startswith(lib_root + os.sep):
+            if os.listdir(d):
+                break
+            os.rmdir(d)
+            d = os.path.dirname(d)
+    except OSError:
+        pass
+
 
 def fetch_cover_art(release_mbid: str):
-    """Fetches high-res front cover art from the Cover Art Archive."""
+    """CAA has no formal rate limit (2026) but throws sporadic 503/429 -> soft-fail.
+    Returns (image_bytes, mime_type) or (None, None)."""
+    if not release_mbid:
+        return None, None
     url = f"https://coverartarchive.org/release/{release_mbid}/front"
     try:
-        res = requests.get(url, allow_redirects=True, timeout=8)
-        if res.status_code == 200:
-            return res.content
+        res = requests.get(url, headers={"User-Agent": USER_AGENT},
+                           allow_redirects=True, timeout=(10, 30))
+        if res.status_code == 200 and res.content:
+            mime = res.headers.get("Content-Type", "image/jpeg").split(";")[0].strip().lower()
+            if mime not in ("image/jpeg", "image/png"):
+                mime = "image/jpeg"
+            return res.content, mime
     except Exception:
         pass
-    return None
+    return None, None
+
 
 def calculate_replaygain(file_path: str):
-    """Calculates EBU R128 integrated loudness via ffmpeg and converts to ReplayGain dB."""
+    """EBU R128 integrated loudness -> ReplayGain dB toward -18 LUFS.
+    Parses ONLY the final Summary: block (interim values can be positive)."""
     try:
-        cmd = ['ffmpeg', '-nostats', '-i', file_path, '-filter_complex', 'ebur128', '-f', 'null', '-']
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        for line in result.stderr.splitlines():
-            if "I:" in line and "LUFS" in line:
-                match = re.search(r"I:\s+([-+0-9.]+)\s+LUFS", line)
-                if match:
-                    lufs = float(match.group(1))
-                    gain = -18.0 - lufs  # Navidrome/Subsonic standard target
-                    return f"{gain:+.2f} dB"
+        cmd = ['ffmpeg', '-nostats', '-hide_banner', '-i', file_path,
+               '-filter_complex', 'ebur128', '-f', 'null', '-']
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        stderr = result.stderr
+        pos = stderr.rfind("Summary:")
+        segment = stderr[pos:] if pos != -1 else stderr
+        matches = re.findall(r"I:\s+([-+]?\d+(?:\.\d+)?)\s+LUFS", segment)
+        if not matches:
+            return None
+        lufs = float(matches[-1])
+        gain = max(-51.0, min(51.0, RG_TARGET_LUFS - lufs))
+        return f"{gain:+.2f} dB"
     except Exception as e:
         print(f"ReplayGain calculation failed: {e}")
     return None
 
+
+def _lrclib_get(url: str, params: dict):
+    """LRCLIB: mandatory descriptive UA, honor Retry-After on 429, retry once."""
+    headers = {"User-Agent": USER_AGENT}
+    for attempt in range(2):
+        try:
+            res = requests.get(url, params=params, headers=headers, timeout=(10, 20))
+            if res.status_code == 429:
+                retry_after = int(res.headers.get("Retry-After", 3))
+                if attempt == 0 and retry_after <= 30:
+                    time.sleep(retry_after)
+                    continue
+                return None
+            if res.status_code == 200:
+                return res.json()
+            return None
+        except Exception:
+            return None
+    return None
+
+
 def fetch_lyrics(title: str, artist: str, album: str, duration_sec: float):
-    """Retrieves synced or plain lyrics from LRCLIB."""
-    headers = {"User-Agent": "Navidrome-Ingestor/2.0"}
+    """LRCLIB lyrics with relevance validation (blind results[0] often = wrong song)."""
     try:
-        # 1. Exact match
-        url_get = "https://lrclib.net/api/get"
-        params = {"track_name": title, "artist_name": artist, "album_name": album, "duration": int(duration_sec)}
-        res = requests.get(url_get, params=params, headers=headers, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
+        data = _lrclib_get("https://lrclib.net/api/get", {
+            "track_name": title, "artist_name": artist,
+            "album_name": album, "duration": int(duration_sec)})
+        if data:
             return data.get("syncedLyrics") or data.get("plainLyrics")
 
-        # 2. Search fallback
-        url_search = "https://lrclib.net/api/search"
-        search_params = {"q": f"{artist} {title}"}
-        res_search = requests.get(url_search, params=search_params, headers=headers, timeout=5)
-        if res_search.status_code == 200:
-            results = res_search.json()
-            if results:
-                return results[0].get("syncedLyrics") or results[0].get("plainLyrics")
+        results = _lrclib_get("https://lrclib.net/api/search", {"q": f"{artist} {title}"}) or []
+        best, best_sim = None, 0.0
+        for cand in results[:5]:
+            sim = (string_similarity(title, cand.get("track_name", "")) +
+                   string_similarity(artist, cand.get("artist_name", ""))) / 2.0
+            if sim > best_sim:
+                best, best_sim = cand, sim
+        if best and best_sim >= LRCLIB_MIN_SIMILARITY:
+            return best.get("syncedLyrics") or best.get("plainLyrics")
     except Exception:
         pass
     return None
 
-# --- RESILIENT DOWNLOADER ---
+
+# ================= RESILIENT DOWNLOADER =================
 
 def download_via_cobalt(url: str, track_uuid: str):
-    """Fallback engine using the Cobalt API to bypass strict IP blocks."""
-    headers = {
-        "Accept": "application/json", 
-        "Content-Type": "application/json",
-        "User-Agent": "Navidrome-Ingestor/2.0"
-    }
-    payload = {
-        "url": url,
-        "downloadMode": "audio",
-        "audioFormat": "opus"
-    }
+    """Self-hosted Cobalt v11 fallback (used only when yt-dlp is bot-blocked)."""
+    if not COBALT_API_URL:
+        raise DownloadBotError("Blocked by YouTube and COBALT_API_URL not configured.")
+    headers = {"Accept": "application/json", "Content-Type": "application/json",
+               "User-Agent": USER_AGENT}
+    if COBALT_API_KEY:
+        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+    payload = {"url": url, "downloadMode": "audio", "audioFormat": "opus"}
     try:
-        res = requests.post("https://api.cobalt.tools/", json=payload, headers=headers, timeout=15)
-        if not res.ok:
-            raise Exception(f"HTTP {res.status_code} - {res.text}")
-            
-        data = res.json()
+        res = requests.post(f"{COBALT_API_URL}/", json=payload, headers=headers, timeout=20)
+        data = res.json() if res.text else {}
+        if not res.ok or data.get("status") == "error":
+            code = data.get("error", {}).get("code", f"HTTP {res.status_code}")
+            raise DownloadBotError(f"Cobalt fallback failed: {code}")
         dl_url = data.get("url")
         if not dl_url:
-            raise Exception(f"Cobalt API returned no URL: {data}")
-            
+            raise DownloadBotError(f"Cobalt returned no URL: {json.dumps(data)[:200]}")
+
         temp_filename = f"temp_{track_uuid}.opus"
-        with requests.get(dl_url, stream=True) as r:
+        with requests.get(dl_url, stream=True, timeout=(15, 600)) as r:  # was: NO timeout
             r.raise_for_status()
             with open(temp_filename, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
         return temp_filename
+    except DownloadBotError:
+        raise
     except Exception as e:
         raise DownloadBotError(f"Cobalt fallback failed: {e}")
 
 
 @retry(
-    stop=stop_after_attempt(3), 
+    stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=3, min=3, max=15),
     retry=retry_if_exception_type(DownloadNetworkError),
-    reraise=True  
+    reraise=True,
 )
 def download_audio_file(url: str, track_uuid: str):
-    """Downloads audio via yt-dlp with tv,mweb client spoofing."""
+    """yt-dlp with tv,mweb spoofing + jittered pacing.
+    NOTE: extractor_args must be a NESTED dict keyed by extractor, arg is player_client."""
     temp_filename = f"temp_{track_uuid}"
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': f'{temp_filename}.%(ext)s',
         'noplaylist': True,
-        'extractor_args': {'youtube': ['client=tv,mweb']},
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'opus',
-            'preferredquality': '160',
-        }],
+        'extractor_args': {'youtube': {'player_client': PLAYER_CLIENTS}},  # FIXED format
+        'sleep_interval': DOWNLOAD_SLEEP_MIN,
+        'max_sleep_interval': DOWNLOAD_SLEEP_MAX,
+        'socket_timeout': 25,
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus',
+                            'preferredquality': '160'}],
         'quiet': True,
-        'no_warnings': True
+        'no_warnings': True,
     }
+    if YT_COOKIES_FILE and os.path.exists(YT_COOKIES_FILE):
+        ydl_opts['cookiefile'] = YT_COOKIES_FILE  # ~2000 vid/hr vs ~300 guest
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -191,111 +272,101 @@ def download_audio_file(url: str, track_uuid: str):
         return f"{temp_filename}.opus"
     except yt_dlp.utils.DownloadError as e:
         err = str(e).lower()
-        if "sign in" in err or "403" in err or "429" in err or "bot" in err:
-            print(f"[{track_uuid[:6]}] 🛑 yt-dlp blocked. Falling back to Cobalt API...")
+        if any(k in err for k in ("sign in", "403", "429", "bot", "not available",
+                                  "try again later", "page needs to be reloaded",
+                                  "precondition check failed")):
+            print(f"[{track_uuid[:6]}] 🛑 yt-dlp blocked. Falling back to Cobalt...")
             return download_via_cobalt(url, track_uuid)
-        elif "unavailable" in err or "private" in err or "removed" in err:
+        if any(k in err for k in ("unavailable", "private", "removed")):
             raise DownloadUnavailableError("Video unavailable or removed.")
-        else:
-            raise DownloadNetworkError(f"Network error during download: {e}")
+        raise DownloadNetworkError(f"Network error during download: {e}")
 
-# --- MULTI-STAGE CONSENSUS ENGINE ---
+
+# ================= MULTI-STAGE CONSENSUS ENGINE =================
 
 def get_consensus_metadata(file_path: str, raw_title: str, audio_duration: float):
-    """
-    Cross-references AcoustID and Scoped Text Search using Duration Guards
-    and ID Intersection to auto-approve matches.
-    """
     clean_artist, clean_title = clean_title_and_artist(raw_title)
     if not clean_title:
         clean_title = raw_title
 
-    acoustid_candidates = {}
-    text_candidates = {}
+    acoustid_candidates, text_candidates = {}, {}
 
-    # 1. AcoustID Fingerprinting with Duration Guard
+    # 1. AcoustID fingerprint (throttled to <=3 rps globally)
     if ACOUSTID_API_KEY:
-        time.sleep(ACOUSTID_DELAY)
+        _acoustid_throttle()
         try:
             results = acoustid.match(ACOUSTID_API_KEY, file_path)
             for score, recording_id, title, artist in results:
                 if score >= MATCH_THRESHOLD:
-                    mb_data = musicbrainzngs.get_recording_by_id(recording_id, includes=["artists", "releases"])
+                    mb_data = musicbrainzngs.get_recording_by_id(recording_id,
+                                                                 includes=["artists", "releases"])
                     rec = mb_data.get('recording')
                     if rec and is_duration_match(rec.get("length"), audio_duration):
                         artist_name = rec.get("artist-credit", [{}])[0].get("artist", {}).get("name", artist or "Unknown")
-                        album_name = rec.get("release-list", [{}])[0].get("title", "Singles") if rec.get("release-list") else "Singles"
+                        album_name = rec["release-list"][0]["title"] if rec.get("release-list") else "Singles"
                         acoustid_candidates[rec["id"]] = {
-                            "id": rec["id"],
-                            "title": rec.get("title", title),
-                            "artist": artist_name,
-                            "album": album_name,
-                            "score": score,
-                            "raw_data": rec
+                            "id": rec["id"], "title": rec.get("title", title),
+                            "artist": artist_name, "album": album_name,
+                            "score": round(score, 3), "raw_data": rec,
                         }
         except Exception as e:
             print(f"AcoustID lookup error: {e}")
 
-    # 2. Scoped MusicBrainz Text Search with Duration Guard
+    # 2. Scoped MusicBrainz text search (library enforces 1 rps internally)
     try:
-        if clean_artist:
-            query = f'recording:"{clean_title}" AND artist:"{clean_artist}"'
-        else:
-            query = f'recording:"{clean_title}"'
-        
-        search_res = musicbrainzngs.search_recordings(query=query, limit=3)
-        for rec in search_res.get("recording-list", []):
+        query = (f'recording:"{clean_title}" AND artist:"{clean_artist}"'
+                 if clean_artist else f'recording:"{clean_title}"')
+        for rec in musicbrainzngs.search_recordings(query=query, limit=3).get("recording-list", []):
             if is_duration_match(rec.get("length"), audio_duration):
                 artist_name = rec.get("artist-credit", [{}])[0].get("artist", {}).get("name", "Unknown")
-                album_name = rec.get("release-list", [{}])[0].get("title", "Singles") if rec.get("release-list") else "Singles"
+                album_name = rec["release-list"][0]["title"] if rec.get("release-list") else "Singles"
+                t_sim = string_similarity(clean_title, rec.get("title", ""))
+                a_sim = string_similarity(clean_artist, artist_name) if clean_artist else 1.0
                 text_candidates[rec["id"]] = {
-                    "id": rec["id"],
-                    "title": rec.get("title", clean_title),
-                    "artist": artist_name,
-                    "album": album_name,
-                    "raw_data": rec
+                    "id": rec["id"], "title": rec.get("title", clean_title),
+                    "artist": artist_name, "album": album_name,
+                    "score": round(0.65 * t_sim + 0.35 * a_sim, 3),
+                    "raw_data": rec,
                 }
     except Exception as e:
         print(f"MusicBrainz text search error: {e}")
 
-    # --- 3. CONSENSUS & INTERSECTION MATRIX ---
-
-    # Case A: Direct MBID Intersection (Audio & Text search picked the exact same song!)
-    intersecting_ids = set(acoustid_candidates.keys()).intersection(set(text_candidates.keys()))
-    if intersecting_ids:
-        chosen_id = list(intersecting_ids)[0]
+    # 3. Consensus matrix
+    intersecting = set(acoustid_candidates) & set(text_candidates)
+    if intersecting:
+        chosen_id = sorted(intersecting, key=lambda i: acoustid_candidates[i]["score"], reverse=True)[0]
         return True, acoustid_candidates[chosen_id]["raw_data"]
 
-    # Case B: High AcoustID Confidence + Title String Similarity > 60%
     if acoustid_candidates:
-        best_acoustic = max(acoustid_candidates.values(), key=lambda c: c["score"])
-        sim = string_similarity(clean_title, best_acoustic["title"])
-        if best_acoustic["score"] >= 0.85 and (sim >= 0.60 or not clean_artist):
-            return True, best_acoustic["raw_data"]
+        best = max(acoustid_candidates.values(), key=lambda c: c["score"])
+        if best["score"] >= 0.85 and (string_similarity(clean_title, best["title"]) >= 0.60 or not clean_artist):
+            return True, best["raw_data"]
 
-    # Case C: High Text Search Confidence (AcoustID failed, but text match is strong)
     if not acoustid_candidates and text_candidates:
-        best_text = list(text_candidates.values())[0]
-        title_sim = string_similarity(clean_title, best_text["title"])
-        artist_sim = string_similarity(clean_artist, best_text["artist"]) if clean_artist else 1.0
-        if title_sim >= 0.85 and artist_sim >= 0.70:
+        best_text = max(text_candidates.values(), key=lambda c: c["score"])
+        if best_text["score"] >= 0.80:
             return True, best_text["raw_data"]
 
-    # Case D: Ambiguity / Conflict -> Prepare clean choice list for UI
     all_unique = {**text_candidates, **acoustid_candidates}
     if all_unique:
-        final_list = list(all_unique.values())[:3] # Limit to top 3
+        # Sort by confidence so "Auto-Approve Best" truly picks the BEST candidate.
+        final_list = sorted(all_unique.values(), key=lambda c: c["score"], reverse=True)[:3]
         return False, final_list
 
-    # Case E: Zero matches anywhere -> Auto-approve with clean local tags
-    return True, None
+    return True, None  # zero matches -> clean local tags
 
 
-# --- PHASE 1: DOWNLOAD & FINGERPRINT ---
+# ================= PHASE 1: DOWNLOAD & IDENTIFY =================
+
 async def process_track(item: dict, track_uuid: str, user_id: str):
+    async with PIPELINE_SEMAPHORE:
+        await _process_track_inner(item, track_uuid, user_id)
+
+
+async def _process_track_inner(item: dict, track_uuid: str, user_id: str):
     url = item["url"]
     display_title = item.get("title", url)
-    
+
     await log(f"[{track_uuid[:6]}] 📥 Starting: {display_title}")
     database.update_track_status(track_uuid, 'DOWNLOADING')
 
@@ -305,25 +376,22 @@ async def process_track(item: dict, track_uuid: str, user_id: str):
         if not temp_file or not os.path.exists(temp_file):
             raise Exception("File extraction failed.")
 
-        # Read actual audio duration for the duration guard
-        audio_check = OggOpus(temp_file)
-        duration = audio_check.info.length
+        duration = OggOpus(temp_file).info.length
 
         await log(f"[{track_uuid[:6]}] 🔍 Running Consensus Identification...")
-        is_consensus, metadata_result = await asyncio.to_thread(get_consensus_metadata, temp_file, display_title, duration)
+        is_consensus, metadata_result = await asyncio.to_thread(
+            get_consensus_metadata, temp_file, display_title, duration)
 
         if not is_consensus:
             await log(f"[{track_uuid[:6]}] ⚠️ Ambiguous metadata. Pending approval.")
-            choices_json = json.dumps(metadata_result)
-            database.update_track_metadata_choices(track_uuid, choices_json, temp_file)
+            database.update_track_metadata_choices(track_uuid, json.dumps(metadata_result), temp_file)
             return
 
-        # Auto-approved! Proceed directly to Phase 2
-        await process_track_phase_2(track_uuid, temp_file, metadata_result, item)
+        await _phase_2_inner(track_uuid, temp_file, metadata_result, item)
 
     except DownloadBotError as e:
         database.update_track_status(track_uuid, 'BOT_BLOCKED', error_msg=str(e))
-        await log(f"[{track_uuid[:6]}] 🛑 {str(e)}")
+        await log(f"[{track_uuid[:6]}] 🛑 {e}")
     except DownloadUnavailableError:
         database.update_track_status(track_uuid, 'FAILED', error_msg="Unavailable / Private")
         await log(f"[{track_uuid[:6]}] ❌ Video is private or unavailable.")
@@ -331,21 +399,39 @@ async def process_track(item: dict, track_uuid: str, user_id: str):
         database.update_track_status(track_uuid, 'FAILED', error_msg=str(e))
         await log(f"[{track_uuid[:6]}] ⚠️ Processing error: {e}")
         if temp_file and os.path.exists(temp_file):
-            os.remove(temp_file)
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
 
 
-# --- PHASE 2: TAG, NORMALIZE, AND MOVE ---
+# ================= PHASE 2: TAG, NORMALIZE, MOVE =================
+
+def _embed_picture(audio: OggOpus, data: bytes, mime: str):
+    pic = Picture()
+    pic.type = 3
+    pic.mime = mime
+    pic.desc = "Front Cover"
+    pic.data = data
+    audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
+
+
 async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: dict, track_info: dict):
+    """Public entry (approvals/retags) — acquires the shared semaphore."""
+    async with PIPELINE_SEMAPHORE:
+        await _phase_2_inner(track_uuid, temp_file, mb_metadata, track_info)
+
+
+async def _phase_2_inner(track_uuid: str, temp_file: str, mb_metadata: dict, track_info: dict):
     try:
-        user_id = track_info.get("user_id", "admin")
+        user_id = track_info.get("user_id") or "admin"
         discovery_date = track_info.get("discovery_date") or datetime.now().strftime("%Y-%m-%d")
         raw_title = track_info.get("title", "Unknown Title")
-        
-        # Clean artist and title for clean fallback tags
         clean_artist, clean_title = clean_title_and_artist(raw_title)
 
         await log(f"[{track_uuid[:6]}] 🏷️ Applying Tags & ReplayGain...")
         audio = OggOpus(temp_file)
+        existing_pic = audio.get("metadata_block_picture")  # preserve if no new art found
         audio.delete()
         duration = audio.info.length
 
@@ -354,68 +440,57 @@ async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: di
             "artist": clean_artist or "Unknown Artist",
             "albumartist": clean_artist or "Unknown Artist",
             "album": "Singles",
-            "date": discovery_date[:4]
+            "date": discovery_date[:4],
         }
 
-        # Apply chosen MusicBrainz metadata if provided
+        cover_embedded = False
         if mb_metadata:
             parsed_info["title"] = mb_metadata.get("title", parsed_info["title"])
-            if "artist-credit" in mb_metadata and mb_metadata["artist-credit"]:
+            if mb_metadata.get("artist-credit"):
                 credit = mb_metadata["artist-credit"][0]
                 if isinstance(credit, dict) and "artist" in credit:
                     parsed_info["artist"] = credit["artist"]["name"]
                     parsed_info["albumartist"] = credit["artist"]["name"]
-
-            if "release-list" in mb_metadata and mb_metadata["release-list"]:
+            if mb_metadata.get("release-list"):
                 release = mb_metadata["release-list"][0]
                 parsed_info["album"] = release.get("title", "Singles")
                 if release.get("date"):
                     parsed_info["date"] = release["date"][:4]
+                cover_data, cover_mime = await asyncio.to_thread(fetch_cover_art, release.get("id"))
+                if cover_data:
+                    _embed_picture(audio, cover_data, cover_mime)
+                    cover_embedded = True
 
-                # Fetch Cover Art
-                release_id = release.get("id")
-                if release_id:
-                    cover_data = await asyncio.to_thread(fetch_cover_art, release_id)
-                    if cover_data:
-                        pic = Picture()
-                        pic.type = 3
-                        pic.mime = "image/jpeg"
-                        pic.desc = "Front Cover"
-                        pic.data = cover_data
-                        audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
+        if not cover_embedded and existing_pic:
+            audio["metadata_block_picture"] = existing_pic
 
-        # Embed Vorbis tags
+        # --- Permanent personal metadata (written exactly once) ---
         audio["title"] = [parsed_info["title"]]
         audio["artist"] = [parsed_info["artist"]]
         audio["albumartist"] = [parsed_info["albumartist"]]
         audio["album"] = [parsed_info["album"]]
         audio["date"] = [parsed_info["date"]]
         audio["comment"] = [f"Discovery Date: {discovery_date}"]
-        audio["NAVIDROME_PIPELINE_ID"] = [track_uuid]
         audio["DISCOVERY_DATE"] = [discovery_date]
-
-        # --- PERMANENT PERSONAL METADATA ---
-        audio["comment"] = [f"Discovery Date: {discovery_date}"]
-        audio["DISCOVERY_DATE"] = [discovery_date]
+        audio["DISCOVERY_TIMESTAMP"] = [f"{discovery_date}T00:00:00Z"]
         audio["NAVIDROME_PIPELINE_ID"] = [track_uuid]
-        audio["SOURCE_URL"] = [track_info.get("url", "")]
+        audio["SOURCE_URL"] = [track_info.get("url") or track_info.get("source_url") or ""]
         if track_info.get("playlist_name"):
             audio["SOURCE_PLAYLIST"] = [track_info["playlist_name"]]
 
-        # Embed ReplayGain
         rg_gain = await asyncio.to_thread(calculate_replaygain, temp_file)
         if rg_gain:
             audio["replaygain_track_gain"] = [rg_gain]
 
         audio.save()
 
-        # Build Organized Folder Hierarchy: library / user / Artist / Album / Track.opus
+        # Move into: library/<user>/<Artist>/<Album>/Track.opus
         folder_artist = sanitize_filename(parsed_info["albumartist"])
         folder_album = sanitize_filename(parsed_info["album"])
         file_name = sanitize_filename(f"{parsed_info['artist']} - {parsed_info['title']}.opus")
 
-        user_dir = os.path.join(NAVIDROME_LIB_DIR, sanitize_filename(user_id))
-        target_dir = os.path.join(user_dir, folder_artist, folder_album)
+        target_dir = os.path.join(NAVIDROME_LIB_DIR, sanitize_filename(user_id),
+                                  folder_artist, folder_album)
         os.makedirs(target_dir, exist_ok=True)
 
         final_path = os.path.join(target_dir, file_name)
@@ -425,35 +500,26 @@ async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: di
 
         shutil.move(temp_file, final_path)
 
-        # Set filesystem mtime to Discovery Date
         try:
-            dt_obj = datetime.strptime(discovery_date, "%Y-%m-%d")
-            mtime = dt_obj.timestamp()
+            mtime = datetime.strptime(discovery_date, "%Y-%m-%d").timestamp()
             os.utime(final_path, (mtime, mtime))
         except Exception:
             pass
 
-        # Fetch and save Lyrics (.lrc)
-        lyrics = await asyncio.to_thread(fetch_lyrics, parsed_info["title"], parsed_info["artist"], parsed_info["album"], duration)
+        lyrics = await asyncio.to_thread(fetch_lyrics, parsed_info["title"],
+                                         parsed_info["artist"], parsed_info["album"], duration)
         if lyrics:
-            lrc_path = os.path.splitext(final_path)[0] + ".lrc"
-            with open(lrc_path, "w", encoding="utf-8") as lf:
+            with open(os.path.splitext(final_path)[0] + ".lrc", "w", encoding="utf-8") as lf:
                 lf.write(lyrics)
 
-        # Extract MBID if present
         mbid = mb_metadata.get("id") if mb_metadata else None
         matched_title = f"{parsed_info['artist']} - {parsed_info['title']}"
 
-        database.update_track_status(
-            track_uuid, 
-            'COMPLETED', 
-            file_path=final_path, 
-            matched_title=matched_title, 
-            mbid=mbid
-        )
+        database.update_track_status(track_uuid, 'COMPLETED',
+                                     file_path=final_path,
+                                     matched_title=matched_title, mbid=mbid)
         await log(f"[{track_uuid[:6]}] ✅ Saved: {matched_title}")
 
-        # Sync Playlist
         playlist_name = track_info.get("playlist_name")
         if playlist_name:
             m3u_path = await asyncio.to_thread(sync_playlist_file, playlist_name, user_id)
@@ -467,18 +533,27 @@ async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: di
         if temp_file and os.path.exists(temp_file):
             try:
                 os.remove(temp_file)
-            except:
+            except OSError:
                 pass
 
-async def retag_existing_track(track_uuid: str, mbid: str = None, custom_artist: str = None, custom_title: str = None, custom_album: str = None):
-    """Re-tags an existing file on disk using a specific MBID or manual text, and moves it to the right folder."""
+
+# ================= MANUAL RETAG / OVERRIDE =================
+
+async def retag_existing_track(track_uuid: str, mbid: str = None, custom_artist: str = None,
+                               custom_title: str = None, custom_album: str = None):
+    """Re-tags + relocates a completed file. Preserves embedded art when no MBID given."""
+    async with PIPELINE_SEMAPHORE:
+        return await _retag_inner(track_uuid, mbid, custom_artist, custom_title, custom_album)
+
+
+async def _retag_inner(track_uuid, mbid, custom_artist, custom_title, custom_album):
     track = database.get_track_by_uuid(track_uuid)
     if not track or not track.get("file_path") or not os.path.exists(track["file_path"]):
         await log(f"[{track_uuid[:6]}] ❌ Cannot retag: file not found on disk.")
         return False
 
     old_file_path = track["file_path"]
-    user_id = track.get("user_id", "admin")
+    user_id = track.get("user_id") or "admin"
     discovery_date = track.get("discovery_date") or datetime.now().strftime("%Y-%m-%d")
 
     await log(f"[{track_uuid[:6]}] 🛠️ Manually updating metadata...")
@@ -488,46 +563,41 @@ async def retag_existing_track(track_uuid: str, mbid: str = None, custom_artist:
         "artist": custom_artist or "Unknown Artist",
         "albumartist": custom_artist or "Unknown Artist",
         "album": custom_album or "Singles",
-        "date": discovery_date[:4]
+        "date": discovery_date[:4],
     }
 
-    cover_data = None
-    # 1. If MusicBrainz ID is provided, fetch official data & art
+    cover_data, cover_mime = None, "image/jpeg"
     if mbid:
         try:
-            mb_data = await asyncio.to_thread(musicbrainzngs.get_recording_by_id, mbid.strip(), includes=["artists", "releases"])
+            mb_data = await asyncio.to_thread(musicbrainzngs.get_recording_by_id,
+                                              mbid.strip(), includes=["artists", "releases"])
             rec = mb_data.get('recording')
             if rec:
                 parsed_info["title"] = rec.get("title", parsed_info["title"])
-                if "artist-credit" in rec and rec["artist-credit"]:
+                if rec.get("artist-credit"):
                     credit = rec["artist-credit"][0]
                     if isinstance(credit, dict) and "artist" in credit:
                         parsed_info["artist"] = credit["artist"]["name"]
                         parsed_info["albumartist"] = credit["artist"]["name"]
-
-                if "release-list" in rec and rec["release-list"]:
+                if rec.get("release-list"):
                     release = rec["release-list"][0]
                     parsed_info["album"] = release.get("title", "Singles")
                     if release.get("date"):
                         parsed_info["date"] = release["date"][:4]
-                    
-                    # Fetch Cover Art
-                    release_id = release.get("id")
-                    if release_id:
-                        cover_data = await asyncio.to_thread(fetch_cover_art, release_id)
+                    cover_data, cover_mime = await asyncio.to_thread(fetch_cover_art, release.get("id"))
         except Exception as e:
             await log(f"[{track_uuid[:6]}] ⚠️ MusicBrainz ID lookup failed: {e}")
 
-    # Override with manual text if explicitly passed
+    # Explicit manual text always wins
     if custom_title: parsed_info["title"] = custom_title
-    if custom_artist: 
+    if custom_artist:
         parsed_info["artist"] = custom_artist
         parsed_info["albumartist"] = custom_artist
     if custom_album: parsed_info["album"] = custom_album
 
     try:
-        # 2. Write Tags into Opus File
         audio = OggOpus(old_file_path)
+        existing_pic = audio.get("metadata_block_picture")  # H3 FIX: don't lose art
         audio.delete()
         duration = audio.info.length
 
@@ -537,78 +607,63 @@ async def retag_existing_track(track_uuid: str, mbid: str = None, custom_artist:
         audio["album"] = [parsed_info["album"]]
         audio["date"] = [parsed_info["date"]]
         audio["comment"] = [f"Discovery Date: {discovery_date}"]
-        audio["NAVIDROME_PIPELINE_ID"] = [track_uuid]
         audio["DISCOVERY_DATE"] = [discovery_date]
+        audio["DISCOVERY_TIMESTAMP"] = [f"{discovery_date}T00:00:00Z"]
+        audio["NAVIDROME_PIPELINE_ID"] = [track_uuid]
+        audio["SOURCE_URL"] = [track.get("source_url") or ""]
 
         if cover_data:
-            pic = Picture()
-            pic.type = 3
-            pic.mime = "image/jpeg"
-            pic.desc = "Front Cover"
-            pic.data = cover_data
-            audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
+            _embed_picture(audio, cover_data, cover_mime)
+        elif existing_pic:
+            audio["metadata_block_picture"] = existing_pic
 
-        # Recalculate ReplayGain
         rg_gain = await asyncio.to_thread(calculate_replaygain, old_file_path)
         if rg_gain:
             audio["replaygain_track_gain"] = [rg_gain]
 
         audio.save()
 
-        # 3. Move File to New Hierarchy: user / Artist / Album / Track.opus
         folder_artist = sanitize_filename(parsed_info["albumartist"])
         folder_album = sanitize_filename(parsed_info["album"])
         file_name = sanitize_filename(f"{parsed_info['artist']} - {parsed_info['title']}.opus")
 
-        user_dir = os.path.join(NAVIDROME_LIB_DIR, sanitize_filename(user_id))
-        target_dir = os.path.join(user_dir, folder_artist, folder_album)
+        target_dir = os.path.join(NAVIDROME_LIB_DIR, sanitize_filename(user_id),
+                                  folder_artist, folder_album)
         os.makedirs(target_dir, exist_ok=True)
 
         new_final_path = os.path.join(target_dir, file_name)
+        if os.path.exists(new_final_path) and old_file_path != new_final_path:
+            base, ext = os.path.splitext(file_name)
+            new_final_path = os.path.join(target_dir, f"{base}_{track_uuid[:4]}{ext}")
         if old_file_path != new_final_path:
             shutil.move(old_file_path, new_final_path)
+            cleanup_empty_parent_dirs(old_file_path)   # Missing Piece #3
 
-        # Move/Rename .lrc lyrics if exists
         old_lrc = os.path.splitext(old_file_path)[0] + ".lrc"
         new_lrc = os.path.splitext(new_final_path)[0] + ".lrc"
         if os.path.exists(old_lrc):
             shutil.move(old_lrc, new_lrc)
-        else:
-            # Try fetching lyrics with updated tags
-            lyrics = await asyncio.to_thread(fetch_lyrics, parsed_info["title"], parsed_info["artist"], parsed_info["album"], duration)
+        elif not os.path.exists(new_lrc):
+            lyrics = await asyncio.to_thread(fetch_lyrics, parsed_info["title"],
+                                             parsed_info["artist"], parsed_info["album"], duration)
             if lyrics:
                 with open(new_lrc, "w", encoding="utf-8") as lf:
                     lf.write(lyrics)
 
-        # Set filesystem mtime
         try:
-            dt_obj = datetime.strptime(discovery_date, "%Y-%m-%d")
-            mtime = dt_obj.timestamp()
+            mtime = datetime.strptime(discovery_date, "%Y-%m-%d").timestamp()
             os.utime(new_final_path, (mtime, mtime))
         except Exception:
             pass
 
-        # 4. Update Database
         matched_title = f"{parsed_info['artist']} - {parsed_info['title']}"
-        actual_mbid = mbid.strip() if mbid else None
+        database.update_retag_result(track_uuid, matched_title,
+                                     mbid.strip() if mbid else None, new_final_path)
 
-        conn = database.sqlite3.connect(database.DB_FILE)
-        c = conn.cursor()
-        c.execute('''
-            UPDATE tracks 
-            SET matched_title=?, mbid=?, file_path=?, status='COMPLETED', error_msg=NULL 
-            WHERE track_uuid=?
-        ''', (matched_title, actual_mbid, new_final_path, track_uuid))
-        conn.commit()
-        conn.close()
+        await log(f"[{track_uuid[:6]}] ✨ Tags updated & file relocated: {matched_title}")
 
-        await log(f"[{track_uuid[:6]}] ✨ Tags updated & file relocated: {parsed_info['artist']} - {parsed_info['title']}")
-
-        # 5. Playlist Sync
-        playlist_name = track.get("playlist_name")
-        if playlist_name:
-            await asyncio.to_thread(sync_playlist_file, playlist_name, user_id)
-
+        if track.get("playlist_name"):
+            await asyncio.to_thread(sync_playlist_file, track["playlist_name"], user_id)
         return True
     except Exception as e:
         await log(f"[{track_uuid[:6]}] ❌ Retagging error: {e}")
