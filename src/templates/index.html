@@ -40,11 +40,16 @@
     <div class="grid">
         <!-- Ingestion Form -->
         <div class="panel">
-            <label style="font-weight: bold; color: #9ca3af;">Target User Subfolder:</label>
-            <select id="currentUser" onchange="loadMonitoredUrls(); refreshDashboard()" style="margin-bottom: 20px;">
-                <option value="admin">admin</option>
-                <option value="guest">guest</option>
+            <label style="font-weight: bold; color: #9ca3af; display: block; margin-bottom: 6px;">Target User Subfolder:</label>
+            <select id="currentUser" onchange="onUserChange()" style="margin-bottom: 8px;">
+                <!-- Populated dynamically via JS -->
             </select>
+
+            <!-- Add New User Form -->
+            <form id="addUserForm" style="display: flex; gap: 8px; margin-bottom: 20px;">
+                <input type="text" id="newUsername" placeholder="New user subfolder (e.g. arthur, chill)..." style="flex: 1; padding: 8px; border-radius: 4px; background:#0f111a; border: 1px solid #3b4261; color:white;" required>
+                <button type="submit" class="btn-sm" style="background: #10b981; white-space: nowrap;">+ Add User</button>
+            </form>
 
             <!-- Quick Add -->
             <h4>⚡ Quick Ingest (One-off)</h4>
@@ -89,8 +94,9 @@
                 <button class="btn-sm" onclick="batchApproveOriginal()" style="background: #4b5563;">🏷️ Keep Original All</button>
                 <button class="btn-sm" onclick="retryAllFailed()" style="background: #dc2626;">Retry All Failed</button>
             </div>
+        </div>
 
-        <div class="stats-bar">
+        <div class="stats-bar" style="margin-top: 15px;">
             <div class="stat-card">Total<div class="stat-val" id="stat-total">0</div></div>
             <div class="stat-card">Completed<div class="stat-val" id="stat-completed" style="color: #34d399;">0</div></div>
             <div class="stat-card">In Progress<div class="stat-val" id="stat-downloading" style="color: #60a5fa;">0</div></div>
@@ -110,7 +116,7 @@
                 </tr>
             </thead>
             <tbody id="track-table-body">
-                <tr><td colspan="6">Loading track ledger...</td></tr>
+                <tr><td colspan="7">Loading track ledger...</td></tr>
             </tbody>
         </table>
     </div>
@@ -147,28 +153,76 @@
 
     <script>
         // --- WEBSOCKET LOGS ---
-           try {
-                const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-                const ws = new WebSocket(`${protocol}//${window.location.host}/ws/logs`);
-                const logBox = document.getElementById("logs");
-                
-                ws.onmessage = (event) => {
-                    const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 40;
-                    const line = document.createElement("div");
-                    line.textContent = event.data;
-                    logBox.appendChild(line);
-                    while (logBox.childElementCount > 800) {
-                        logBox.removeChild(logBox.firstChild);
-                    }
-                    if (atBottom) logBox.scrollTop = logBox.scrollHeight;
-                };
+        try {
+            const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/logs`);
+            const logBox = document.getElementById("logs");
+            
+            ws.onmessage = (event) => {
+                const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 40;
+                const line = document.createElement("div");
+                line.textContent = event.data;
+                logBox.appendChild(line);
+                while (logBox.childElementCount > 800) {
+                    logBox.removeChild(logBox.firstChild);
+                }
+                if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+            };
 
-                ws.onerror = (err) => {
-                    console.warn("WebSocket error:", err);
-                };
+            ws.onerror = (err) => {
+                console.warn("WebSocket error:", err);
+            };
+        } catch (e) {
+            console.error("Failed to connect WebSocket logs:", e);
+        }
+
+        // --- USERS MANAGEMENT ---
+        async function loadUsers(selectedUser = null) {
+            try {
+                const res = await fetch('/api/users');
+                const data = await res.json();
+                const select = document.getElementById("currentUser");
+                const savedUser = selectedUser || localStorage.getItem("selected_user") || select.value || "admin";
+                
+                select.innerHTML = data.users.map(u => 
+                    `<option value="${escapeHtml(u)}" ${u === savedUser ? 'selected' : ''}>${escapeHtml(u)}</option>`
+                ).join("");
+
+                if (!data.users.includes(savedUser) && data.users.length > 0) {
+                    select.value = data.users[0];
+                }
+                localStorage.setItem("selected_user", select.value);
             } catch (e) {
-                console.error("Failed to connect WebSocket logs:", e);
+                console.error("Failed to load users:", e);
             }
+        }
+
+        function onUserChange() {
+            const user = document.getElementById("currentUser").value;
+            localStorage.setItem("selected_user", user);
+            loadMonitoredUrls();
+            refreshDashboard();
+        }
+
+        document.getElementById("addUserForm").onsubmit = async (e) => {
+            e.preventDefault();
+            const input = document.getElementById("newUsername");
+            const name = input.value.trim();
+            if (!name) return;
+
+            const formData = new FormData();
+            formData.append("username", name);
+            const res = await fetch('/api/users', { method: 'POST', body: formData });
+            const data = await res.json();
+
+            if (data.username) {
+                input.value = "";
+                await loadUsers(data.username);
+                onUserChange();
+            } else if (data.error) {
+                alert(data.error);
+            }
+        };
 
         // --- QUICK INGEST FORM ---
         document.getElementById("quickIngestForm").onsubmit = async (e) => {
@@ -184,23 +238,20 @@
         };
 
         // --- DASHBOARD TABLE & RETRIES ---
-        // Global store to hold the JSON choices temporarily in the browser
         window.pendingChoices = {};
 
         async function refreshDashboard() {
             try {
                 const userId = document.getElementById("currentUser").value;
+                if (!userId) return;
                 const res = await fetch(`/api/tracks?user_id=${encodeURIComponent(userId)}`);
                 const { tracks, stats } = await res.json();
 
-                // 1. Always update the numbers at the top
                 document.getElementById('stat-total').innerText = stats.total;
                 document.getElementById('stat-completed').innerText = stats.completed;
                 document.getElementById('stat-downloading').innerText = stats.downloading;
                 document.getElementById('stat-failed').innerText = stats.failed;
 
-                // 2. Prevent dropdown disappearing bug
-                // If a user has a dropdown focused, abort the table redraw so we don't interrupt them.
                 if (document.activeElement && document.activeElement.tagName === 'SELECT') {
                     return; 
                 }
@@ -245,7 +296,6 @@
                         }
                     }
 
-                    // Render Matched Metadata + Clickable MBID Link
                     let metaDisplay = '—';
                     if (t.matched_title) {
                         metaDisplay = `<strong>${escapeHtml(t.matched_title)}</strong>`;
@@ -278,7 +328,6 @@
             const selectedIdx = selectEl.value;
             let chosenMetadata = null;
             
-            // If they didn't choose the "fallback", extract the raw MusicBrainz JSON data
             if (selectedIdx !== 'fallback') {
                 chosenMetadata = window.pendingChoices[uuid][selectedIdx].raw_data;
             }
@@ -289,7 +338,6 @@
                 body: JSON.stringify(chosenMetadata)
             });
             
-            // Remove from global store and refresh UI immediately
             delete window.pendingChoices[uuid];
             refreshDashboard();
         }
@@ -312,10 +360,10 @@
             refreshDashboard();
         }
 
-        
         // --- MONITORED URLS SYSTEM ---
         async function loadMonitoredUrls() {
             const userId = document.getElementById("currentUser").value;
+            if (!userId) return;
             const res = await fetch(`/api/monitored-urls/${userId}`);
             const data = await res.json();
             const list = document.getElementById("urlList");
@@ -427,9 +475,12 @@
         }
 
         // Initialize UI
-        loadMonitoredUrls();
-        setInterval(refreshDashboard, 4000);
-        refreshDashboard();
+        (async () => {
+            await loadUsers();
+            loadMonitoredUrls();
+            setInterval(refreshDashboard, 4000);
+            refreshDashboard();
+        })();
     </script>
 </body>
 </html>

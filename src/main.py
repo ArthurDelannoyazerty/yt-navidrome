@@ -192,6 +192,18 @@ def _build_retry_item(track: dict) -> dict:
         "user_id": track["user_id"],           # C7 fix
     }
 
+@app.get("/api/users")
+async def api_get_users():
+    return {"users": database.get_users()}
+
+
+@app.post("/api/users")
+async def api_add_user(username: str = Form(...)):
+    clean_name = database.add_user(username)
+    if not clean_name:
+        return {"error": "Invalid username."}
+    return {"message": f"User '{clean_name}' created.", "username": clean_name}
+
 
 @app.post("/api/retry/{track_uuid}")
 async def retry_track(track_uuid: str, background_tasks: BackgroundTasks):

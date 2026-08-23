@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import uuid
 
@@ -18,8 +19,9 @@ def init_db():
     conn = _conn()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY, username TEXT)''')
-    c.execute("INSERT OR IGNORE INTO users (id, username) VALUES ('1', 'admin')")
+        id TEXT PRIMARY KEY, username TEXT UNIQUE)''')
+    c.execute("INSERT OR IGNORE INTO users (id, username) VALUES ('admin', 'admin')")
+    c.execute("INSERT OR IGNORE INTO users (id, username) VALUES ('guest', 'guest')")
 
     # Per-user isolation: same song can exist for two different users.
     c.execute('''
@@ -66,6 +68,22 @@ def init_db():
     conn.commit()
     conn.close()
 
+# ---------- USERS ----------
+
+def get_users():
+    conn = _conn()
+    rows = conn.execute("SELECT username FROM users ORDER BY username ASC").fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def add_user(username: str):
+    conn = _conn()
+    clean = re.sub(r'[\\/*?:"<>|]', "", str(username)).strip()
+    if clean:
+        conn.execute("INSERT OR IGNORE INTO users (id, username) VALUES (?, ?)", (clean, clean))
+        conn.commit()
+    conn.close()
+    return clean
 
 # ---------- QUEUE ----------
 
