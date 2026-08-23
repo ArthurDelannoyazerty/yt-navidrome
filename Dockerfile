@@ -21,7 +21,7 @@ RUN apt-get update \
 # JS runtime for yt-dlp EJS challenge solving
 COPY --from=denoland/deno:latest /usr/bin/deno /usr/local/bin/deno
 
-WORKDIR /app                        # must precede all relative COPYs
+WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
