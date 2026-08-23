@@ -8,7 +8,8 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-editable
+    uv sync --frozen --no-install-project --no-editable \
+ && uv pip install --upgrade https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
 
 # ---------- RUNTIME STAGE ----------
 FROM python:3.13-slim-trixie
