@@ -147,18 +147,28 @@
 
     <script>
         // --- WEBSOCKET LOGS ---
-        const ws = new WebSocket(`ws://${window.location.host}/ws/logs`);
-        const logBox = document.getElementById("logs");
-        ws.onmessage = (event) => {
-            const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 40;
-            const line = document.createElement("div");
-            line.textContent = event.data;              // text node, never parsed as HTML
-            logBox.appendChild(line);
-            while (logBox.childElementCount > 800) {    // ring buffer: survives 28k-line bulk runs
-                logBox.removeChild(logBox.firstChild);
+           try {
+                const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+                const ws = new WebSocket(`${protocol}//${window.location.host}/ws/logs`);
+                const logBox = document.getElementById("logs");
+                
+                ws.onmessage = (event) => {
+                    const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 40;
+                    const line = document.createElement("div");
+                    line.textContent = event.data;
+                    logBox.appendChild(line);
+                    while (logBox.childElementCount > 800) {
+                        logBox.removeChild(logBox.firstChild);
+                    }
+                    if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+                };
+
+                ws.onerror = (err) => {
+                    console.warn("WebSocket error:", err);
+                };
+            } catch (e) {
+                console.error("Failed to connect WebSocket logs:", e);
             }
-            if (atBottom) logBox.scrollTop = logBox.scrollHeight;
-        };
 
         // --- QUICK INGEST FORM ---
         document.getElementById("quickIngestForm").onsubmit = async (e) => {

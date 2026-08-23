@@ -183,23 +183,6 @@ async def api_retag_track(track_uuid: str, background_tasks: BackgroundTasks, re
     return {"message": "Retag task dispatched."}
 
 
-@app.get("/api/tracks")
-async def get_tracks(user_id: str = None):
-    tracks = database.get_dashboard_tracks(user_id=user_id)
-    stats = {"total": len(tracks), "completed": 0, "downloading": 0, "failed": 0, "pending_approval": 0}
-    for t in tracks:
-        s = t.get("status")
-        if s == "COMPLETED":
-            stats["completed"] += 1
-        elif s in ("DOWNLOADING", "PENDING"):
-            stats["downloading"] += 1
-        elif s == "NEEDS_APPROVAL":
-            stats["pending_approval"] += 1
-        elif s in ("FAILED", "BOT_BLOCKED"):
-            stats["failed"] += 1
-    return {"tracks": tracks, "stats": stats}
-
-
 def _build_retry_item(track: dict) -> dict:
     return {
         "url": track["source_url"],
