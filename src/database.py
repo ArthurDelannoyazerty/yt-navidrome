@@ -230,18 +230,44 @@ def get_track_by_uuid(track_uuid: str):
     return dict(row) if row else None
 
 
-def get_dashboard_tracks(user_id: str = None, limit: int = 200):
+def get_dashboard_tracks(user_id: str = None, limit: int = 50, offset: int = 0, status_filter: str = 'ALL'):
     conn = _conn()
     cols = ("track_uuid, source_url, title, playlist_name, discovery_date, status, "
             "error_msg, file_path, user_id, metadata_choices, matched_title, mbid")
-    order = ("ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC LIMIT ?")
+    
+    params = []
+    where_clauses = []
+    
     if user_id:
-        rows = conn.execute(f"SELECT {cols} FROM tracks WHERE user_id=? {order}",
-                            (user_id, limit)).fetchall()
-    else:
-        rows = conn.execute(f"SELECT {cols} FROM tracks {order}", (limit,)).fetchall()
+        where_clauses.append("user_id=?")
+        params.append(user_id)
+        
+    if status_filter and status_filter != 'ALL':
+        if status_filter == 'PENDING_DOWNLOADING':
+            where_clauses.append("status IN ('PENDING', 'DOWNLOADING')")
+        elif status_filter == 'FAILED':
+            where_clauses.append("status IN ('FAILED', 'BOT_BLOCKED')")
+        else:
+            where_clauses.append("status=?")
+            params.append(status_filter)
+            
+    where_str = ""
+    if where_clauses:
+        where_str = "WHERE " + " AND ".join(where_clauses)
+        
+    # Count total for pagination
+    count_sql = f"SELECT COUNT(*) FROM tracks {where_str}"
+    total_records = conn.execute(count_sql, params).fetchone()[0]
+    
+    # Fetch current page records
+    order = "ORDER BY CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END, rowid DESC LIMIT ? OFFSET ?"
+    sql = f"SELECT {cols} FROM tracks {where_str} {order}"
+    
+    fetch_params = params + [limit, offset]
+    rows = conn.execute(sql, fetch_params).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    
+    return [dict(r) for r in rows], total_records
 
 
 def search_tracks(query: str, user_id: str = None):

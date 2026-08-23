@@ -159,9 +159,18 @@ def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), user_i
 
 
 @app.get("/api/tracks")
-def get_tracks(user_id: str = None):
-    tracks = database.get_dashboard_tracks(user_id=user_id)
-    return {"tracks": tracks, "stats": database.get_status_stats(user_id=user_id)}
+def get_tracks(user_id: str = None, page: int = 1, limit: int = 50, status: str = 'ALL'):
+    offset = (page - 1) * limit
+    tracks, total = database.get_dashboard_tracks(
+        user_id=user_id, limit=limit, offset=offset, status_filter=status
+    )
+    return {
+        "tracks": tracks,
+        "stats": database.get_status_stats(user_id=user_id),
+        "total_records": total,
+        "page": page,
+        "limit": limit
+    }
 
 
 @app.post("/api/retag/{track_uuid}")

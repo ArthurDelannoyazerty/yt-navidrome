@@ -103,6 +103,26 @@
             <div class="stat-card">Failed / Blocked<div class="stat-val" id="stat-failed" style="color: #f87171;">0</div></div>
         </div>
 
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; background: #141721; padding: 12px; border-radius: 6px; border: 1px solid #282c3f;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <label style="font-size: 13px; font-weight: bold; color: #9ca3af;">Filter:</label>
+                <select id="statusFilter" onchange="changeFilter()" style="width: auto; margin: 0; padding: 6px; font-size: 13px;">
+                    <option value="ALL">All Tracks</option>
+                    <option value="PENDING_DOWNLOADING">Queue (Pending / Downloading)</option>
+                    <option value="NEEDS_APPROVAL">Needs Approval</option>
+                    <option value="COMPLETED">Completed</option>
+                    <option value="FAILED">Failed / Blocked</option>
+                </select>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <button class="btn-sm" style="background: #374151;" onclick="prevPage()">◀ Prev</button>
+                <span id="pageInfo" style="font-size: 13px; font-weight: bold; color: #e1e4ea;">Page 1 of 1 (0 items)</span>
+                <button class="btn-sm" style="background: #374151;" onclick="nextPage()">Next ▶</button>
+            </div>
+        </div>
+
+        <table>
+
         <table>
             <thead>
                 <tr>
@@ -239,26 +259,61 @@
 
         // --- DASHBOARD TABLE & RETRIES ---
         window.pendingChoices = {};
+        window.currentPage = 1;
+        window.currentStatus = 'ALL';
+        window.maxPage = 1;
+
+        function changeFilter() {
+            window.currentStatus = document.getElementById("statusFilter").value;
+            window.currentPage = 1; // Reset to page 1 on filter change
+            refreshDashboard();
+        }
+
+        function prevPage() {
+            if (window.currentPage > 1) {
+                window.currentPage--;
+                refreshDashboard();
+            }
+        }
+
+        function nextPage() {
+            if (window.currentPage < window.maxPage) {
+                window.currentPage++;
+                refreshDashboard();
+            }
+        }
 
         async function refreshDashboard() {
             try {
                 const userId = document.getElementById("currentUser").value;
                 if (!userId) return;
-                const res = await fetch(`/api/tracks?user_id=${encodeURIComponent(userId)}`);
-                const { tracks, stats } = await res.json();
+                
+                const res = await fetch(`/api/tracks?user_id=${encodeURIComponent(userId)}&page=${window.currentPage}&limit=50&status=${window.currentStatus}`);
+                const data = await res.json();
+                const { tracks, stats, total_records, page, limit } = data;
 
                 document.getElementById('stat-total').innerText = stats.total;
                 document.getElementById('stat-completed').innerText = stats.completed;
                 document.getElementById('stat-downloading').innerText = stats.downloading;
                 document.getElementById('stat-failed').innerText = stats.failed;
 
-                if (document.activeElement && document.activeElement.tagName === 'SELECT') {
+                // Stop refresh if user is currently making a dropdown selection INSIDE the table
+                if (document.activeElement && document.activeElement.tagName === 'SELECT' && document.activeElement.id.startsWith('approve-select-')) {
                     return; 
                 }
 
+                // Handle Pagination limits
+                window.maxPage = Math.ceil(total_records / limit) || 1;
+                if (window.currentPage > window.maxPage) {
+                    window.currentPage = window.maxPage;
+                    return refreshDashboard();
+                }
+
+                document.getElementById("pageInfo").innerText = `Page ${page} of ${window.maxPage} (${total_records} items)`;
+
                 const tbody = document.getElementById('track-table-body');
                 if (tracks.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7">No tracks processed yet.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="7">No tracks found.</td></tr>';
                     return;
                 }
 
@@ -278,7 +333,7 @@
                             window.pendingChoices[t.track_uuid] = choices;
                             
                             let options = choices.map((c, idx) => 
-                                `<option value='${idx}'>${c.artist} - ${c.title} (${c.album})</option>`
+                                `<option value='${idx}'>${escapeHtml(c.artist)} - ${escapeHtml(c.title)} (${escapeHtml(c.album)})</option>`
                             ).join('');
                             
                             options += `<option value='fallback'>⚠️ Keep Original YT Title (No Match)</option>`;
@@ -310,10 +365,10 @@
                         <tr>
                             <td><strong>${escapeHtml(t.title || 'Unknown')}</strong><br><small style="color: #6b7280;">${escapeHtml(t.source_url)}</small></td>
                             <td>${metaDisplay}</td>
-                            <td>${t.playlist_name || '—'}</td>
-                            <td>${t.discovery_date || '—'}</td>
+                            <td>${escapeHtml(t.playlist_name) || '—'}</td>
+                            <td>${escapeHtml(t.discovery_date) || '—'}</td>
                             <td><span class="badge badge-${t.status}">${t.status.replace('_', ' ')}</span></td>
-                            <td style="color: #f87171; font-size: 12px;">${t.error_msg || '—'}</td>
+                            <td style="color: #f87171; font-size: 12px;">${escapeHtml(t.error_msg) || '—'}</td>
                             <td>${actionHTML}</td>
                         </tr>
                     `;
