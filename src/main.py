@@ -133,6 +133,10 @@ app = FastAPI(lifespan=lifespan)
 async def get_ui(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
 
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
 
 @app.post("/ingest")
 async def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), user_id: str = Form("1")):
