@@ -502,11 +502,9 @@ async def _phase_2_inner(track_uuid: str, temp_file: str, mb_metadata: dict, tra
         rg_gain = await asyncio.to_thread(calculate_replaygain, temp_file)
         lyrics = await asyncio.to_thread(fetch_lyrics, parsed_info["title"], parsed_info["artist"], parsed_info["album"], duration)
 
-        # Structure Fix: Drop the user_id intermediary directory and map directly to Artist/Album.
-        folder_artist = sanitize_filename(parsed_info["albumartist"])
         folder_album = sanitize_filename(parsed_info["album"])
         file_name = sanitize_filename(f"{parsed_info['artist']} - {parsed_info['title']}.opus")
-        target_dir = os.path.join(NAVIDROME_LIB_DIR, folder_artist, folder_album)
+        target_dir = os.path.join(NAVIDROME_LIB_DIR, sanitize_filename(user_id), folder_album)
 
         final_path = await asyncio.to_thread(
             _apply_tags_and_move_sync, temp_file, target_dir, file_name, track_uuid,
@@ -649,10 +647,9 @@ async def _retag_inner(track_uuid, mbid, custom_artist, custom_title, custom_alb
     if custom_album: parsed_info["album"] = custom_album
 
     try:
-        folder_artist = sanitize_filename(parsed_info["albumartist"])
         folder_album = sanitize_filename(parsed_info["album"])
         file_name = sanitize_filename(f"{parsed_info['artist']} - {parsed_info['title']}.opus")
-        target_dir = os.path.join(NAVIDROME_LIB_DIR, folder_artist, folder_album)
+        target_dir = os.path.join(NAVIDROME_LIB_DIR, sanitize_filename(user_id), folder_album)
 
         new_final_path = await asyncio.to_thread(
             _retag_disk_ops_sync, old_file_path, target_dir, file_name, track_uuid,
