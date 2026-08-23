@@ -15,6 +15,10 @@ from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from playlist_sync import sync_playlist_file
 
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
+
+
 import yt_dlp
 import musicbrainzngs
 from mutagen.oggopus import OggOpus
@@ -47,7 +51,7 @@ COBALT_API_URL = os.getenv("COBALT_API_URL", "").rstrip("/")
 COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
 
 ACOUSTID_MIN_INTERVAL = max(_env_float("ACOUSTID_MIN_INTERVAL", 0.4), 0.34)
-ACOUSTID_API_KEY = os.getenv("ACOUSTID_API_KEY", "")
+ACOUSTID_API_KEY = os.getenv("ACOUSTID_API_KEY", "").strip(' "\'')
 NAVIDROME_LIB_DIR = os.getenv("NAVIDROME_LIB_DIR", "./navidrome_library")
 MATCH_THRESHOLD = 0.75
 RG_TARGET_LUFS = -18.0
