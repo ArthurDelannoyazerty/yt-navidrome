@@ -1,3 +1,5 @@
+# File: /src/main.py
+
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv()) 
 
@@ -18,13 +20,12 @@ from url_resolver import URLResolver
 from worker import process_track, process_track_phase_2, retag_existing_track, log_queue, log
 
 
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-WS_CLIENTS: set = set()               # all connected browsers receive EVERY line
-LOG_HISTORY = deque(maxlen=500)       # replay backlog to newly opened tabs
-ACTIVE_TASKS: set = set()             # strong refs so fire-and-forget tasks aren't GC'd
+WS_CLIENTS: set = set()
+LOG_HISTORY = deque(maxlen=500)
+ACTIVE_TASKS: set = set()
 
 
 def spawn(coro) -> asyncio.Task:
@@ -35,7 +36,6 @@ def spawn(coro) -> asyncio.Task:
 
 
 async def log_broadcaster():
-    """Single queue consumer -> fans out to every connected WebSocket client."""
     while True:
         msg = await log_queue.get()
         LOG_HISTORY.append(msg)
@@ -50,7 +50,6 @@ async def log_broadcaster():
 
 
 async def sync_scheduler(interval_hours: float):
-    """Missing Piece #2: poll monitored playlists for ALL users while you sleep."""
     while True:
         try:
             targets = database.get_all_monitored_urls()
@@ -69,7 +68,6 @@ async def sync_scheduler(interval_hours: float):
 
 
 async def unpack_and_enqueue(raw_urls: list, user_id: str):
-    """Resolves playlists OFF the event loop, then queues individual tracks."""
     for raw_url in raw_urls:
         await log(f"🔍 Analyzing link: {raw_url}")
         try:
@@ -84,8 +82,9 @@ async def unpack_and_enqueue(raw_urls: list, user_id: str):
 
         await log(f"📦 Found {len(resolved_items)} track(s). Adding to queue...")
         for item in resolved_items:
-            item["user_id"] = user_id  # C7 fix: survives into Phase 2 folder routing
-            track_uuid = database.add_track_to_queue(item, user_id)
+            item["user_id"] = user_id
+            # DB writes in to_thread to free the loop
+            track_uuid = await asyncio.to_thread(database.add_track_to_queue, item, user_id)
             if track_uuid:
                 spawn(process_track(item, track_uuid, user_id))
             else:
@@ -100,13 +99,12 @@ async def lifespan(app: FastAPI):
     if recovered:
         await log(f"♻️ Recovered {recovered} interrupted track(s) -> marked FAILED (use Retry).")
 
-    # Temp files referenced by NEEDS_APPROVAL rows are Phase 2 inputs — protect them.
     protected = set()
     for r in database.get_tracks_by_status("NEEDS_APPROVAL"):
         p = r.get("file_path")
         if p:
             protected.add(p)
-            protected.add(os.path.splitext(p)[0])  # pre-extraction original (.webm/.m4a)
+            protected.add(os.path.splitext(p)[0])
     for f in glob.glob(os.path.join(BASE_DIR, "temp_*")):
         if f in protected:
             continue
@@ -142,16 +140,17 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/", response_class=HTMLResponse)
-async def get_ui(request: Request):
+def get_ui(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
 
 @app.get("/healthz")
-async def healthz():
+def healthz():
     return {"ok": True}
 
 
+# REMOVED ASYNC from DB routes to execute in the threadpool and avoid blocking the event loop
 @app.post("/ingest")
-async def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), user_id: str = Form("1")):
+def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), user_id: str = Form("1")):
     url_list = [u.strip() for u in urls.split('\n') if u.strip()]
     if not url_list:
         return {"message": "No valid URLs provided."}
@@ -160,9 +159,10 @@ async def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), 
 
 
 @app.get("/api/tracks")
-async def get_tracks(user_id: str = None):
+def get_tracks(user_id: str = None):
     tracks = database.get_dashboard_tracks(user_id=user_id)
     return {"tracks": tracks, "stats": database.get_status_stats(user_id=user_id)}
+
 
 @app.post("/api/retag/{track_uuid}")
 async def api_retag_track(track_uuid: str, background_tasks: BackgroundTasks, request: Request):
@@ -189,16 +189,17 @@ def _build_retry_item(track: dict) -> dict:
         "title": track["title"],
         "playlist_name": track["playlist_name"],
         "discovery_date": track["discovery_date"],
-        "user_id": track["user_id"],           # C7 fix
+        "user_id": track["user_id"],
     }
 
+
 @app.get("/api/users")
-async def api_get_users():
+def api_get_users():
     return {"users": database.get_users()}
 
 
 @app.post("/api/users")
-async def api_add_user(username: str = Form(...)):
+def api_add_user(username: str = Form(...)):
     clean_name = database.add_user(username)
     if not clean_name:
         return {"error": "Invalid username."}
@@ -206,8 +207,7 @@ async def api_add_user(username: str = Form(...)):
 
 
 @app.post("/api/retry/{track_uuid}")
-async def retry_track(track_uuid: str, background_tasks: BackgroundTasks):
-    # Atomic claim: double-clicks cannot dispatch twice.
+def retry_track(track_uuid: str, background_tasks: BackgroundTasks):
     if not database.claim_track(track_uuid, ["FAILED", "BOT_BLOCKED"], "DOWNLOADING", "Retrying..."):
         return {"error": "Track is not in a retryable state."}
     track = database.get_track_by_uuid(track_uuid)
@@ -216,7 +216,7 @@ async def retry_track(track_uuid: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/api/force-retry/{track_uuid}")
-async def force_retry_track(track_uuid: str, background_tasks: BackgroundTasks):
+def force_retry_track(track_uuid: str, background_tasks: BackgroundTasks):
     if not database.claim_track(track_uuid, ["COMPLETED", "FAILED", "BOT_BLOCKED"],
                                 "DOWNLOADING", "Force retrying..."):
         return {"error": "Track cannot be force-retried right now."}
@@ -236,7 +236,7 @@ async def force_retry_track(track_uuid: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/api/retry-all-failed")
-async def retry_all_failed(background_tasks: BackgroundTasks, user_id: str = None):
+def retry_all_failed(background_tasks: BackgroundTasks, user_id: str = None):
     count = 0
     for track in database.get_failed_tracks(user_id=user_id):
         if database.claim_track(track["track_uuid"], ["FAILED", "BOT_BLOCKED"],
@@ -250,7 +250,7 @@ async def retry_all_failed(background_tasks: BackgroundTasks, user_id: str = Non
 @app.post("/api/approve/{track_uuid}")
 async def approve_track(track_uuid: str, background_tasks: BackgroundTasks, request: Request):
     try:
-        chosen_metadata = await request.json()  # may legitimately be null (Keep Original)
+        chosen_metadata = await request.json()
     except Exception:
         chosen_metadata = None
 
@@ -258,7 +258,6 @@ async def approve_track(track_uuid: str, background_tasks: BackgroundTasks, requ
     if not track or track["status"] != "NEEDS_APPROVAL":
         return {"error": "Track not pending approval."}
 
-    # Atomic gate: second click on ✅ is rejected here.
     if not database.claim_track(track_uuid, ["NEEDS_APPROVAL"], "DOWNLOADING", "Applying Tags..."):
         return {"error": "Track was already approved."}
 
@@ -268,12 +267,12 @@ async def approve_track(track_uuid: str, background_tasks: BackgroundTasks, requ
 
 
 @app.post("/api/batch-approve-best")
-async def batch_approve_best(background_tasks: BackgroundTasks, user_id: str = None):
+def batch_approve_best(background_tasks: BackgroundTasks, user_id: str = None):
     count = 0
     for t in database.get_tracks_by_status("NEEDS_APPROVAL", user_id=user_id):
         try:
             choices = json.loads(t.get("metadata_choices") or "[]")
-            chosen = choices[0]["raw_data"] if choices else None  # [0] = highest score (sorted)
+            chosen = choices[0]["raw_data"] if choices else None
         except Exception:
             chosen = None
         if database.claim_track(t["track_uuid"], ["NEEDS_APPROVAL"], "DOWNLOADING", "Batch approving..."):
@@ -284,7 +283,7 @@ async def batch_approve_best(background_tasks: BackgroundTasks, user_id: str = N
 
 
 @app.post("/api/batch-approve-original")
-async def batch_approve_original(background_tasks: BackgroundTasks, user_id: str = None):
+def batch_approve_original(background_tasks: BackgroundTasks, user_id: str = None):
     count = 0
     for t in database.get_tracks_by_status("NEEDS_APPROVAL", user_id=user_id):
         if database.claim_track(t["track_uuid"], ["NEEDS_APPROVAL"], "DOWNLOADING", "Batch approving..."):
@@ -294,18 +293,18 @@ async def batch_approve_original(background_tasks: BackgroundTasks, user_id: str
 
 
 @app.get("/api/monitored-urls/{user_id}")
-async def api_get_monitored_urls(user_id: str):
+def api_get_monitored_urls(user_id: str):
     return {"urls": database.get_monitored_urls(user_id)}
 
 
 @app.post("/api/monitored-urls")
-async def api_add_monitored_url(user_id: str = Form(...), url: str = Form(...), label: str = Form("Playlist")):
+def api_add_monitored_url(user_id: str = Form(...), url: str = Form(...), label: str = Form("Playlist")):
     database.add_monitored_url(user_id, url.strip(), label.strip())
     return {"message": "Saved"}
 
 
 @app.delete("/api/monitored-urls/{url_id}")
-async def api_delete_monitored_url(url_id: int):
+def api_delete_monitored_url(url_id: int):
     database.delete_monitored_url(url_id)
     return {"message": "Deleted"}
 
@@ -314,11 +313,11 @@ async def api_delete_monitored_url(url_id: int):
 async def websocket_logs(websocket: WebSocket):
     await websocket.accept()
     try:
-        for line in list(LOG_HISTORY):       # catch up on missed lines
+        for line in list(LOG_HISTORY):
             await websocket.send_text(line)
         WS_CLIENTS.add(websocket)
         while True:
-            await websocket.receive_text()   # hold open until client disconnects
+            await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     except Exception:
