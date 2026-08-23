@@ -40,6 +40,7 @@ def _env_int(name: str, default: int) -> int:
     return int(_env_float(name, default))
 
 PIPELINE_SEMAPHORE = asyncio.Semaphore(_env_int("MAX_CONCURRENT_TRACKS", 3))
+TAGGING_SEMAPHORE = asyncio.Semaphore(10) 
 
 DOWNLOAD_SLEEP_MIN = _env_float("DOWNLOAD_SLEEP_MIN", 2)
 DOWNLOAD_SLEEP_MAX = _env_float("DOWNLOAD_SLEEP_MAX", 6)
@@ -458,7 +459,7 @@ def _apply_tags_and_move_sync(temp_file, target_dir, file_name, track_uuid, pars
 
 
 async def process_track_phase_2(track_uuid: str, temp_file: str, mb_metadata: dict, track_info: dict):
-    async with PIPELINE_SEMAPHORE:
+    async with TAGGING_SEMAPHORE: 
         await _phase_2_inner(track_uuid, temp_file, mb_metadata, track_info)
 
 
@@ -596,7 +597,7 @@ def _retag_disk_ops_sync(old_file_path, target_dir, file_name, track_uuid, parse
     return new_final_path
 
 async def retag_existing_track(track_uuid: str, mbid: str = None, custom_artist: str = None, custom_title: str = None, custom_album: str = None):
-    async with PIPELINE_SEMAPHORE:
+    async with TAGGING_SEMAPHORE:
         return await _retag_inner(track_uuid, mbid, custom_artist, custom_title, custom_album)
 
 async def _retag_inner(track_uuid, mbid, custom_artist, custom_title, custom_album):
