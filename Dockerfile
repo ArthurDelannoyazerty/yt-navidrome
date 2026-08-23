@@ -3,9 +3,9 @@ FROM python:3.13-slim-trixie AS builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never      # fail loudly instead of silently
-                                   # building against a mismatched interpreter
-WORKDIR /app
+    UV_PYTHON_DOWNLOADS=never
+
+    WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
