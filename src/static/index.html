@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Music Ingestor</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header><div><h1>Music Ingestor</h1><p>Source playlists in. Tagged, user-separated music out.</p></div><label>Library user<select id="user" aria-label="Library user"></select></label></header>
+<div id="notice" role="status" aria-live="polite" hidden></div>
+<div class="columns">
+  <section>
+    <h2>Add music</h2>
+    <form id="ingestForm">
+      <label for="urls">Source URLs, one per line</label>
+      <textarea id="urls" placeholder="Paste playlist or track URLs" required></textarea>
+      <div class="row"><label class="check"><input id="monitor" type="checkbox" checked> Monitor and sync periodically</label><button type="submit">Import</button></div>
+      <p class="hint">YouTube is the initial provider. Other providers are not enabled yet. Playlist names never become music album tags.</p>
+    </form>
+    <form id="userForm" class="row"><input id="newUser" aria-label="New user" placeholder="New user: letters, numbers, _ or -" maxlength="64" required><button class="secondary">Add user</button></form>
+  </section>
+  <section>
+    <h2>Downloader maintenance</h2>
+    <dl id="runtime"></dl>
+    <div class="row"><button id="update" class="secondary">Update nightly build now</button><button id="rollback" class="secondary">Roll back</button></div>
+    <p class="hint">Updates switch future downloads to a new runtime. Running downloads and the API are not restarted.</p>
+  </section>
+</div>
+<section>
+  <div class="row spread"><h2>Sources and playlists</h2><button id="syncAll" class="secondary">Sync monitored sources</button></div>
+  <div id="sources" class="source-list"></div>
+</section>
+<section>
+  <div class="row spread"><h2>Track ledger</h2><div class="row"><button id="approveBest" class="secondary">Approve best matches</button><button id="approveOriginal" class="secondary">Keep original metadata</button><button id="retryAll" class="secondary">Retry failed</button></div></div>
+  <div id="stats" class="stats"></div>
+  <div class="row spread"><label>Filter <select id="filter"><option value="ALL">All tracks</option><option value="PENDING">Queued</option><option value="PROCESSING">Processing</option><option value="NEEDS_APPROVAL">Needs approval</option><option value="COMPLETED">Completed</option><option value="FAILED">Failed</option></select></label><div class="row"><button id="prev" class="secondary">Previous</button><span id="page"></span><button id="next" class="secondary">Next</button></div></div>
+  <div class="table-scroll"><table><thead><tr><th>Source title / matched metadata</th><th>Playlists</th><th>Discovered, UTC</th><th>Status / error</th><th>Actions</th></tr></thead><tbody id="tracks"></tbody></table></div>
+</section>
+<section>
+  <div class="row spread"><h2>Event log</h2><label class="check"><input id="errorsOnly" type="checkbox"> Warnings and errors only</label></div>
+  <p class="hint">Includes source API failures, beets output, downloader errors, updater failures and server errors. Recent events persist across restarts.</p>
+  <div id="logs" role="log" aria-label="Event log"></div>
+</section>
+<dialog id="editDialog">
+  <form id="editForm">
+    <h2>Edit music metadata</h2><p id="editTitle"></p>
+    <input id="editId" type="hidden">
+    <label>MusicBrainz recording ID<input id="editMbid" placeholder="Optional recording UUID"></label>
+    <label>MusicBrainz release ID<input id="editRelease" placeholder="Optional release UUID; must contain the recording"></label>
+    <label>Artist<input id="editArtist" placeholder="Leave blank to preserve"></label>
+    <label>Title<input id="editSong" placeholder="Leave blank to preserve"></label>
+    <label>Album<input id="editAlbum" placeholder="Leave blank to preserve"></label>
+    <p class="hint">Discovery remains in the comment. Release dates come from MusicBrainz; a playlist name is not a release.</p>
+    <div class="row"><button type="submit">Apply metadata</button><button id="cancelEdit" type="button" class="secondary">Cancel</button></div>
+  </form>
+</dialog>
+<footer>Local administration interface. User folders are not authentication; restrict access with your reverse proxy.</footer>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# Matching thresholds/weights are deliberately not overridden.
+plugins: [musicbrainz, chroma, fetchart, embedart, lyrics, replaygain]
+threaded: false
+original_date: true
+import:
+  write: true
+  copy: false
+  move: true
+  resume: false
+  incremental: false
+  singletons: true
+paths:
+  default: $albumartist/$album/$artist - $title
+  singleton: $artist/Non-Album/$artist - $title
+fetchart:
+  auto: false
+  sources: [coverart]
+embedart:
+  auto: false
+  remove_art_file: false
+lyrics:
+  auto: false
+  sources: [lrclib]
+  synced: true
+  print: false
+replaygain:
+  auto: false
+  backend: ffmpeg
+  threads: 0
+  parallel_on_import: false
+  r128_targetlevel: 89

@@ -1,0 +1,4 @@
+Verified against the user-supplied worker.py on 2026-10-07.
+The entire download_audio_file function AST, including its retry decorator, is identical
+except for the blocked-download branch that formerly invoked Cobalt.
+The branch now raises DownloadBotError. No yt-dlp options or download call were changed.

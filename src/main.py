@@ -1,335 +1,269 @@
-# File: /src/main.py
+"""FastAPI control plane. Run ONE worker process; durable jobs live in SQLite."""
+from dotenv import load_dotenv
+load_dotenv()
 
-from dotenv import load_dotenv, find_dotenv
-load_dotenv(find_dotenv()) 
-
-import os
-import glob
-import json
-import shutil
 import asyncio
-from collections import deque
+import fcntl
+import json
+import logging
+import os
+import shutil
+import traceback
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, Request, Form, WebSocket, WebSocketDisconnect, BackgroundTasks
-from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-import database
-from url_resolver import URLResolver
-from worker import process_track, process_track_phase_2, retag_existing_track, log_queue, log
-
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
-
-WS_CLIENTS: set = set()
-LOG_HISTORY = deque(maxlen=500)
-ACTIVE_TASKS: set = set()
+from common import ROOT
+from pipeline import Pipeline
+from providers import parse_source
+from store import Store
 
 
-def spawn(coro) -> asyncio.Task:
-    task = asyncio.create_task(coro)
-    ACTIVE_TASKS.add(task)
-    task.add_done_callback(ACTIVE_TASKS.discard)
-    return task
+class UserInput(BaseModel):
+    name: str
 
 
-async def log_broadcaster():
-    while True:
-        msg = await log_queue.get()
-        LOG_HISTORY.append(msg)
-        dead = []
-        for ws in list(WS_CLIENTS):
-            try:
-                await ws.send_text(msg)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            WS_CLIENTS.discard(ws)
+class SourceInput(BaseModel):
+    user_id: str
+    urls: list[str] = Field(min_length=1, max_length=100)
+    monitored: bool = False
+    label: str | None = None
 
 
-async def sync_scheduler(interval_hours: float):
-    while True:
+class ActionInput(BaseModel):
+    user_id: str
+    mode: str = "retry"
+    index: int | None = None
+    overrides: dict[str, str | None] = Field(default_factory=dict)
+
+
+class EventHandler(logging.Handler):
+    def __init__(self, store):
+        super().__init__(logging.WARNING)
+        self.store = store
+
+    def emit(self, record):
         try:
-            targets = database.get_all_monitored_urls()
-            await log(f"⏰ Scheduled sync started ({len(targets)} monitored playlist(s))...")
-            for t in targets:
-                try:
-                    await unpack_and_enqueue([t["url"]], t["user_id"])
-                except Exception as e:
-                    await log(f"❌ Scheduled sync failed for {t['label']}: {e}")
-            await log("⏰ Scheduled sync finished.")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            await log(f"⚠️ Scheduler error: {e}")
-        await asyncio.sleep(interval_hours * 3600)
-
-
-async def unpack_and_enqueue(raw_urls: list, user_id: str):
-    for raw_url in raw_urls:
-        await log(f"🔍 Analyzing link: {raw_url}")
-        try:
-            resolved_items = await asyncio.to_thread(URLResolver.resolve_url, raw_url)
-        except Exception as e:
-            await log(f"❌ Cannot resolve {raw_url}: {e}")
-            continue
-
-        if not resolved_items:
-            await log(f"⚠️ Could not extract tracks from: {raw_url}")
-            continue
-
-        await log(f"📦 Found {len(resolved_items)} track(s). Adding to queue...")
-        for item in resolved_items:
-            item["user_id"] = user_id
-            # DB writes in to_thread to free the loop
-            track_uuid = await asyncio.to_thread(database.add_track_to_queue, item, user_id)
-            if track_uuid:
-                spawn(process_track(item, track_uuid, user_id))
-            else:
-                await log(f"⏭️ Skipping already known track: {item['title']}")
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    database.init_db()
-
-    recovered = database.fail_interrupted()
-    if recovered:
-        await log(f"♻️ Recovered {recovered} interrupted track(s) -> marked FAILED (use Retry).")
-
-    protected = set()
-    for r in database.get_tracks_by_status("NEEDS_APPROVAL"):
-        p = r.get("file_path")
-        if p:
-            protected.add(p)
-            protected.add(os.path.splitext(p)[0])
-    for f in glob.glob(os.path.join(BASE_DIR, "temp_*")):
-        if f in protected:
-            continue
-        try:
-            os.remove(f)
-        except OSError:
-            pass
-
-    if not shutil.which("ffmpeg"):
-        await log("⚠️ ffmpeg not found in PATH — downloads & ReplayGain WILL FAIL.")
-    if not shutil.which("fpcalc"):
-        await log("⚠️ fpcalc (chromaprint) not found — AcoustID fingerprinting disabled.")
-
-    broadcaster = spawn(log_broadcaster())
-
-    scheduler_task = None
-    try:
-        interval = float((os.getenv("SYNC_INTERVAL_HOURS") or "0").split("#", 1)[0].strip() or 0)
-    except ValueError:
-        interval = 0.0
-    if interval > 0:
-        scheduler_task = spawn(sync_scheduler(interval))
-        await log(f"⏰ Auto-sync scheduler active: every {interval}h.")
-
-    yield
-
-    for t in (broadcaster, scheduler_task):
-        if t and not t.done():
-            t.cancel()
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-@app.get("/", response_class=HTMLResponse)
-def get_ui(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html")
-
-@app.get("/healthz")
-def healthz():
-    return {"ok": True}
-
-
-# REMOVED ASYNC from DB routes to execute in the threadpool and avoid blocking the event loop
-@app.post("/ingest")
-def ingest_urls(background_tasks: BackgroundTasks, urls: str = Form(...), user_id: str = Form("1")):
-    url_list = [u.strip() for u in urls.split('\n') if u.strip()]
-    if not url_list:
-        return {"message": "No valid URLs provided."}
-    background_tasks.add_task(unpack_and_enqueue, url_list, user_id)
-    return {"message": f"Processing {len(url_list)} URL(s) in the background. Check logs."}
-
-
-@app.get("/api/tracks")
-def get_tracks(user_id: str = None, page: int = 1, limit: int = 50, status: str = 'ALL'):
-    offset = (page - 1) * limit
-    tracks, total = database.get_dashboard_tracks(
-        user_id=user_id, limit=limit, offset=offset, status_filter=status
-    )
-    return {
-        "tracks": tracks,
-        "stats": database.get_status_stats(user_id=user_id),
-        "total_records": total,
-        "page": page,
-        "limit": limit
-    }
-
-
-@app.post("/api/retag/{track_uuid}")
-async def api_retag_track(track_uuid: str, background_tasks: BackgroundTasks, request: Request):
-    track = database.get_track_by_uuid(track_uuid)
-    if not track:
-        return {"error": "Track not found."}
-    if track["status"] != "COMPLETED":
-        return {"error": "Manual fixes are only allowed on COMPLETED tracks."}
-    data = await request.json()
-    background_tasks.add_task(
-        retag_existing_track,
-        track_uuid,
-        mbid=data.get("mbid"),
-        custom_artist=data.get("artist"),
-        custom_title=data.get("title"),
-        custom_album=data.get("album"),
-    )
-    return {"message": "Retag task dispatched."}
-
-
-def _build_retry_item(track: dict) -> dict:
-    return {
-        "url": track["source_url"],
-        "title": track["title"],
-        "playlist_name": track["playlist_name"],
-        "discovery_date": track["discovery_date"],
-        "user_id": track["user_id"],
-    }
-
-
-@app.get("/api/users")
-def api_get_users():
-    return {"users": database.get_users()}
-
-
-@app.post("/api/users")
-def api_add_user(username: str = Form(...)):
-    clean_name = database.add_user(username)
-    if not clean_name:
-        return {"error": "Invalid username."}
-    return {"message": f"User '{clean_name}' created.", "username": clean_name}
-
-
-@app.post("/api/retry/{track_uuid}")
-def retry_track(track_uuid: str, background_tasks: BackgroundTasks):
-    if not database.claim_track(track_uuid, ["FAILED", "BOT_BLOCKED"], "DOWNLOADING", "Retrying..."):
-        return {"error": "Track is not in a retryable state."}
-    track = database.get_track_by_uuid(track_uuid)
-    background_tasks.add_task(process_track, _build_retry_item(track), track_uuid, track["user_id"])
-    return {"message": f"Retrying {track['title']}"}
-
-
-@app.post("/api/force-retry/{track_uuid}")
-def force_retry_track(track_uuid: str, background_tasks: BackgroundTasks):
-    if not database.claim_track(track_uuid, ["COMPLETED", "FAILED", "BOT_BLOCKED"],
-                                "DOWNLOADING", "Force retrying..."):
-        return {"error": "Track cannot be force-retried right now."}
-    track = database.get_track_by_uuid(track_uuid)
-
-    for victim in filter(None, {track.get("file_path"),
-                                os.path.splitext(track.get("file_path") or "")[0] + ".lrc"}):
-        if os.path.exists(victim):
-            try:
-                os.remove(victim)
-            except OSError:
-                pass
-
-    database.reset_track_for_redownload(track_uuid)
-    background_tasks.add_task(process_track, _build_retry_item(track), track_uuid, track["user_id"])
-    return {"message": f"Force retrying {track['title']}"}
-
-
-@app.post("/api/retry-all-failed")
-def retry_all_failed(background_tasks: BackgroundTasks, user_id: str = None):
-    count = 0
-    for track in database.get_failed_tracks(user_id=user_id):
-        if database.claim_track(track["track_uuid"], ["FAILED", "BOT_BLOCKED"],
-                                "DOWNLOADING", "Bulk retrying..."):
-            background_tasks.add_task(process_track, _build_retry_item(track),
-                                      track["track_uuid"], track["user_id"])
-            count += 1
-    return {"message": f"Retrying {count} failed track(s)."}
-
-
-@app.post("/api/approve/{track_uuid}")
-async def approve_track(track_uuid: str, background_tasks: BackgroundTasks, request: Request):
-    try:
-        chosen_metadata = await request.json()
-    except Exception:
-        chosen_metadata = None
-
-    track = database.get_track_by_uuid(track_uuid)
-    if not track or track["status"] != "NEEDS_APPROVAL":
-        return {"error": "Track not pending approval."}
-
-    if not database.claim_track(track_uuid, ["NEEDS_APPROVAL"], "DOWNLOADING", "Applying Tags..."):
-        return {"error": "Track was already approved."}
-
-    background_tasks.add_task(process_track_phase_2, track_uuid,
-                              track["file_path"], chosen_metadata, track)
-    return {"message": "Approval accepted. Tagging and moving track."}
-
-
-@app.post("/api/batch-approve-best")
-def batch_approve_best(background_tasks: BackgroundTasks, user_id: str = None):
-    count = 0
-    for t in database.get_tracks_by_status("NEEDS_APPROVAL", user_id=user_id):
-        try:
-            choices = json.loads(t.get("metadata_choices") or "[]")
-            chosen = choices[0]["raw_data"] if choices else None
+            self.store.event(record.levelname, self.format(record), target="server")
         except Exception:
-            chosen = None
-        if database.claim_track(t["track_uuid"], ["NEEDS_APPROVAL"], "DOWNLOADING", "Batch approving..."):
-            background_tasks.add_task(process_track_phase_2, t["track_uuid"],
-                                      t["file_path"], chosen, t)
-            count += 1
-    return {"message": f"Approving {count} track(s) with best match."}
+            self.handleError(record)
 
 
-@app.post("/api/batch-approve-original")
-def batch_approve_original(background_tasks: BackgroundTasks, user_id: str = None):
-    count = 0
-    for t in database.get_tracks_by_status("NEEDS_APPROVAL", user_id=user_id):
-        if database.claim_track(t["track_uuid"], ["NEEDS_APPROVAL"], "DOWNLOADING", "Batch approving..."):
-            background_tasks.add_task(process_track_phase_2, t["track_uuid"], t["file_path"], None, t)
-            count += 1
-    return {"message": f"Bypassing MusicBrainz for {count} track(s)."}
+def create_app(store=None, start_workers=True):
+    store = store or Store()
+    pipeline = Pipeline(store)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        store.init()
+        lock = (store.path.parent / "instance.lock").open("w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            raise RuntimeError("Run one API worker/replica per state directory")
+        handler = EventHandler(store)
+        logging.getLogger().addHandler(handler)
+        tasks = []
+        if start_workers:
+            store.recover()
+            for binary in ("ffmpeg", "fpcalc", "deno"):
+                if not shutil.which(binary):
+                    store.event("ERROR", f"Required binary not found: {binary}", target="startup")
+            tasks = [asyncio.create_task(pipeline.work(), name="worker"),
+                     asyncio.create_task(pipeline.schedule(), name="scheduler")]
+            def report_task_failure(task):
+                if not task.cancelled() and task.exception():
+                    store.event("ERROR", f"{task.get_name()} stopped unexpectedly: {task.exception()}", target="server")
+            for task in tasks:
+                task.add_done_callback(report_task_failure)
+            app.state.worker_tasks = tasks
+        try:
+            yield
+        finally:
+            pipeline.stopping.set()
+            for task in tasks + list(pipeline.children):
+                task.cancel()
+            await asyncio.gather(*tasks, *list(pipeline.children), return_exceptions=True)
+            logging.getLogger().removeHandler(handler)
+            lock.close()
+
+    app = FastAPI(title="Music Ingestor", lifespan=lifespan)
+    app.state.store, app.state.pipeline = store, pipeline
+    app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+    @app.middleware("http")
+    async def browser_security(request, call_next):
+        origin = request.headers.get("origin")
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
+            from urllib.parse import urlsplit
+            if urlsplit(origin).netloc != request.headers.get("host"):
+                store.event("ERROR", "Rejected cross-origin write request", target="api")
+                return JSONResponse({"error": "Cross-origin writes are not allowed"}, status_code=403)
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+        return response
+
+    async def error_response(request, exc):
+        status = 404 if isinstance(exc, LookupError) else 400
+        if isinstance(exc, RequestValidationError):
+            status = 422
+        elif isinstance(exc, HTTPException):
+            status = exc.status_code
+        elif not isinstance(exc, (ValueError, LookupError)):
+            status = 500
+        detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        store.event("ERROR", f"{request.method} {request.url.path}: {detail}", target="api")
+        if status == 500:
+            store.event("ERROR", traceback.format_exc(), target="api")
+            detail = "Internal server error. See the event log."
+        return JSONResponse({"error": detail}, status_code=status)
+
+    for exception in (ValueError, LookupError, HTTPException, RequestValidationError, Exception):
+        app.add_exception_handler(exception, error_response)
+
+    @app.get("/")
+    def index():
+        return FileResponse(ROOT / "static" / "index.html")
+
+    @app.get("/healthz")
+    def health():
+        store.one("SELECT 1")
+        if any(t.done() for t in getattr(app.state, "worker_tasks", [])):
+            raise HTTPException(503, "A background worker stopped; inspect the event log and restart")
+        return {"ok": True}
+
+    @app.get("/api/users")
+    def users():
+        return [r["name"] for r in store.rows("SELECT name FROM users ORDER BY name")]
+
+    @app.post("/api/users")
+    def add_user(data: UserInput):
+        store.add_user(data.name)
+        return {"name": data.name}
+
+    @app.get("/api/sources")
+    def sources(user_id: str):
+        store.require_user(user_id)
+        return store.rows("SELECT * FROM sources WHERE user_id=? ORDER BY title", (user_id,))
+
+    @app.post("/api/sources")
+    def add_sources(data: SourceInput):
+        # Validate the whole input before persisting any work.
+        refs = [parse_source(url) for url in data.urls]
+        return [store.add_source(ref, data.user_id, data.monitored, data.label) for ref in refs]
+
+    @app.post("/api/sources/{source_id}/retry")
+    def retry_source(source_id: str, data: ActionInput):
+        source = store.owned("sources", source_id, data.user_id)
+        if not store.enqueue("sync", source_id, data.user_id):
+            raise ValueError("This source already has an active sync")
+        store.update("sources", source_id, status="PENDING")
+        return {"message": "Source sync queued"}
+
+    @app.delete("/api/sources/{source_id}")
+    def delete_source(source_id: str, user_id: str):
+        source = store.owned("sources", source_id, user_id)
+        with store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute("SELECT 1 FROM jobs WHERE target=? AND state='RUNNING'", (source_id,)).fetchone():
+                raise ValueError("Wait until this source finishes syncing")
+            con.execute("DELETE FROM jobs WHERE target=? AND state='PENDING'", (source_id,))
+            con.execute("DELETE FROM sources WHERE id=?", (source_id,))
+        # Remove only the generated playlist; never delete music files.
+        if source["playlist_path"]:
+            from common import LIBRARY
+            path = Path(source["playlist_path"]).resolve()
+            if path.parent == (LIBRARY / user_id / "000000-playlists").resolve():
+                path.unlink(missing_ok=True)
+        return {"message": "Source removed; music retained"}
+
+    @app.get("/api/tracks")
+    def tracks(user_id: str, page: int = Query(1, ge=1), limit: int = Query(50, ge=1, le=100), status: str = "ALL"):
+        store.require_user(user_id)
+        params = [user_id]
+        where = "user_id=?"
+        if status != "ALL":
+            where += " AND status=?"
+            params.append(status)
+        total = store.one(f"SELECT COUNT(*) AS n FROM tracks WHERE {where}", params)["n"]
+        rows = store.rows(f"SELECT * FROM tracks WHERE {where} ORDER BY rowid DESC LIMIT ? OFFSET ?", (*params, limit, (page - 1) * limit))
+        for row in rows:
+            choices = json.loads(row.pop("choices"))
+            # Only display data crosses the approval boundary; the server retains tag snapshots.
+            row["choices"] = [{k: v for k, v in c.items() if k != "tags"} for c in choices]
+            row.pop("selected", None)
+            row["playlists"] = store.rows("""SELECT s.title,m.added_at FROM sources s JOIN memberships m
+                ON s.id=m.source_id WHERE m.track_id=? AND s.is_playlist=1 ORDER BY m.added_at""", (row["id"],))
+        counts = store.rows("SELECT status,COUNT(*) AS n FROM tracks WHERE user_id=? GROUP BY status", (user_id,))
+        return {"tracks": rows, "total": total, "page": page, "limit": limit, "stats": {r["status"]: r["n"] for r in counts}}
+
+    @app.post("/api/tracks/{track_id}/action")
+    def track_action(track_id: str, data: ActionInput):
+        if data.mode not in {"retry", "approve", "redownload", "retag", "reidentify"}:
+            raise ValueError("Unsupported track action")
+        if set(data.overrides) - {"artist", "title", "album", "mbid", "release_id"}:
+            raise ValueError("Unsupported metadata override")
+        import uuid
+        for key in ("mbid", "release_id"):
+            if data.overrides.get(key):
+                uuid.UUID(data.overrides[key])
+        store.queue_track(track_id, data.user_id, data.model_dump(exclude={"user_id"}))
+        return {"message": "Track job queued"}
+
+    @app.post("/api/batch")
+    def batch(data: ActionInput):
+        if data.mode not in {"retry", "best", "original"}:
+            raise ValueError("Unsupported batch action")
+        state = "FAILED" if data.mode == "retry" else "NEEDS_APPROVAL"
+        queued = 0
+        store.require_user(data.user_id)
+        for track in store.rows("SELECT * FROM tracks WHERE user_id=? AND status=?", (data.user_id, state)):
+            if data.mode == "best" and not json.loads(track["choices"]):
+                continue
+            payload = {"mode": "retry"} if data.mode == "retry" else {"mode": "approve", "index": 0 if data.mode == "best" else None}
+            try:
+                store.queue_track(track["id"], data.user_id, payload)
+                queued += 1
+            except ValueError:
+                pass  # Concurrent request already queued this track.
+        return {"message": f"Queued {queued} tracks"}
+
+    @app.get("/api/events")
+    def events(user_id: str, after: int = Query(0, ge=0)):
+        store.require_user(user_id)
+        if not after:
+            return list(reversed(store.rows("SELECT * FROM events WHERE user_id=? OR user_id IS NULL ORDER BY id DESC LIMIT 200", (user_id,))))
+        return store.rows("SELECT * FROM events WHERE id>? AND (user_id=? OR user_id IS NULL) ORDER BY id LIMIT 500", (after, user_id))
+
+    @app.get("/api/system")
+    def system():
+        try:
+            active = pipeline.downloader.active()
+        except Exception as exc:
+            active = {"error": str(exc)}
+        return {"downloader": active, "last_update": store.setting("downloader_update"),
+                "next_update": store.setting("next_downloader_update"), "beets": "2.14.1"}
+
+    @app.post("/api/downloader/update")
+    async def update_downloader_async():
+        pipeline.start_update()
+        return {"message": "Downloader update queued"}
+
+    @app.post("/api/downloader/rollback")
+    async def rollback_downloader():
+        if pipeline.downloader.lock.locked():
+            raise ValueError("Wait for the active downloader update to finish")
+        previous = await pipeline.downloader.rollback()
+        return {"message": f"Downloader rolled back to {previous['version']}"}
+
+    return app
 
 
-@app.get("/api/monitored-urls/{user_id}")
-def api_get_monitored_urls(user_id: str):
-    return {"urls": database.get_monitored_urls(user_id)}
-
-
-@app.post("/api/monitored-urls")
-def api_add_monitored_url(user_id: str = Form(...), url: str = Form(...), label: str = Form("Playlist")):
-    database.add_monitored_url(user_id, url.strip(), label.strip())
-    return {"message": "Saved"}
-
-
-@app.delete("/api/monitored-urls/{url_id}")
-def api_delete_monitored_url(url_id: int):
-    database.delete_monitored_url(url_id)
-    return {"message": "Deleted"}
-
-
-@app.websocket("/ws/logs")
-async def websocket_logs(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        for line in list(LOG_HISTORY):
-            await websocket.send_text(line)
-        WS_CLIENTS.add(websocket)
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        WS_CLIENTS.discard(websocket)
+app = create_app()

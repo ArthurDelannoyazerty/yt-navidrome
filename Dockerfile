@@ -1,43 +1,44 @@
-# ---------- BUILD STAGE ----------
+# syntax=docker/dockerfile:1
 FROM python:3.13-slim-trixie AS builder
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
+COPY pyproject.toml ./
+# No legacy uv.lock was supplied. Resolve honestly rather than shipping a fake lock.
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --no-install-project
 
-COPY pyproject.toml uv.lock ./
+# A second venv prevents downloader updates from modifying beets or API dependencies.
+# CI passes a unique value to refresh this layer even when other build layers are cached.
+ARG DOWNLOADER_BUILD=initial
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-editable \
- && uv pip install --upgrade https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
+    echo "$DOWNLOADER_BUILD" \
+ && uv venv --python /usr/local/bin/python /opt/ytdlp \
+ && uv pip install --python /opt/ytdlp/bin/python --prerelease=allow "yt-dlp[default]" "tenacity>=9,<10"
 
-# ---------- RUNTIME STAGE ----------
 FROM python:3.13-slim-trixie
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH" \
+    INGESTOR_STATE_DIR=/data/state NAVIDROME_LIB_DIR=/data/library \
+    YTDLP_PYTHON=/opt/ytdlp/bin/python UV_PYTHON_DOWNLOADS=never \
+    UV_CACHE_DIR=/data/state/uv-cache TZ=Europe/Paris
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools ca-certificates \
+ && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools ca-certificates tzdata \
  && rm -rf /var/lib/apt/lists/*
-
-# JS runtime for yt-dlp EJS challenge solving
+COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=denoland/deno:latest /usr/bin/deno /usr/local/bin/deno
-
-WORKDIR /app
-
 COPY --from=builder /app/.venv /app/.venv
-ENV PATH="/app/.venv/bin:$PATH"
-
+COPY --from=builder /app/uv.lock /app/build-uv.lock
+COPY --from=builder /opt/ytdlp /opt/ytdlp
+WORKDIR /app
+COPY beets.yaml ./
 COPY src/ ./src/
-
+COPY tools/ ./tools/
 RUN useradd -m -u 1000 pipeline \
- && mkdir -p /data/library \
- && chown -R pipeline:pipeline /app /data
+ && mkdir -p /data/state /data/library \
+ && chown -R pipeline:pipeline /data /home/pipeline
 USER pipeline
-
 WORKDIR /app/src
 EXPOSE 8008
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8008/healthz')" || exit 1
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8008"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
+ CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/healthz')" || exit 1
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8008", "--workers", "1", "--timeout-graceful-shutdown", "30"]

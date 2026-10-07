@@ -61,3 +61,17 @@ ledger.json
 
 cookies.txt
 unprocessed_urls.txt
+
+
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.db
+*.db-*
+*.sqlite*
+state/
+library/
+legacy/
+cookies.txt

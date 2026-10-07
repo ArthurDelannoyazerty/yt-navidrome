@@ -1,0 +1,23 @@
+services:
+  ingestor:
+    build: .
+    image: music-ingestor:local
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    ports:
+      - "127.0.0.1:8008:8008"
+    env_file: .env
+    environment:
+      INGESTOR_STATE_DIR: /data/state
+      NAVIDROME_LIB_DIR: /data/library
+    volumes:
+      - state:/data/state
+      - library:/data/library
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  state:
+  library:
