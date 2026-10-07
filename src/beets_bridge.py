@@ -7,7 +7,6 @@ web approval boundary and release context that singleton imports otherwise lack.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import sys
 import traceback
@@ -272,8 +271,6 @@ def main(request):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    logging.getLogger("beets").setLevel(logging.DEBUG)
     try:
         request = json.loads(Path(sys.argv[1]).read_text())
         result = main(request)
@@ -281,3 +278,4 @@ if __name__ == "__main__":
     except Exception:
         traceback.print_exc()
         sys.exit(1)
+
