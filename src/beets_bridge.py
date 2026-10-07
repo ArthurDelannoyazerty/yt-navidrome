@@ -66,6 +66,19 @@ class Bridge:
         item = self.lib.get_item(track["beets_id"]) if track.get("beets_id") else None
         return item or self.lib.items(MatchQuery("pipeline_id", track["id"], fast=False)).get()
 
+    def delete_track(self, track):
+        """Remove this user's item from beets and delete its managed audio file."""
+        item = self.find_existing(track)
+        if not item:
+            return {"removed": False}
+        candidate = Path(os.fsdecode(item.path)).resolve()
+        if not candidate.is_relative_to(self.directory):
+            raise RuntimeError("Refusing to delete a beets item outside this user's library")
+        existed = candidate.is_file()
+        # If the file was already removed manually, still clean the beets database.
+        item.remove(delete=existed, with_album=True)
+        return {"removed": True, "file_path": str(candidate), "file_existed": existed}
+
     def identify(self, path, title):
         from beets import config, plugins
         from beets.autotag import Recommendation, Source, tag_item
@@ -253,6 +266,8 @@ def main(request):
             if candidate.is_file() and candidate.is_relative_to(bridge.directory):
                 return {"found": True, "complete": item.get("pipeline_complete") == "yes", **bridge.result(item)}
         return {"found": False}
+    if mode == "delete":
+        return bridge.delete_track(track)
     if mode == "identify":
         return bridge.identify(path, track["title"])
     selected = request.get("selected")
