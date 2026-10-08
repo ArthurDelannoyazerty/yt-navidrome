@@ -56,7 +56,7 @@ def test_frontend_assets_are_content_versioned_and_cache_safe(db):
         page = client.get("/")
         assert page.status_code == 200
         assert "__STATIC_VERSION__" not in page.text
-        versions = re.findall(r'/static/(?:style\\.css|app\\.js)\\?v=([0-9a-f]{12})', page.text)
+        versions = re.findall(r'/static/(?:style\.css|app\.js)\?v=([0-9a-f]{12})', page.text)
         assert len(versions) == 2 and versions[0] == versions[1]
         assert 'Loading…' in page.text
         assert page.headers["Cache-Control"] == "no-store, max-age=0"
