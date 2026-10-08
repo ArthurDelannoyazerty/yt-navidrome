@@ -8,54 +8,144 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-<header><div><h1>Music Ingestor</h1><p>Source playlists in. Tagged, user-separated music out.</p></div><label>Library user<select id="user" aria-label="Library user"></select></label></header>
+<header class="app-header">
+  <div>
+    <h1>Music Ingestor</h1>
+    <p>Provider-aware, user-separated music library management.</p>
+  </div>
+  <label class="user-picker">Library user<select id="user" aria-label="Library user"></select></label>
+</header>
+
+<nav class="tabs" aria-label="Application sections">
+  <button type="button" class="tab active" data-tab="music">Music</button>
+  <button type="button" class="tab" data-tab="sources">Sources</button>
+  <button type="button" class="tab" data-tab="activity">Activity</button>
+  <button type="button" class="tab" data-tab="maintenance">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></button>
+</nav>
+
 <div id="notice" role="status" aria-live="polite" hidden></div>
-<div class="columns">
-  <section>
-    <h2>Add music</h2>
-    <form id="ingestForm">
-      <label for="urls">Source URLs, one per line</label>
-      <textarea id="urls" placeholder="Paste playlist or track URLs" required></textarea>
-      <div class="row"><label class="check"><input id="monitor" type="checkbox" checked> Monitor and sync periodically</label><button type="submit">Import</button></div>
-      <p class="hint">YouTube is the initial provider. Other providers are not enabled yet. Playlist names never become music album tags.</p>
-    </form>
-    <form id="userForm" class="row"><input id="newUser" aria-label="New user" placeholder="New user: letters, numbers, _ or -" maxlength="64" required><button class="secondary">Add user</button></form>
+
+<main>
+  <section class="panel" data-panel="music">
+    <div class="panel-heading">
+      <div><h2>Music</h2><p class="hint">One logical recording can belong to several playlists and have several origins.</p></div>
+      <button id="verifyFromMusic" class="secondary">Verify library</button>
+    </div>
+
+    <div id="stats" class="stats"></div>
+    <button id="healthSummary" type="button" class="health-summary secondary"></button>
+
+    <div class="track-toolbar">
+      <label class="control-field">Status
+        <select id="filter">
+          <option value="ALL">All music</option>
+          <option value="AVAILABLE">Available</option>
+          <option value="WORKING">Working</option>
+          <option value="NEEDS_APPROVAL">Needs approval</option>
+          <option value="FAILED">Last operation failed</option>
+          <option value="MISSING">Missing audio</option>
+          <option value="UNAVAILABLE">No audio yet</option>
+        </select>
+      </label>
+      <label class="control-field">Search
+        <input id="search" type="search" placeholder="Artist or title" autocomplete="off">
+      </label>
+      <div class="pagination" aria-label="Track pages">
+        <button id="prev" class="secondary">Previous</button>
+        <span id="page"></span>
+        <button id="next" class="secondary">Next</button>
+      </div>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Music</th><th>Playlists</th><th>Discovery</th><th>Health</th><th>Actions</th></tr></thead>
+        <tbody id="tracks"></tbody>
+      </table>
+    </div>
   </section>
-  <section>
-    <h2>Downloader maintenance</h2>
-    <dl id="runtime"></dl>
-    <div class="row"><button id="update" class="secondary">Update nightly build now</button><button id="rollback" class="secondary">Roll back</button></div>
-    <p class="hint">Updates switch future downloads to a new runtime. Running downloads and the API are not restarted.</p>
+
+  <section class="panel" data-panel="sources" hidden>
+    <div class="panel-heading"><div><h2>Sources</h2><p class="hint">Add tracks or monitored playlists. Playlist names never become album tags.</p></div><button id="syncAll" class="secondary">Sync monitored sources</button></div>
+    <div class="columns">
+      <div class="subpanel">
+        <h3>Add music</h3>
+        <form id="ingestForm">
+          <label for="urls">Source URLs, one per line</label>
+          <textarea id="urls" placeholder="Paste playlist or track URLs" required></textarea>
+          <div class="row spread"><label class="check"><input id="monitor" type="checkbox" checked> Monitor playlists periodically</label><button type="submit">Import</button></div>
+        </form>
+        <hr>
+        <h3>Library users</h3>
+        <form id="userForm" class="row"><input id="newUser" aria-label="New user" placeholder="New user: letters, numbers, _ or -" maxlength="64" required><button class="secondary">Add user</button></form>
+      </div>
+      <div class="subpanel">
+        <h3>Configured sources</h3>
+        <div id="sources" class="source-list"></div>
+      </div>
+    </div>
   </section>
-</div>
-<section>
-  <div class="row spread"><h2>Sources and playlists</h2><button id="syncAll" class="secondary">Sync monitored sources</button></div>
-  <div id="sources" class="source-list"></div>
-</section>
-<section>
-  <div class="row spread"><h2>Track ledger</h2><div class="row"><button id="approveBest" class="secondary">Approve best matches</button><button id="approveOriginal" class="secondary">Keep original metadata</button><button id="retryAll" class="secondary">Retry failed</button></div></div>
-  <div id="stats" class="stats"></div>
-  <div class="row spread"><div class="row"><label>Filter <select id="filter"><option value="ALL">All tracks</option><option value="PENDING">Queued</option><option value="PROCESSING">Processing</option><option value="DELETING">Deleting</option><option value="NEEDS_APPROVAL">Needs approval</option><option value="COMPLETED">Completed</option><option value="FAILED">Failed</option></select></label><label>Search <input id="search" class="track-search" type="search" placeholder="Artist or title" autocomplete="off"></label></div><div class="row"><button id="prev" class="secondary">Previous</button><span id="page"></span><button id="next" class="secondary">Next</button></div></div>
-  <div class="table-scroll"><table><thead><tr><th>Source title / matched metadata</th><th>Playlists</th><th>Discovered, UTC</th><th>Status / error</th><th>Actions</th></tr></thead><tbody id="tracks"></tbody></table></div>
-</section>
-<section>
-  <div class="row spread"><h2>Event log</h2><label class="check"><input id="errorsOnly" type="checkbox"> Warnings and errors only</label></div>
-  <p class="hint">Includes source API failures, beets output, downloader errors, updater failures and server errors. Recent events persist across restarts.</p>
-  <div id="logs" role="log" aria-label="Event log"></div>
-</section>
+
+  <section class="panel" data-panel="activity" hidden>
+    <div class="panel-heading">
+      <div><h2>Activity</h2><p class="hint">Recent application, provider, beets, downloader, and maintenance events.</p></div>
+      <div class="row"><label class="check"><input id="errorsOnly" type="checkbox"> Warnings and errors only</label><button id="clearLogs" class="secondary" title="Clears this browser view only. Stored server logs are retained.">Clear view</button></div>
+    </div>
+    <div id="logs" role="log" aria-label="Event log"></div>
+  </section>
+
+  <section class="panel" data-panel="maintenance" hidden>
+    <div class="columns">
+      <div class="subpanel">
+        <div class="panel-heading compact"><h3>Library integrity</h3><button id="verify" class="secondary">Verify now</button></div>
+        <div id="integritySummary" class="maintenance-summary"></div>
+        <div id="integrityIssues" class="issue-list"></div>
+      </div>
+      <div class="subpanel">
+        <h3>Downloader runtime</h3>
+        <dl id="runtime"></dl>
+        <div class="row"><button id="update" class="secondary">Update nightly build now</button><button id="rollback" class="secondary">Roll back</button></div>
+        <p class="hint">Future downloads switch runtimes atomically. Running downloads and FastAPI are not restarted.</p>
+      </div>
+    </div>
+    <div class="subpanel ignored-panel">
+      <div class="panel-heading compact"><div><h3>Ignored music</h3><p class="hint">“Delete and ignore” prevents the same confirmed recording and known origins from returning.</p></div></div>
+      <div id="ignored"></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="operationDialog">
+  <form id="operationForm">
+    <h2 id="operationTitle">Run operation</h2>
+    <p id="operationTrack" class="dialog-track"></p>
+    <input id="operationTrackId" type="hidden">
+    <input id="operationMode" type="hidden">
+    <label>Audio source<select id="operationOrigin" required></select></label>
+    <p id="operationHelp" class="hint"></p>
+    <div class="dialog-actions"><button type="submit" id="operationSubmit">Continue</button><button id="cancelOperation" type="button" class="secondary">Cancel</button></div>
+  </form>
+</dialog>
+
 <dialog id="editDialog">
   <form id="editForm">
-    <h2>Edit music metadata</h2><p id="editTitle"></p>
+    <h2>Edit music metadata</h2><p id="editTitle" class="dialog-track"></p>
     <input id="editId" type="hidden">
     <label>MusicBrainz recording ID<input id="editMbid" placeholder="Optional recording UUID"></label>
     <label>MusicBrainz release ID<input id="editRelease" placeholder="Optional release UUID; must contain the recording"></label>
     <label>Artist<input id="editArtist" placeholder="Leave blank to preserve"></label>
     <label>Title<input id="editSong" placeholder="Leave blank to preserve"></label>
     <label>Album<input id="editAlbum" placeholder="Leave blank to preserve"></label>
-    <p class="hint">Discovery remains in the comment. Release dates come from MusicBrainz; a playlist name is not a release.</p>
-    <div class="row"><button type="submit">Apply metadata</button><button id="cancelEdit" type="button" class="secondary">Cancel</button></div>
+    <p class="hint">Discovery remains in COMMENT and DESCRIPTION. Release dates come from MusicBrainz.</p>
+    <div class="dialog-actions"><button type="submit">Apply metadata</button><button id="cancelEdit" type="button" class="secondary">Cancel</button></div>
   </form>
 </dialog>
-<footer>Local administration interface. User folders are not authentication; restrict access with your reverse proxy.</footer>
+
+<dialog id="detailsDialog" class="wide-dialog">
+  <div class="panel-heading compact"><h2 id="detailsTitle">Music details</h2><button id="closeDetails" class="secondary">Close</button></div>
+  <div id="detailsBody"></div>
+</dialog>
+
+<footer>Local administration interface. User folders are not authentication; keep this application behind your authenticated reverse proxy.</footer>
 </body>
 </html>

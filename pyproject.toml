@@ -1,7 +1,7 @@
 [project]
 name = "music-ingestor"
 version = "0.2.0"
-description = "Provider-neutral, user-separated music ingestion with beets and an isolated yt-dlp runtime"
+description = "Provider-aware, user-separated music ingestion with beets and yt-dlp"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [

@@ -1,4 +1,4 @@
-"""FastAPI control plane. Run ONE worker process; durable jobs live in SQLite."""
+"""FastAPI control plane. Run one worker process per state directory."""
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -6,7 +6,6 @@ import asyncio
 import fcntl
 import json
 import logging
-import os
 import shutil
 import traceback
 from contextlib import asynccontextmanager
@@ -18,10 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from common import ROOT
+from common import LIBRARY, ROOT
 from pipeline import Pipeline
 from providers import parse_source
-from store import Store
+from store import SCHEMA_VERSION, Store
 
 
 class UserInput(BaseModel):
@@ -38,6 +37,7 @@ class SourceInput(BaseModel):
 class ActionInput(BaseModel):
     user_id: str
     mode: str = "retry"
+    origin_id: str | None = None
     index: int | None = None
     overrides: dict[str, str | None] = Field(default_factory=dict)
 
@@ -75,11 +75,19 @@ def create_app(store=None, start_workers=True):
             for binary in ("ffmpeg", "fpcalc", "deno"):
                 if not shutil.which(binary):
                     store.event("ERROR", f"Required binary not found: {binary}", target="startup")
-            tasks = [asyncio.create_task(pipeline.work(), name="worker"),
-                     asyncio.create_task(pipeline.schedule(), name="scheduler")]
+            tasks = [
+                asyncio.create_task(pipeline.work(), name="worker"),
+                asyncio.create_task(pipeline.schedule(), name="scheduler"),
+            ]
+
             def report_task_failure(task):
                 if not task.cancelled() and task.exception():
-                    store.event("ERROR", f"{task.get_name()} stopped unexpectedly: {task.exception()}", target="server")
+                    store.event(
+                        "ERROR",
+                        f"{task.get_name()} stopped unexpectedly: {task.exception()}",
+                        target="server",
+                    )
+
             for task in tasks:
                 task.add_done_callback(report_task_failure)
             app.state.worker_tasks = tasks
@@ -89,12 +97,15 @@ def create_app(store=None, start_workers=True):
             pipeline.stopping.set()
             for task in tasks + list(pipeline.children):
                 task.cancel()
-            await asyncio.gather(*tasks, *list(pipeline.children), return_exceptions=True)
+            await asyncio.gather(
+                *tasks, *list(pipeline.children), return_exceptions=True
+            )
             logging.getLogger().removeHandler(handler)
             lock.close()
 
     app = FastAPI(title="Music Ingestor", lifespan=lifespan)
-    app.state.store, app.state.pipeline = store, pipeline
+    app.state.store = store
+    app.state.pipeline = pipeline
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
     @app.middleware("http")
@@ -104,10 +115,15 @@ def create_app(store=None, start_workers=True):
             from urllib.parse import urlsplit
             if urlsplit(origin).netloc != request.headers.get("host"):
                 store.event("ERROR", "Rejected cross-origin write request", target="api")
-                return JSONResponse({"error": "Cross-origin writes are not allowed"}, status_code=403)
+                return JSONResponse(
+                    {"error": "Cross-origin writes are not allowed"}, status_code=403
+                )
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "frame-ancestors 'none'; base-uri 'self'"
+        )
         return response
 
     async def error_response(request, exc):
@@ -125,7 +141,13 @@ def create_app(store=None, start_workers=True):
             detail = "Internal server error. See the event log."
         return JSONResponse({"error": detail}, status_code=status)
 
-    for exception in (ValueError, LookupError, HTTPException, RequestValidationError, Exception):
+    for exception in (
+        ValueError,
+        LookupError,
+        HTTPException,
+        RequestValidationError,
+        Exception,
+    ):
         app.add_exception_handler(exception, error_response)
 
     @app.get("/")
@@ -135,13 +157,15 @@ def create_app(store=None, start_workers=True):
     @app.get("/healthz")
     def health():
         store.one("SELECT 1")
-        if any(t.done() for t in getattr(app.state, "worker_tasks", [])):
-            raise HTTPException(503, "A background worker stopped; inspect the event log and restart")
+        if any(task.done() for task in getattr(app.state, "worker_tasks", [])):
+            raise HTTPException(
+                503, "A background worker stopped; inspect the event log and restart"
+            )
         return {"ok": True}
 
     @app.get("/api/users")
     def users():
-        return [r["name"] for r in store.rows("SELECT name FROM users ORDER BY name")]
+        return [row["name"] for row in store.rows("SELECT name FROM users ORDER BY name")]
 
     @app.post("/api/users")
     def add_user(data: UserInput):
@@ -151,20 +175,24 @@ def create_app(store=None, start_workers=True):
     @app.get("/api/sources")
     def sources(user_id: str):
         store.require_user(user_id)
-        return store.rows("SELECT * FROM sources WHERE user_id=? ORDER BY title", (user_id,))
+        return store.rows(
+            "SELECT * FROM sources WHERE user_id=? ORDER BY title", (user_id,)
+        )
 
     @app.post("/api/sources")
     def add_sources(data: SourceInput):
-        # Validate the whole input before persisting any work.
         refs = [parse_source(url) for url in data.urls]
-        return [store.add_source(ref, data.user_id, data.monitored, data.label) for ref in refs]
+        return [
+            store.add_source(ref, data.user_id, data.monitored, data.label)
+            for ref in refs
+        ]
 
     @app.post("/api/sources/{source_id}/retry")
     def retry_source(source_id: str, data: ActionInput):
         source = store.owned("sources", source_id, data.user_id)
         if not store.enqueue("sync", source_id, data.user_id):
             raise ValueError("This source already has an active sync")
-        store.update("sources", source_id, status="PENDING")
+        store.update("sources", source["id"], status="PENDING", error=None)
         return {"message": "Source sync queued"}
 
     @app.delete("/api/sources/{source_id}")
@@ -172,48 +200,40 @@ def create_app(store=None, start_workers=True):
         source = store.owned("sources", source_id, user_id)
         with store.db() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT 1 FROM jobs WHERE target=? AND state='RUNNING'", (source_id,)).fetchone():
+            if con.execute(
+                "SELECT 1 FROM jobs WHERE target=? AND state IN ('PENDING','RUNNING')",
+                (source_id,),
+            ).fetchone():
                 raise ValueError("Wait until this source finishes syncing")
-            con.execute("DELETE FROM jobs WHERE target=? AND state='PENDING'", (source_id,))
             con.execute("DELETE FROM sources WHERE id=?", (source_id,))
-        # Remove only the generated playlist; never delete music files.
         if source["playlist_path"]:
-            from common import LIBRARY
             path = Path(source["playlist_path"]).resolve()
-            if path.parent == (LIBRARY / user_id / "000000-playlists").resolve():
+            playlist_dir = (LIBRARY / user_id / "000000-playlists").resolve()
+            if path.parent == playlist_dir:
                 path.unlink(missing_ok=True)
         return {"message": "Source removed; music retained"}
 
     @app.get("/api/tracks")
-    def tracks(user_id: str, page: int = Query(1, ge=1), limit: int = Query(50, ge=1, le=100),
-               status: str = "ALL", q: str = Query("", max_length=200)):
-        store.require_user(user_id)
-        params = [user_id]
-        where = "user_id=?"
-        search = q.strip()
-        if search:
-            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            pattern = f"%{escaped}%"
-            where += " AND (title LIKE ? ESCAPE '\\' OR COALESCE(matched_title,'') LIKE ? ESCAPE '\\')"
-            params.extend((pattern, pattern))
-        if status != "ALL":
-            where += " AND status=?"
-            params.append(status)
-        total = store.one(f"SELECT COUNT(*) AS n FROM tracks WHERE {where}", params)["n"]
-        rows = store.rows(f"SELECT * FROM tracks WHERE {where} ORDER BY rowid DESC LIMIT ? OFFSET ?", (*params, limit, (page - 1) * limit))
-        for row in rows:
-            choices = json.loads(row.pop("choices"))
-            # Only display data crosses the approval boundary; the server retains tag snapshots.
-            row["choices"] = [{k: v for k, v in c.items() if k != "tags"} for c in choices]
-            row.pop("selected", None)
-            row["playlists"] = store.rows("""SELECT s.title,m.added_at FROM sources s JOIN memberships m
-                ON s.id=m.source_id WHERE m.track_id=? AND s.is_playlist=1 ORDER BY m.added_at""", (row["id"],))
-        counts = store.rows("SELECT status,COUNT(*) AS n FROM tracks WHERE user_id=? GROUP BY status", (user_id,))
-        return {"tracks": rows, "total": total, "page": page, "limit": limit, "stats": {r["status"]: r["n"] for r in counts}}
+    def tracks(
+        user_id: str,
+        page: int = Query(1, ge=1),
+        limit: int = Query(50, ge=1, le=100),
+        status: str = "ALL",
+        q: str = Query("", max_length=200),
+    ):
+        return store.dashboard_tracks(user_id, page, limit, status, q)
+
+    @app.get("/api/tracks/{track_id}")
+    def track_details(track_id: str, user_id: str):
+        return store.track_details(track_id, user_id)
 
     @app.post("/api/tracks/{track_id}/action")
     def track_action(track_id: str, data: ActionInput):
-        if data.mode not in {"retry", "approve", "redownload", "retag", "reidentify", "delete"}:
+        allowed = {
+            "retry", "approve", "redownload", "reprocess", "retag",
+            "delete", "delete_ignore",
+        }
+        if data.mode not in allowed:
             raise ValueError("Unsupported track action")
         if set(data.overrides) - {"artist", "title", "album", "mbid", "release_id"}:
             raise ValueError("Unsupported metadata override")
@@ -221,33 +241,75 @@ def create_app(store=None, start_workers=True):
         for key in ("mbid", "release_id"):
             if data.overrides.get(key):
                 uuid.UUID(data.overrides[key])
-        store.queue_track(track_id, data.user_id, data.model_dump(exclude={"user_id"}))
-        return {"message": "Track job queued"}
+        store.queue_track(
+            track_id,
+            data.user_id,
+            data.model_dump(exclude={"user_id"}, exclude_none=True),
+        )
+        return {"message": "Track operation queued"}
 
     @app.post("/api/batch")
     def batch(data: ActionInput):
         if data.mode not in {"retry", "best", "original"}:
             raise ValueError("Unsupported batch action")
+        store.require_user(data.user_id)
         state = "FAILED" if data.mode == "retry" else "NEEDS_APPROVAL"
         queued = 0
-        store.require_user(data.user_id)
-        for track in store.rows("SELECT * FROM tracks WHERE user_id=? AND status=?", (data.user_id, state)):
-            if data.mode == "best" and not json.loads(track["choices"]):
-                continue
-            payload = {"mode": "retry"} if data.mode == "retry" else {"mode": "approve", "index": 0 if data.mode == "best" else None}
+        for track in store.rows(
+            "SELECT * FROM tracks WHERE user_id=? AND operation_state=?",
+            (data.user_id, state),
+        ):
+            if data.mode == "retry":
+                payload = {"mode": "retry"}
+            else:
+                choices = json.loads(track["choices"] or "[]")
+                if not choices:
+                    continue
+                index = 0 if data.mode == "best" else len(choices) - 1
+                payload = {"mode": "approve", "index": index}
             try:
                 store.queue_track(track["id"], data.user_id, payload)
                 queued += 1
             except ValueError:
-                pass  # Concurrent request already queued this track.
+                pass
         return {"message": f"Queued {queued} tracks"}
 
     @app.get("/api/events")
     def events(user_id: str, after: int = Query(0, ge=0)):
         store.require_user(user_id)
         if not after:
-            return list(reversed(store.rows("SELECT * FROM events WHERE user_id=? OR user_id IS NULL ORDER BY id DESC LIMIT 200", (user_id,))))
-        return store.rows("SELECT * FROM events WHERE id>? AND (user_id=? OR user_id IS NULL) ORDER BY id LIMIT 500", (after, user_id))
+            return list(reversed(store.rows(
+                "SELECT * FROM events WHERE user_id=? OR user_id IS NULL "
+                "ORDER BY id DESC LIMIT 200",
+                (user_id,),
+            )))
+        return store.rows(
+            "SELECT * FROM events WHERE id>? AND (user_id=? OR user_id IS NULL) "
+            "ORDER BY id LIMIT 500",
+            (after, user_id),
+        )
+
+    @app.get("/api/integrity")
+    def integrity(user_id: str):
+        return store.integrity_report(user_id)
+
+    @app.post("/api/integrity/run")
+    def run_integrity(data: ActionInput):
+        store.require_user(data.user_id)
+        if not store.enqueue(
+            "integrity", data.user_id, data.user_id, {"mode": "verify"}
+        ):
+            raise ValueError("A library verification is already queued or running")
+        return {"message": "Library verification queued"}
+
+    @app.get("/api/ignored")
+    def ignored(user_id: str):
+        return store.list_ignored(user_id)
+
+    @app.delete("/api/ignored/{ignored_id}")
+    def restore_ignored(ignored_id: str, user_id: str):
+        store.restore_ignored(ignored_id, user_id)
+        return {"message": "Ignored music restored; it can be imported again"}
 
     @app.get("/api/system")
     def system():
@@ -255,8 +317,13 @@ def create_app(store=None, start_workers=True):
             active = pipeline.downloader.active()
         except Exception as exc:
             active = {"error": str(exc)}
-        return {"downloader": active, "last_update": store.setting("downloader_update"),
-                "next_update": store.setting("next_downloader_update"), "beets": "2.14.1"}
+        return {
+            "downloader": active,
+            "last_update": store.setting("downloader_update"),
+            "next_update": store.setting("next_downloader_update"),
+            "beets": "2.14.1",
+            "schema": SCHEMA_VERSION,
+        }
 
     @app.post("/api/downloader/update")
     async def update_downloader_async():
