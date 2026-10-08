@@ -35,7 +35,7 @@
 <section>
   <div class="row spread"><h2>Track ledger</h2><div class="row"><button id="approveBest" class="secondary">Approve best matches</button><button id="approveOriginal" class="secondary">Keep original metadata</button><button id="retryAll" class="secondary">Retry failed</button></div></div>
   <div id="stats" class="stats"></div>
-  <div class="row spread"><label>Filter <select id="filter"><option value="ALL">All tracks</option><option value="PENDING">Queued</option><option value="PROCESSING">Processing</option><option value="NEEDS_APPROVAL">Needs approval</option><option value="COMPLETED">Completed</option><option value="FAILED">Failed</option></select></label><div class="row"><button id="prev" class="secondary">Previous</button><span id="page"></span><button id="next" class="secondary">Next</button></div></div>
+  <div class="row spread"><div class="row"><label>Filter <select id="filter"><option value="ALL">All tracks</option><option value="PENDING">Queued</option><option value="PROCESSING">Processing</option><option value="DELETING">Deleting</option><option value="NEEDS_APPROVAL">Needs approval</option><option value="COMPLETED">Completed</option><option value="FAILED">Failed</option></select></label><label>Search <input id="search" class="track-search" type="search" placeholder="Artist or title" autocomplete="off"></label></div><div class="row"><button id="prev" class="secondary">Previous</button><span id="page"></span><button id="next" class="secondary">Next</button></div></div>
   <div class="table-scroll"><table><thead><tr><th>Source title / matched metadata</th><th>Playlists</th><th>Discovered, UTC</th><th>Status / error</th><th>Actions</th></tr></thead><tbody id="tracks"></tbody></table></div>
 </section>
 <section>

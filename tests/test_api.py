@@ -37,3 +37,44 @@ def test_source_delete_is_rejected_while_running(db, track):
     with TestClient(create_app(db, start_workers=False)) as client:
         assert client.delete(f"/api/sources/{source['id']}", params={"user_id": "admin"}).status_code == 400
     assert db.one("SELECT * FROM sources")
+
+
+def test_track_search_is_user_scoped_and_pagination_applies_after_search(db, track):
+    import uuid
+
+    db.update("tracks", track["id"], matched_title="Geoxor - Patient Lips")
+    with db.db() as con:
+        for i in range(55):
+            con.execute("""INSERT INTO tracks(id,user_id,provider,media_key,url,title,discovery_basis)
+                VALUES (?,?,?,?,?,?,?)""",
+                (str(uuid.uuid4()), "admin", "youtube", f"extra-{i}",
+                 f"https://example.test/{i}", f"Extra Artist {i} - Song", "first_seen"))
+        con.execute("""INSERT INTO tracks(id,user_id,provider,media_key,url,title,discovery_basis,matched_title)
+            VALUES (?,?,?,?,?,?,?,?)""",
+            (str(uuid.uuid4()), "guest", "youtube", "guest-match",
+             "https://example.test/guest", "Different Source Title", "first_seen",
+             "Geoxor - Patient Lips"))
+
+    with TestClient(create_app(db, start_workers=False)) as client:
+        result = client.get("/api/tracks", params={"user_id": "admin", "q": "patient"}).json()
+        assert result["total"] == 1
+        assert result["tracks"][0]["id"] == track["id"]
+        assert client.get("/api/tracks", params={"user_id": "admin", "q": "geoxor"}).json()["total"] == 1
+        page_two = client.get("/api/tracks", params={"user_id": "admin", "page": 2, "limit": 50}).json()
+        assert page_two["total"] == 56
+        assert len(page_two["tracks"]) == 6
+
+
+def test_delete_action_is_scoped_to_current_user_and_queued(db, track):
+    with TestClient(create_app(db, start_workers=False)) as client:
+        wrong = client.post(f"/api/tracks/{track['id']}/action",
+                            json={"user_id": "guest", "mode": "delete"})
+        assert wrong.status_code == 404
+        ok = client.post(f"/api/tracks/{track['id']}/action",
+                         json={"user_id": "admin", "mode": "delete"})
+        assert ok.status_code == 200
+
+    updated = db.owned("tracks", track["id"], "admin")
+    assert updated["status"] == "DELETING"
+    job = db.one("SELECT * FROM jobs WHERE kind='track' AND target=? AND state='PENDING'", (track["id"],))
+    assert json.loads(job["payload"])["mode"] == "delete"

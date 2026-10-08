@@ -63,11 +63,45 @@ class Pipeline:
             raise RuntimeError("Metadata worker returned no result")
         return json.loads(result.read_text())
 
+    async def delete_track(self, job, track):
+        """Delete only this user's copy, then regenerate every affected playlist."""
+        user_root = (LIBRARY / track["user_id"]).resolve()
+        file_path = Path(track["file_path"]).resolve() if track.get("file_path") else None
+        if file_path and not file_path.is_relative_to(user_root):
+            raise ValueError("Refusing to delete a track outside this user's library")
+
+        sources = self.store.rows("""SELECT DISTINCT s.* FROM sources s JOIN memberships m
+            ON s.id=m.source_id WHERE m.track_id=? AND s.user_id=?""",
+                                  (track["id"], track["user_id"]))
+        directory = STATE / "staging" / track["id"]
+        directory.mkdir(parents=True, exist_ok=True)
+
+        await self.bridge(job, track, directory, "delete", path=str(file_path or ""))
+
+        # The beets item may already be absent after manual filesystem cleanup.
+        if file_path and file_path.is_file():
+            file_path.unlink()
+
+        # Membership rows still exist here; write_playlist omits the deleted file.
+        for source in sources:
+            current = self.store.one("SELECT * FROM sources WHERE id=? AND user_id=?",
+                                     (source["id"], track["user_id"]))
+            if current:
+                await asyncio.to_thread(write_playlist, self.store, current)
+
+        display = track.get("matched_title") or track["title"]
+        self.store.delete_track(track["id"], track["user_id"])
+        shutil.rmtree(directory, ignore_errors=True)
+        self.report(job)("INFO", f"Deleted: {display}")
+
     async def process_track(self, job):
         payload = json.loads(job["payload"])
         mode = payload.get("mode", "auto")
         operation = payload.get("operation", str(job["id"]))
         track = self.store.owned("tracks", job["target"], job["user_id"])
+        if mode == "delete":
+            await self.delete_track(job, track)
+            return
         self.store.update("tracks", track["id"], status="PROCESSING", error=None)
         directory = STATE / "staging" / track["id"]
         directory.mkdir(parents=True, exist_ok=True)

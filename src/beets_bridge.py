@@ -66,6 +66,17 @@ class Bridge:
         item = self.lib.get_item(track["beets_id"]) if track.get("beets_id") else None
         return item or self.lib.items(MatchQuery("pipeline_id", track["id"], fast=False)).get()
 
+    def delete(self, track):
+        """Remove this user's beets item and its file when the file still exists."""
+        item = self.find_existing(track)
+        if not item:
+            return {"removed": False}
+        candidate = Path(os.fsdecode(item.path)).resolve()
+        if not candidate.is_relative_to(self.directory):
+            raise ValueError("Refusing to delete a beets item outside this user's library")
+        item.remove(delete=candidate.is_file(), with_album=True)
+        return {"removed": True}
+
     def identify(self, path, title):
         from beets import config, plugins
         from beets.autotag import Recommendation, Source, tag_item
@@ -246,6 +257,8 @@ class Bridge:
 def main(request):
     bridge = Bridge(request["track"]["user_id"])
     track, path, mode = request["track"], request["path"], request["mode"]
+    if mode == "delete":
+        return bridge.delete(track)
     if mode == "inspect":
         item = bridge.find_existing(track)
         if item and item.get("pipeline_operation") == request.get("operation"):

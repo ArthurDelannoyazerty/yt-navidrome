@@ -114,3 +114,43 @@ def test_source_failure_preserves_old_memberships(db, track, monkeypatch):
     with pytest.raises(RuntimeError, match="outage"):
         asyncio.run(Pipeline(db).process_source(db.claim()))
     assert db.rows("SELECT * FROM memberships") == before
+
+
+def test_delete_track_removes_only_current_user_and_rewrites_playlist(db, track, environment, monkeypatch):
+    admin_file = environment[1] / "admin" / "Artist" / "Release" / "Song.opus"
+    admin_file.parent.mkdir(parents=True)
+    admin_file.write_bytes(b"admin")
+    db.update("tracks", track["id"], file_path=str(admin_file), status="COMPLETED", beets_id=1)
+    admin_source = db.one("SELECT * FROM sources WHERE user_id='admin'")
+    write_playlist(db, admin_source)
+    admin_source = db.owned("sources", admin_source["id"], "admin")
+    playlist = Path(admin_source["playlist_path"])
+    assert "Song.opus" in playlist.read_text()
+
+    guest_source = db.add_source(parse_source("https://youtube.com/playlist?list=PLguest"), "guest")
+    entry = Entry("abcdefghijk", track["url"], track["title"], track["discovered_at"], "guest-entry", 0)
+    db.apply_snapshot(guest_source, Snapshot("Guest playlist", [entry]))
+    db.execute("UPDATE jobs SET state='DONE'")
+    guest_track = db.one("SELECT * FROM tracks WHERE user_id='guest'")
+    guest_file = environment[1] / "guest" / "Artist" / "Release" / "Song.opus"
+    guest_file.parent.mkdir(parents=True)
+    guest_file.write_bytes(b"guest")
+    db.update("tracks", guest_track["id"], file_path=str(guest_file), status="COMPLETED", beets_id=2)
+
+    pipeline = Pipeline(db)
+
+    async def bridge(job, current, directory, mode, **kwargs):
+        assert mode == "delete"
+        assert current["user_id"] == "admin"
+        admin_file.unlink(missing_ok=True)
+        return {"removed": True}
+
+    monkeypatch.setattr(pipeline, "bridge", bridge)
+    db.queue_track(track["id"], "admin", {"mode": "delete"})
+    job = db.claim()
+    asyncio.run(pipeline.process_track(job))
+
+    assert db.one("SELECT * FROM tracks WHERE id=?", (track["id"],)) is None
+    assert db.one("SELECT * FROM tracks WHERE id=? AND user_id='guest'", (guest_track["id"],))
+    assert guest_file.read_bytes() == b"guest"
+    assert playlist.read_text() == "#EXTM3U\n"

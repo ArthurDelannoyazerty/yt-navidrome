@@ -185,10 +185,17 @@ def create_app(store=None, start_workers=True):
         return {"message": "Source removed; music retained"}
 
     @app.get("/api/tracks")
-    def tracks(user_id: str, page: int = Query(1, ge=1), limit: int = Query(50, ge=1, le=100), status: str = "ALL"):
+    def tracks(user_id: str, page: int = Query(1, ge=1), limit: int = Query(50, ge=1, le=100),
+               status: str = "ALL", q: str = Query("", max_length=200)):
         store.require_user(user_id)
         params = [user_id]
         where = "user_id=?"
+        search = q.strip()
+        if search:
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            where += " AND (title LIKE ? ESCAPE '\\' OR COALESCE(matched_title,'') LIKE ? ESCAPE '\\')"
+            params.extend((pattern, pattern))
         if status != "ALL":
             where += " AND status=?"
             params.append(status)
@@ -206,7 +213,7 @@ def create_app(store=None, start_workers=True):
 
     @app.post("/api/tracks/{track_id}/action")
     def track_action(track_id: str, data: ActionInput):
-        if data.mode not in {"retry", "approve", "redownload", "retag", "reidentify"}:
+        if data.mode not in {"retry", "approve", "redownload", "retag", "reidentify", "delete"}:
             raise ValueError("Unsupported track action")
         if set(data.overrides) - {"artist", "title", "album", "mbid", "release_id"}:
             raise ValueError("Unsupported metadata override")

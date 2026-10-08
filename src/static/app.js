@@ -872,6 +872,28 @@ function renderTrack(track) {
     );
   }
 
+  const deleteButton = button(
+    "Delete",
+    async () => {
+      const name = track.matched_title || track.title;
+      if (
+        !confirm(
+          `Delete "${name}" for user "${state.user}"? This removes this user's audio file, beets entry, and all of this user's playlist memberships. If it remains in a monitored source, a later sync can import it again.`,
+        )
+      ) {
+        return;
+      }
+      await action(track, "delete");
+    },
+    "danger",
+  );
+
+  if (["PENDING", "PROCESSING", "DELETING"].includes(track.status)) {
+    deleteButton.disabled = true;
+    deleteButton.title = "Wait for the active track job to finish before deleting";
+  }
+
+  controls.append(deleteButton);
   actions.append(controls);
 
   row.append(
@@ -969,7 +991,8 @@ async function loadTracks(
     `/api/tracks?user_id=${encodeURIComponent(state.user)}`
       + `&page=${state.page}`
       + "&limit=50"
-      + `&status=${encodeURIComponent($("filter").value)}`,
+      + `&status=${encodeURIComponent($("filter").value)}`
+      + `&q=${encodeURIComponent($("search").value.trim())}`,
   );
 
   if (generation !== state.generation) {
@@ -1352,6 +1375,26 @@ async function pollSlow() {
     state.slowPolling = false;
   }
 }
+
+let searchTimer = null;
+
+$("search").addEventListener(
+  "input",
+  () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.page = 1;
+      state.generation += 1;
+
+      guard(
+        () =>
+          refreshFast({
+            background: false,
+          }),
+      )();
+    }, 300);
+  },
+);
 
 $("filter").addEventListener(
   "change",

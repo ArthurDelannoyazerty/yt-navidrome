@@ -93,6 +93,10 @@ with patch("requests.sessions.Session.send", no_network):
     assert tags.year == 1999 and tags.album == "Real Artist Album"
     assert tags.comments == "Discovery Date: 2020-01-02--03-04-05 UTC"
     assert "[00:02.000]" in tags.lyrics
+    removed = b.delete(track)
+    assert removed["removed"] is True
+    assert not final.exists()
+    assert b.find_existing(track) is None
 print("Real beets adapter smoke test passed")
 '''
     env = os.environ | {"PYTHONPATH": str(ROOT / "src")}

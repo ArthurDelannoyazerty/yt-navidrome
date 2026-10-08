@@ -219,6 +219,9 @@ class Store:
                     payload = json.loads(previous["payload"])
                 else:
                     payload = {"mode": "auto"}
+            elif mode == "delete":
+                # The durable worker performs the user-scoped beets/file cleanup.
+                pass
             elif mode in {"retag", "reidentify", "redownload"}:
                 allowed = {"COMPLETED", "FAILED"} if mode == "redownload" else {"COMPLETED"}
                 if row["status"] not in allowed:
@@ -235,7 +238,18 @@ class Store:
                 selected = choices[index] if index is not None else {"asis": True}
                 con.execute("UPDATE tracks SET selected=? WHERE id=?", (json.dumps(selected), tid))
             self.enqueue("track", tid, user, payload, con=con)
-            con.execute("UPDATE tracks SET status='PENDING',error=NULL WHERE id=?", (tid,))
+            next_status = "DELETING" if mode == "delete" else "PENDING"
+            con.execute("UPDATE tracks SET status=?,error=NULL WHERE id=?", (next_status, tid))
+
+    def delete_track(self, tid, user):
+        """Remove one user's ledger row after file/beets/playlist cleanup succeeds."""
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT id FROM tracks WHERE id=? AND user_id=?", (tid, user)).fetchone()
+            if not row:
+                raise LookupError("Track not found for this user")
+            con.execute("DELETE FROM memberships WHERE track_id=?", (tid,))
+            con.execute("DELETE FROM tracks WHERE id=? AND user_id=?", (tid, user))
 
     def reserve_api(self, host, interval):
         """A shared disk-backed clock also covers separate beets processes and restarts."""
