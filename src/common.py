@@ -1,6 +1,7 @@
 """Small, source-independent helpers shared by the API and worker processes."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -62,6 +63,14 @@ def atomic_json(path: Path, value: object) -> None:
     atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def next_nightly(now: datetime, at: str, zone: str) -> datetime:
     """Return the next configured local wall-clock time as an aware UTC datetime."""
     hour, minute = map(int, at.split(":"))
@@ -70,5 +79,4 @@ def next_nightly(now: datetime, at: str, zone: str) -> datetime:
     target = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= local:
         target += timedelta(days=1)
-    # Round-trip normalizes a nonexistent spring-forward time to a real instant.
     return target.astimezone(UTC)

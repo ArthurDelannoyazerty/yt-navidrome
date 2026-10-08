@@ -1,6 +1,6 @@
 .env
 .env.*
-!.env.example
+!.env.template
 .git/
 .venv/
 __pycache__/
@@ -16,4 +16,3 @@ navidrome_library/
 legacy/
 cookies.txt
 tests/
-TEST_REPORT.md

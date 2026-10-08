@@ -1,20 +1,36 @@
-"""One durable worker replaces background-task fan-out and duplicated state machines."""
+"""Durable provider-aware ingestion, replacement and integrity workflows."""
 from __future__ import annotations
 
 import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import time
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
-from common import LIBRARY, ROOT, STATE, atomic_json, atomic_text, next_nightly, safe_name, utcnow
+from common import (
+    LIBRARY,
+    ROOT,
+    STATE,
+    atomic_json,
+    atomic_text,
+    discovery_comment,
+    next_nightly,
+    safe_name,
+    sha256_file,
+    utcnow,
+)
 from http_policy import HttpPolicy
 from providers import PROVIDERS
 from runtime import DownloaderRuntime, run_process
+
+
+class ReplacementIdentityMismatch(RuntimeError):
+    pass
 
 
 def write_playlist(store, source):
@@ -23,18 +39,32 @@ def write_playlist(store, source):
     user_root = (LIBRARY / source["user_id"]).resolve()
     folder = user_root / "000000-playlists"
     destination = folder / f"{safe_name(source['title'])}--{source['id'][:8]}.m3u"
-    order = "m.position,m.entry_id" if os.getenv("PLAYLIST_ORDER", "source") == "source" else "m.added_at,m.position,m.entry_id"
-    tracks = store.rows(f"""SELECT t.file_path,t.title,t.matched_title FROM memberships m
-      JOIN tracks t ON t.id=m.track_id WHERE m.source_id=? AND t.user_id=?
-      AND t.file_path IS NOT NULL ORDER BY {order}""", (source["id"], source["user_id"]))
+    order = (
+        "m.position,m.entry_id"
+        if os.getenv("PLAYLIST_ORDER", "source") == "source"
+        else "m.added_at,m.position,m.entry_id"
+    )
+    tracks = store.rows(
+        f"""SELECT a.path,t.title,t.matched_title
+            FROM memberships m
+            JOIN track_origins o ON o.id=m.origin_id
+            JOIN tracks t ON t.id=o.track_id
+            JOIN assets a ON a.id=t.current_asset_id AND a.state='CURRENT'
+            WHERE m.source_id=? AND t.user_id=?
+            ORDER BY {order}""",
+        (source["id"], source["user_id"]),
+    )
     lines = ["#EXTM3U"]
     for track in tracks:
-        path = Path(track["file_path"]).resolve()
+        path = Path(track["path"]).resolve()
         if not path.is_relative_to(user_root):
             raise ValueError("Refusing a playlist path outside this user's library")
         if path.is_file():
             title = (track["matched_title"] or track["title"]).replace("\n", " ").replace("\r", " ")
-            lines += [f"#EXTINF:-1,{title}", os.path.relpath(path, folder).replace(os.sep, "/")]
+            lines += [
+                f"#EXTINF:-1,{title}",
+                os.path.relpath(path, folder).replace(os.sep, "/"),
+            ]
     atomic_text(destination, "\n".join(lines) + "\n", mode=0o644)
     if source.get("playlist_path") and source["playlist_path"] != str(destination):
         old = Path(source["playlist_path"]).resolve()
@@ -48,156 +78,788 @@ class Pipeline:
         self.store = store
         self.downloader = DownloaderRuntime(store)
         self.stopping = asyncio.Event()
-        self.children = set()
+        self.children: set[asyncio.Task] = set()
 
     def report(self, job):
-        return lambda level, message: self.store.event(level, message, job["user_id"], job["target"])
+        return lambda level, message: self.store.event(
+            level, message, job["user_id"], job["target"]
+        )
+
+    async def bridge_request(self, job, directory: Path, name: str, request: dict,
+                             timeout=1800):
+        request_path = directory / f"{name}-request.json"
+        result_path = directory / f"{name}-result.json"
+        result_path.unlink(missing_ok=True)
+        atomic_json(request_path, request)
+        await run_process(
+            [sys.executable, ROOT / "beets_bridge.py", request_path, result_path],
+            self.report(job),
+            timeout=timeout,
+        )
+        if not result_path.exists():
+            raise RuntimeError("Metadata worker returned no result")
+        return json.loads(result_path.read_text())
 
     async def bridge(self, job, track, directory, mode, **kwargs):
-        request = directory / (mode + "-request.json")
-        result = directory / (mode + "-result.json")
-        result.unlink(missing_ok=True)
-        atomic_json(request, {"track": track, "mode": mode, **kwargs})
-        await run_process([sys.executable, ROOT / "beets_bridge.py", request, result], self.report(job), timeout=1800)
-        if not result.exists():
-            raise RuntimeError("Metadata worker returned no result")
-        return json.loads(result.read_text())
+        return await self.bridge_request(
+            job,
+            directory,
+            mode,
+            {"track": track, "user": track["user_id"], "mode": mode, **kwargs},
+        )
 
-    async def delete_track(self, job, track):
-        """Delete only this user's copy, then regenerate every affected playlist."""
+    async def metadata_for_recording(self, job, track, directory, mbid):
+        return await self.bridge_request(
+            job,
+            directory,
+            "metadata",
+            {"mode": "metadata", "user": track["user_id"], "mbid": mbid},
+        )
+
+    def _sources_for_track(self, track_id: str):
+        return self.store.rows(
+            """SELECT DISTINCT s.*
+               FROM sources s
+               JOIN memberships m ON m.source_id=s.id
+               JOIN track_origins o ON o.id=m.origin_id
+               WHERE o.track_id=?""",
+            (track_id,),
+        )
+
+    async def rewrite_track_playlists(self, track_id: str):
+        for source in self._sources_for_track(track_id):
+            await asyncio.to_thread(write_playlist, self.store, source)
+
+    @staticmethod
+    def _backup_sqlite(source: Path, destination: Path):
+        if not source.exists():
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        src = sqlite3.connect(source)
+        dst = sqlite3.connect(destination)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+
+    @staticmethod
+    def _restore_sqlite(source: Path, destination: Path):
+        if not source.exists():
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        src = sqlite3.connect(source)
+        dst = sqlite3.connect(destination)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+
+    async def backup_current(self, track: dict, directory: Path):
+        path = Path(track["file_path"]).resolve() if track.get("file_path") else None
+        if not path or not path.is_file():
+            return None
+        backup_file = directory / "previous-current.opus"
+        await asyncio.to_thread(shutil.copy2, path, backup_file)
+        beets_db = STATE / "beets" / track["user_id"] / "library.db"
+        beets_backup = directory / "beets-before.sqlite"
+        await asyncio.to_thread(self._backup_sqlite, beets_db, beets_backup)
+        return {
+            "path": str(path),
+            "file": str(backup_file),
+            "beets_db": str(beets_db),
+            "beets_backup": str(beets_backup),
+        }
+
+    async def restore_current(self, backup):
+        if not backup:
+            return
+        backup_file = Path(backup["file"])
+        destination = Path(backup["path"])
+        if backup_file.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(shutil.copy2, backup_file, destination)
+        await asyncio.to_thread(
+            self._restore_sqlite,
+            Path(backup["beets_backup"]),
+            Path(backup["beets_db"]),
+        )
+
+    async def finish_operation_receipt(self, job, receipt: dict, directory: Path):
+        """Finish idempotent filesystem/playlist work after a transactional commit."""
+        if receipt.get("finalized_at"):
+            shutil.rmtree(directory, ignore_errors=True)
+            return receipt["result"]
+        result = receipt["result"]
+        target_id = result.get("target_id")
+        source_id = result.get("source_id")
+
+        if target_id:
+            await self.rewrite_track_playlists(target_id)
+        if source_id and source_id != target_id:
+            await self.rewrite_track_playlists(source_id)
+
+        if result.get("kind") == "DEDUPLICATED" and target_id:
+            current = self.store.one("SELECT * FROM tracks WHERE id=?", (target_id,))
+            if current and current.get("file_path") and Path(current["file_path"]).is_file():
+                comment_dir = STATE / "staging" / f"comment-{target_id}"
+                comment_dir.mkdir(parents=True, exist_ok=True)
+                await self.bridge(
+                    job, current, comment_dir, "comment", path=current["file_path"]
+                )
+                shutil.rmtree(comment_dir, ignore_errors=True)
+
+        old_assets = list(result.get("old_assets") or [])
+        if result.get("old_asset"):
+            old_assets.append(result["old_asset"])
+        new_path = Path(result["new_path"]).resolve() if result.get("new_path") else None
+        user = receipt["user_id"]
+        user_root = (LIBRARY / user).resolve()
+        seen_old_paths: set[Path] = set()
+        for old_asset in old_assets:
+            if not old_asset or not old_asset.get("path"):
+                continue
+            old_path = Path(old_asset["path"]).resolve()
+            if old_path in seen_old_paths:
+                continue
+            seen_old_paths.add(old_path)
+            if old_path != new_path and old_path.is_relative_to(user_root):
+                old_path.unlink(missing_ok=True)
+
+        if result.get("source_orphan") and source_id:
+            await self.cleanup_orphan_track(job, source_id)
+        elif source_id and source_id != target_id:
+            if self.store.one("SELECT id FROM tracks WHERE id=?", (source_id,)):
+                self.store.complete_operation(source_id)
+
+        # A post-commit filesystem/playlist failure marks the job target FAILED.
+        # Once retry finishes the idempotent receipt, restore the surviving target
+        # to an available/idle state without re-downloading or applying metadata.
+        if target_id and self.store.one("SELECT id FROM tracks WHERE id=?", (target_id,)):
+            self.store.complete_operation(target_id, health="AVAILABLE")
+
+        self.store.finalize_receipt(receipt["operation_id"])
+        shutil.rmtree(directory, ignore_errors=True)
+        return result
+
+    async def activate_result(self, job, plan: dict, result: dict, receipt: dict,
+                              operation: str, directory: Path):
+        result = dict(result)
+        final = Path(result["file_path"]).resolve()
+        user_root = (LIBRARY / plan["working_track"]["user_id"]).resolve()
+        if not final.is_relative_to(user_root) or not final.is_file():
+            raise RuntimeError("Metadata worker returned an invalid destination")
+        stat = final.stat()
+        asset = {
+            "path": str(final),
+            "sha256": await asyncio.to_thread(sha256_file, final),
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "downloader_name": receipt.get("downloader_name"),
+            "downloader_version": receipt.get("downloader_version"),
+            "source_url": plan["origin"]["url"],
+        }
+        warnings = result.pop("warnings", [])
+        committed = self.store.commit_processed_identity(
+            plan, result, asset, plan.get("action") or "process", operation
+        )
+        for warning in warnings:
+            self.report(job)("WARNING", warning)
+        operation_receipt = self.store.operation_receipt(operation)
+        await self.finish_operation_receipt(job, operation_receipt, directory)
+        self.report(job)("INFO", f"Saved: {result['matched_title']}")
+        return committed
+
+    async def recover_apply_state(self, job, source_track: dict, directory: Path,
+                                  operation: str):
+        """Resume after beets moved/wrote a file but before activation completed."""
+        plan_path = directory / "identity-plan.json"
+        request_path = directory / "apply-request.json"
+        if not plan_path.is_file() or not request_path.is_file():
+            return None
+        saved = json.loads(plan_path.read_text())
+        if saved.get("operation") != operation:
+            return None
+        plan = saved["plan"]
+        request = json.loads(request_path.read_text())
+        receipt_path = directory / "download-complete.json"
+        receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {
+            "downloader_name": "unknown",
+            "downloader_version": "unknown",
+            "source_url": plan["origin"]["url"],
+        }
+        result_path = directory / "apply-result.json"
+        result = json.loads(result_path.read_text()) if result_path.is_file() else None
+        candidate = None
+        if result is None:
+            recovered = await self.bridge(
+                job, request["track"], directory, "inspect", path="",
+                operation=operation,
+            )
+            if recovered.pop("found", False):
+                complete = recovered.pop("complete", False)
+                if complete:
+                    result = recovered
+                else:
+                    candidate = Path(recovered["file_path"])
+        if result is not None:
+            await self.activate_result(
+                job, plan, result, receipt, operation, directory
+            )
+            return {"completed": True}
+        if candidate and candidate.is_file():
+            return {
+                "completed": False,
+                "plan": plan,
+                "candidate": candidate,
+                "selected": request.get("selected"),
+                "receipt": receipt,
+                "overrides": request.get("overrides", {}),
+            }
+        return None
+
+    def queue_receipt_followup(self, receipt: dict | None):
+        if not receipt:
+            return False
+        result = receipt.get("result") or {}
+        source_id = result.get("source_id")
+        origin_id = result.get("reingest_origin_id")
+        if not source_id or not origin_id:
+            return False
+        track = self.store.one("SELECT * FROM tracks WHERE id=?", (source_id,))
+        if not track or track["health"] != "UNAVAILABLE" or track["operation_state"] != "IDLE":
+            return False
+        try:
+            self.store.queue_track(
+                source_id, receipt["user_id"],
+                {"mode": "ingest", "origin_id": origin_id},
+            )
+            self.store.event(
+                "INFO", "Queued remaining origin after identity split",
+                receipt["user_id"], source_id,
+            )
+            return True
+        except (ValueError, LookupError):
+            return False
+
+    async def cleanup_orphan_track(self, job, track_id: str):
+        if self.store.track_has_origins(track_id):
+            return
+        track = self.store.one("SELECT * FROM tracks WHERE id=?", (track_id,))
+        if not track:
+            return
+        directory = STATE / "staging" / f"cleanup-{track_id}"
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            await self.bridge(job, track, directory, "delete", path=track.get("file_path") or "")
+        except Exception as exc:
+            self.report(job)("WARNING", f"Could not remove orphan beets item cleanly: {exc}")
+        path = Path(track["file_path"]).resolve() if track.get("file_path") else None
         user_root = (LIBRARY / track["user_id"]).resolve()
-        file_path = Path(track["file_path"]).resolve() if track.get("file_path") else None
-        if file_path and not file_path.is_relative_to(user_root):
-            raise ValueError("Refusing to delete a track outside this user's library")
+        if path and path.is_relative_to(user_root):
+            path.unlink(missing_ok=True)
+        self.store.delete_track(track_id, track["user_id"])
+        shutil.rmtree(directory, ignore_errors=True)
 
-        sources = self.store.rows("""SELECT DISTINCT s.* FROM sources s JOIN memberships m
-            ON s.id=m.source_id WHERE m.track_id=? AND s.user_id=?""",
-                                  (track["id"], track["user_id"]))
+    async def process_delete(self, job, track, ignore: bool, operation: str):
+        if ignore:
+            self.store.create_tombstone(
+                track["id"], track["user_id"], "Deleted and ignored from the web UI"
+            )
+        sources = self._sources_for_track(track["id"])
         directory = STATE / "staging" / track["id"]
         directory.mkdir(parents=True, exist_ok=True)
-
-        await self.bridge(job, track, directory, "delete", path=str(file_path or ""))
-
-        # The beets item may already be absent after manual filesystem cleanup.
-        if file_path and file_path.is_file():
-            file_path.unlink()
-
-        # Membership rows still exist here; write_playlist omits the deleted file.
+        await self.bridge(job, track, directory, "delete", path=track.get("file_path") or "")
+        path = Path(track["file_path"]).resolve() if track.get("file_path") else None
+        user_root = (LIBRARY / track["user_id"]).resolve()
+        if path:
+            if not path.is_relative_to(user_root):
+                raise ValueError("Refusing to delete a track outside this user's library")
+            path.unlink(missing_ok=True)
         for source in sources:
-            current = self.store.one("SELECT * FROM sources WHERE id=? AND user_id=?",
-                                     (source["id"], track["user_id"]))
-            if current:
-                await asyncio.to_thread(write_playlist, self.store, current)
-
+            await asyncio.to_thread(write_playlist, self.store, source)
         display = track.get("matched_title") or track["title"]
-        self.store.delete_track(track["id"], track["user_id"])
+        self.store.delete_track_with_receipt(
+            track["id"], track["user_id"], operation,
+            "delete_ignore" if ignore else "delete",
+        )
         shutil.rmtree(directory, ignore_errors=True)
-        self.report(job)("INFO", f"Deleted: {display}")
+        suffix = " and ignored" if ignore else ""
+        self.report(job)("INFO", f"Deleted{suffix}: {display}")
+
+    async def _download_candidate(self, job, track, origin, directory, operation):
+        receipt_path = directory / "download-complete.json"
+        candidate = directory / f"temp_{track['id']}.opus"
+        if candidate.is_file() and receipt_path.is_file():
+            receipt = json.loads(receipt_path.read_text())
+            if receipt.get("source_url") == origin["url"]:
+                return candidate, receipt
+        candidate.unlink(missing_ok=True)
+        receipt_path.unlink(missing_ok=True)
+        try:
+            candidate, receipt = await self.downloader.download(
+                origin["url"], track["id"], directory, self.report(job)
+            )
+        except Exception as exc:
+            self.store.update(
+                "track_origins",
+                origin["id"],
+                availability="UNAVAILABLE",
+                last_error=str(exc),
+            )
+            raise
+        self.store.update(
+            "track_origins",
+            origin["id"],
+            availability="AVAILABLE",
+            last_error=None,
+            last_download_at=utcnow(),
+        )
+        self.store.update("tracks", track["id"], temp_path=str(candidate))
+        self.report(job)("INFO", f"Downloaded candidate from {origin['provider']} for {operation}")
+        return candidate, receipt
+
+    async def _identification_choices(self, job, track, directory, candidate):
+        identified = await self.bridge(
+            job, track, directory, "identify", path=str(candidate)
+        )
+        choices = list(identified["choices"])
+        if track.get("mbid"):
+            if not any(choice.get("mbid") == track["mbid"] for choice in choices):
+                try:
+                    current = await self.metadata_for_recording(
+                        job, track, directory, track["mbid"]
+                    )
+                    choices.append(current)
+                except Exception as exc:
+                    self.report(job)(
+                        "WARNING", f"Could not load current identity metadata: {exc}"
+                    )
+        choices.append({
+            "title": track.get("matched_title") or track["title"],
+            "artist": "",
+            "album": "",
+            "mbid": track.get("mbid"),
+            "similarity": 0.0,
+            "description": "Keep the currently stored/source metadata",
+            "kind": "asis",
+            "asis": True,
+        })
+        return identified, choices
+
+    def _select_automatic(self, action: str, track: dict, identified: dict):
+        choices = identified["choices"]
+        top = choices[0] if choices else None
+        if action == "redownload" and track.get("mbid"):
+            if not identified["automatic"] or not top or top.get("mbid") != track["mbid"]:
+                raise ReplacementIdentityMismatch(
+                    "The replacement audio did not strongly match the current confirmed recording. "
+                    "The existing file was retained. Use Reprocess to review an identity change."
+                )
+            return top
+        if action == "reprocess" and track.get("mbid") and top:
+            if top.get("mbid") != track["mbid"]:
+                return None
+        if identified["automatic"] and top:
+            return top
+        return None
+
+    async def _apply_candidate(self, job, source_track, origin, selected, candidate,
+                               receipt, action, operation_id, directory,
+                               overrides=None, persisted_plan=None):
+        plan_path = directory / "identity-plan.json"
+        if persisted_plan is not None:
+            plan = persisted_plan
+        elif plan_path.is_file():
+            saved = json.loads(plan_path.read_text())
+            plan = saved["plan"] if saved.get("operation") == operation_id else None
+        else:
+            plan = None
+        if plan is None:
+            plan = self.store.identity_plan(
+                source_track["id"], origin["id"], selected, action
+            )
+            plan["action"] = action
+            atomic_json(plan_path, {"operation": operation_id, "plan": plan})
+
+        if plan["ignored"]:
+            if action == "ingest":
+                self.store.ignore_identified_origin(
+                    origin["id"], plan["selected_mbid"],
+                    selected.get("title") or source_track["title"], operation_id,
+                )
+                shutil.rmtree(directory, ignore_errors=True)
+                self.report(job)("INFO", "Ignored music was rediscovered and skipped")
+                return {"ignored": True, "target_id": None}
+            raise ValueError(
+                "The selected identity is in this user's ignored-music list"
+            )
+
+        target_track = dict(plan["working_track"])
+        target_track["source_url"] = origin["url"]
+        target_asset = self.store.current_asset(target_track["id"])
+        if plan["route"] == "existing" and target_asset:
+            self.store.commit_existing_identity(plan, action, operation_id)
+            operation_receipt = self.store.operation_receipt(operation_id)
+            await self.finish_operation_receipt(job, operation_receipt, directory)
+            return {"target_id": operation_receipt["result"]["target_id"],
+                    "deduplicated": True}
+
+        backup = None
+        result = None
+        if plan["route"] == "in_place" and source_track.get("file_path"):
+            backup = await self.backup_current(source_track, directory)
+        try:
+            result_path = directory / "apply-result.json"
+            if result_path.is_file():
+                result = json.loads(result_path.read_text())
+            else:
+                result = await self.bridge(
+                    job,
+                    target_track,
+                    directory,
+                    "apply",
+                    path=str(candidate),
+                    selected=selected,
+                    operation=operation_id,
+                    overrides=overrides or {},
+                )
+            return await self.activate_result(
+                job, plan, result, receipt, operation_id, directory
+            )
+        except Exception:
+            if not self.store.operation_receipt(operation_id):
+                # Beets may have moved the candidate before a later step failed.
+                # Remove that uncommitted item/file, then restore the known-good copy.
+                if result and result.get("file_path"):
+                    try:
+                        await self.bridge(
+                            job, target_track, directory, "delete",
+                            path=result["file_path"],
+                        )
+                    except Exception as cleanup_error:
+                        self.report(job)(
+                            "WARNING",
+                            f"Could not remove an uncommitted replacement cleanly: {cleanup_error}",
+                        )
+                        final = Path(result["file_path"]).resolve()
+                        user_root = (LIBRARY / target_track["user_id"]).resolve()
+                        old_path = Path(backup["path"]).resolve() if backup else None
+                        if final.is_relative_to(user_root) and final != old_path:
+                            final.unlink(missing_ok=True)
+                await self.restore_current(backup)
+            raise
+
 
     async def process_track(self, job):
         payload = json.loads(job["payload"])
-        mode = payload.get("mode", "auto")
+        mode = payload.get("mode", "ingest")
         operation = payload.get("operation", str(job["id"]))
-        track = self.store.owned("tracks", job["target"], job["user_id"])
-        if mode == "delete":
-            await self.delete_track(job, track)
+        directory = STATE / "staging" / job["target"]
+
+        completed = self.store.operation_receipt(operation)
+        if completed:
+            await self.finish_operation_receipt(job, completed, directory)
             return
-        self.store.update("tracks", track["id"], status="PROCESSING", error=None)
-        directory = STATE / "staging" / track["id"]
+
+        track = self.store.owned("tracks", job["target"], job["user_id"])
+        action = payload.get("action") or payload.get("pending_action") or mode
+        if mode == "delete":
+            await self.process_delete(job, track, False, operation)
+            return
+        if mode == "delete_ignore":
+            await self.process_delete(job, track, True, operation)
+            return
+
+        self.store.set_operation(track["id"], "RUNNING", action)
         directory.mkdir(parents=True, exist_ok=True)
         plan_file = directory / "operation.json"
-        plan = json.loads(plan_file.read_text()) if plan_file.exists() else {}
-        first_attempt = plan.get("operation") != operation
-        old_value = track.get("file_path") if first_attempt else plan.get("previous_path")
-        old = Path(old_value) if old_value else None
-        selected = json.loads(track["selected"]) if track.get("selected") else None
-        path = Path(track["temp_path"]) if track.get("temp_path") else None
+        previous_plan = json.loads(plan_file.read_text()) if plan_file.exists() else {}
+        first_attempt = previous_plan.get("operation") != operation
         if first_attempt:
-            plan = {"operation": operation, "previous_path": old_value}
-            for name in ("apply-request.json", "apply-result.json"):
-                (directory / name).unlink(missing_ok=True)
-            if mode == "redownload":
-                if path and path.resolve().is_relative_to(directory.resolve()):
-                    path.unlink(missing_ok=True)
-                (directory / f"temp_{track['id']}.opus").unlink(missing_ok=True)
-                (directory / "download-complete.json").unlink(missing_ok=True)
-                path, selected = None, None
-                self.store.update("tracks", track["id"], temp_path=None, selected=None)
-            if mode in {"retag", "reidentify", "adopt"}:
-                if not old or not old.is_file():
-                    raise ValueError("No existing audio file to retag")
-                path = directory / "retag.opus"
-                await asyncio.to_thread(shutil.copy2, old, path)
-                selected = None if mode == "reidentify" else {"asis": True}
-                self.store.update("tracks", track["id"], temp_path=str(path),
-                                  selected=json.dumps(selected) if selected else None)
-            atomic_json(plan_file, plan)
-        # Resume a completed beets move even if the server died before committing
-        # its result to the application ledger. The operation token prevents an
-        # intentional new redownload from adopting a previous operation's result.
-        result = None
-        if (directory / "apply-request.json").is_file():
-            if (directory / "apply-result.json").is_file():
-                result = json.loads((directory / "apply-result.json").read_text())
-            else:
-                recovered = await self.bridge(job, track, directory, "inspect", path="", operation=operation)
-                if recovered.pop("found"):
-                    complete = recovered.pop("complete")
-                    if complete:
-                        result = recovered
-                    else:
-                        path = Path(recovered["file_path"])
-        if result is None and mode == "comment" and old and old.is_file():
-            result = await self.bridge(job, track, directory, "comment", path=str(old))
-        if result is None:
-            if not path or not path.is_file():
-                # Reuse only a file for which the downloader exited successfully.
-                # A partial Opus output left by a killed FFmpeg is not a receipt.
-                path = directory / f"temp_{track['id']}.opus"
-                if not (directory / "download-complete.json").is_file() or not path.is_file():
-                    path.unlink(missing_ok=True)
-                    path = await self.downloader.download(track["url"], track["id"], directory, self.report(job))
-                if not path.is_file():
-                    raise RuntimeError("Downloader finished but produced no Opus file")
-                self.store.update("tracks", track["id"], temp_path=str(path))
+            shutil.rmtree(directory, ignore_errors=True)
+            directory.mkdir(parents=True, exist_ok=True)
+            atomic_json(
+                plan_file,
+                {
+                    "operation": operation,
+                    "action": action,
+                    "origin_id": payload.get("origin_id"),
+                },
+            )
+
+        if mode == "comment":
+            asset = self.store.current_asset(track["id"])
+            if not asset or not Path(asset["path"]).is_file():
+                raise ValueError("No current audio file exists for the discovery comment")
+            await self.bridge(job, track, directory, "comment", path=asset["path"])
+            self.store.complete_operation(track["id"], health="AVAILABLE")
+            shutil.rmtree(directory, ignore_errors=True)
+            return
+
+        recovery = await self.recover_apply_state(
+            job, track, directory, operation
+        )
+        if recovery:
+            if recovery["completed"]:
+                return
+            plan = recovery["plan"]
+            origin = plan["origin"]
+            await self._apply_candidate(
+                job, track, origin, recovery["selected"], recovery["candidate"],
+                recovery["receipt"], plan.get("action") or action, operation,
+                directory, recovery.get("overrides", {}), persisted_plan=plan,
+            )
+            return
+
+        if mode == "retag":
+            asset = self.store.current_asset(track["id"])
+            if not asset or not Path(asset["path"]).is_file():
+                raise ValueError("No current audio file exists to retag")
+            candidate = directory / f"temp_{track['id']}.opus"
+            if not candidate.is_file():
+                await asyncio.to_thread(shutil.copy2, asset["path"], candidate)
+            origin = self.store.one(
+                "SELECT * FROM track_origins WHERE id=?",
+                (track["current_origin_id"],),
+            )
+            if not origin:
+                raise ValueError("The current audio has no origin")
+            receipt = {
+                "downloader_name": asset.get("downloader_name"),
+                "downloader_version": asset.get("downloader_version"),
+                "source_url": origin["url"],
+            }
+            atomic_json(directory / "download-complete.json", receipt)
+            selected = {"asis": True, "mbid": track.get("mbid")}
+            overrides = payload.get("overrides", {})
+            if overrides.get("mbid"):
+                selected = await self.metadata_for_recording(
+                    job, track, directory, overrides["mbid"]
+                )
+            await self._apply_candidate(
+                job, track, origin, selected, candidate, receipt,
+                "retag", operation, directory, overrides,
+            )
+            return
+
+        origin = self.store.owned(
+            "track_origins", payload["origin_id"], track["user_id"]
+        )
+        if origin["track_id"] != track["id"]:
+            raise ValueError("Selected origin no longer belongs to this track")
+        candidate, receipt = await self._download_candidate(
+            job, track, origin, directory, action
+        )
+
+        selected = payload.get("selected") if mode == "resume" else None
+        if selected is None:
+            identified, choices = await self._identification_choices(
+                job, track, directory, candidate
+            )
+            selected = self._select_automatic(action, track, identified)
             if selected is None:
-                identified = await self.bridge(job, track, directory, "identify", path=str(path))
-                self.store.update("tracks", track["id"], choices=json.dumps(identified["choices"]))
-                if not identified["automatic"] or not identified["choices"]:
-                    self.store.update("tracks", track["id"], status="NEEDS_APPROVAL")
-                    self.report(job)("INFO", f"Metadata needs approval (beets: {identified['recommendation']})")
-                    return
-                selected = identified["choices"][0]
-                self.store.update("tracks", track["id"], selected=json.dumps(selected))
-            result = await self.bridge(job, track, directory, "apply", path=str(path), selected=selected,
-                                       operation=operation, overrides=payload.get("overrides", {}))
-        user_root = (LIBRARY / track["user_id"]).resolve()
-        final = Path(result["file_path"]).resolve()
-        if not final.is_relative_to(user_root) or not final.is_file():
-            raise RuntimeError("Metadata worker returned an invalid destination")
-        warnings = result.pop("warnings", [])
-        self.store.update("tracks", track["id"], **result, status="COMPLETED", temp_path=None,
-                          error="; ".join(warnings) or None)
-        for warning in warnings:
-            self.report(job)("WARNING", warning)
-        for source in self.store.rows("""SELECT DISTINCT s.* FROM sources s JOIN memberships m
-            ON s.id=m.source_id WHERE m.track_id=?""", (track["id"],)):
-            await asyncio.to_thread(write_playlist, self.store, source)
-        if old and old.resolve() != final and old.resolve().is_relative_to(user_root):
-            old.unlink(missing_ok=True)
-        # Remove work files only after the library and every playlist are committed.
-        shutil.rmtree(directory, ignore_errors=True)
-        self.report(job)("INFO", f"Saved: {result['matched_title']}")
+                pending = {
+                    "action": action,
+                    "origin_id": origin["id"],
+                    "operation": operation,
+                }
+                self.store.pause_for_approval(
+                    track["id"], choices, pending, str(candidate)
+                )
+                self.report(job)(
+                    "INFO",
+                    f"Metadata needs approval (beets: {identified['recommendation']})",
+                )
+                return
+
+        await self._apply_candidate(
+            job, track, origin, selected, candidate, receipt, action,
+            operation, directory, payload.get("overrides", {}),
+        )
 
     async def process_source(self, job):
         source = self.store.owned("sources", job["target"], job["user_id"])
         self.store.update("sources", source["id"], status="SYNCING", error=None)
         http = HttpPolicy(self.store, self.report(job))
-        snapshot = await asyncio.to_thread(PROVIDERS[source["provider"]].resolve, source, http)
-        self.store.apply_snapshot(source, snapshot)
+        snapshot = await asyncio.to_thread(
+            PROVIDERS[source["provider"]].resolve, source, http
+        )
+        stats = self.store.apply_snapshot(source, snapshot)
         source = self.store.owned("sources", source["id"], source["user_id"])
         await asyncio.to_thread(write_playlist, self.store, source)
-        self.report(job)("INFO", f"Source synchronized: {snapshot.title} ({len(snapshot.entries)} entries)")
+        self.report(job)(
+            "INFO",
+            f"Source synchronized: {snapshot.title} ({stats['entries']} entries, "
+            f"{stats['ignored']} ignored)",
+        )
+
+    async def process_integrity(self, job):
+        user = self.store.require_user(job["user_id"])
+        tracks = self.store.rows("SELECT * FROM tracks WHERE user_id=?", (user,))
+        directory = STATE / "staging" / f"integrity-{user}"
+        directory.mkdir(parents=True, exist_ok=True)
+        audit = await self.bridge_request(
+            job,
+            directory,
+            "audit-many",
+            {"mode": "audit_many", "user": user, "tracks": tracks},
+            timeout=1800,
+        ) if tracks else {}
+        issues: list[dict] = []
+        expected_paths: set[Path] = set()
+        user_root = (LIBRARY / user).resolve()
+        for track in tracks:
+            asset = self.store.current_asset(track["id"])
+            if not asset:
+                if (
+                    track["health"] == "UNAVAILABLE"
+                    and track["operation_state"] in {"QUEUED", "RUNNING", "NEEDS_APPROVAL"}
+                ):
+                    # Initial ingestion and approval are valid transient states.
+                    continue
+                issues.append({
+                    "issue_key": f"track:{track['id']}:no-current-asset",
+                    "track_id": track["id"],
+                    "kind": "NO_CURRENT_ASSET",
+                    "severity": "ERROR",
+                    "message": "No current audio asset is recorded.",
+                })
+                self.store.update("tracks", track["id"], health="MISSING")
+                continue
+            path = Path(asset["path"]).resolve()
+            expected_paths.add(path)
+            if not path.is_relative_to(user_root):
+                issues.append({
+                    "issue_key": f"track:{track['id']}:outside-library",
+                    "track_id": track["id"],
+                    "asset_id": asset["id"],
+                    "kind": "PATH_OUTSIDE_LIBRARY",
+                    "severity": "ERROR",
+                    "message": "The current asset path is outside this user's library.",
+                    "details": {"path": str(path)},
+                })
+                self.store.update("tracks", track["id"], health="MISSING")
+                continue
+            if not path.is_file():
+                issues.append({
+                    "issue_key": f"track:{track['id']}:missing-file",
+                    "track_id": track["id"],
+                    "asset_id": asset["id"],
+                    "kind": "MISSING_FILE",
+                    "severity": "ERROR",
+                    "message": "The current audio file is missing.",
+                    "details": {"path": str(path)},
+                })
+                self.store.update("tracks", track["id"], health="MISSING")
+                continue
+
+            stat = path.stat()
+            try:
+                from mutagen.oggopus import OggOpus
+                raw_tags = OggOpus(path)
+                expected_comment = discovery_comment(track.get("discovered_at"))
+                if (
+                    raw_tags.get("comment", [None])[0] != expected_comment
+                    or raw_tags.get("description", [None])[0] != expected_comment
+                ):
+                    issues.append({
+                        "issue_key": f"track:{track['id']}:discovery-comment",
+                        "track_id": track["id"],
+                        "asset_id": asset["id"],
+                        "kind": "DISCOVERY_COMMENT_MISMATCH",
+                        "severity": "WARNING",
+                        "message": "COMMENT or DESCRIPTION does not contain the expected discovery timestamp.",
+                        "details": {"path": str(path), "expected": expected_comment},
+                    })
+            except Exception as exc:
+                issues.append({
+                    "issue_key": f"track:{track['id']}:unreadable-tags",
+                    "track_id": track["id"],
+                    "asset_id": asset["id"],
+                    "kind": "UNREADABLE_TAGS",
+                    "severity": "ERROR",
+                    "message": "The Opus metadata could not be read.",
+                    "details": {"path": str(path), "error": str(exc)},
+                })
+            digest = asset.get("sha256")
+            if not digest or asset.get("size_bytes") != stat.st_size or asset.get("mtime_ns") != stat.st_mtime_ns:
+                actual = await asyncio.to_thread(sha256_file, path)
+                if digest and actual != digest:
+                    issues.append({
+                        "issue_key": f"track:{track['id']}:hash-mismatch",
+                        "track_id": track["id"],
+                        "asset_id": asset["id"],
+                        "kind": "HASH_MISMATCH",
+                        "severity": "WARNING",
+                        "message": "The audio file changed after it was activated.",
+                        "details": {"path": str(path)},
+                    })
+                else:
+                    self.store.update(
+                        "assets", asset["id"], sha256=actual,
+                        size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns,
+                    )
+            beets = audit.get(track["id"], {})
+            if not beets.get("found"):
+                issues.append({
+                    "issue_key": f"track:{track['id']}:beets-missing",
+                    "track_id": track["id"],
+                    "asset_id": asset["id"],
+                    "kind": "BEETS_MISSING",
+                    "severity": "WARNING",
+                    "message": "The track is missing from this user's beets library.",
+                })
+            elif Path(beets["path"]).resolve() != path:
+                issues.append({
+                    "issue_key": f"track:{track['id']}:beets-path",
+                    "track_id": track["id"],
+                    "asset_id": asset["id"],
+                    "kind": "BEETS_PATH_MISMATCH",
+                    "severity": "WARNING",
+                    "message": "Beets points to a different path than the active asset.",
+                    "details": {"asset": str(path), "beets": beets["path"]},
+                })
+            self.store.update("tracks", track["id"], health="AVAILABLE")
+
+        historical_assets = self.store.rows(
+            """SELECT a.* FROM assets a JOIN tracks t ON t.id=a.track_id
+               WHERE t.user_id=? AND a.state<>'CURRENT'""",
+            (user,),
+        )
+        for historical in historical_assets:
+            historical_path = Path(historical["path"]).resolve()
+            if historical_path.is_file() and historical_path.is_relative_to(user_root):
+                expected_paths.add(historical_path)
+                current = self.store.current_asset(historical["track_id"])
+                if not current or Path(current["path"]).resolve() != historical_path:
+                    issues.append({
+                        "issue_key": f"asset:{historical['id']}:retained-replacement",
+                        "track_id": historical["track_id"],
+                        "asset_id": historical["id"],
+                        "kind": "REPLACED_ASSET_RETAINED",
+                        "severity": "WARNING",
+                        "message": "A replaced audio file is still present on disk.",
+                        "details": {"path": str(historical_path)},
+                    })
+
+        if user_root.exists():
+            for path in user_root.rglob("*.opus"):
+                resolved = path.resolve()
+                if resolved not in expected_paths:
+                    issues.append({
+                        "issue_key": f"orphan:{resolved}",
+                        "kind": "ORPHAN_FILE",
+                        "severity": "WARNING",
+                        "message": "An Opus file is not referenced by the application database.",
+                        "details": {"path": str(resolved)},
+                    })
+
+        self.store.replace_integrity_issues(user, issues)
+        self.store.set_setting(f"integrity_last:{user}", utcnow())
+        shutil.rmtree(directory, ignore_errors=True)
+        self.report(job)("INFO", f"Library verification finished: {len(issues)} issue(s)")
 
     async def work(self):
         while not self.stopping.is_set():
@@ -205,37 +867,53 @@ class Pipeline:
             if not job:
                 await asyncio.sleep(0.5)
                 continue
+            kind = json.loads(job["payload"]).get("action") or json.loads(job["payload"]).get("mode") or job["kind"]
             try:
                 if job["kind"] == "sync":
                     await self.process_source(job)
                 elif job["kind"] == "track":
                     await self.process_track(job)
+                elif job["kind"] == "integrity":
+                    await self.process_integrity(job)
                 else:
                     raise ValueError("Unknown job type")
-                self.store.update("jobs", job["id"], state="DONE", finished_at=utcnow())
+                self.store.update(
+                    "jobs", job["id"], state="DONE", finished_at=utcnow(), error=None
+                )
+                if job["kind"] == "track":
+                    operation_id = json.loads(job["payload"]).get("operation")
+                    self.queue_receipt_followup(
+                        self.store.operation_receipt(operation_id)
+                    )
             except asyncio.CancelledError:
-                # Startup recovery will retry this durable job, not lose it.
                 raise
             except Exception as exc:
                 self.report(job)("ERROR", traceback.format_exc())
-                self.store.update("jobs", job["id"], state="FAILED", error=str(exc), finished_at=utcnow())
-                table = "sources" if job["kind"] == "sync" else "tracks"
-                self.store.update(table, job["target"], status="FAILED", error=str(exc))
+                self.store.update(
+                    "jobs", job["id"], state="FAILED", error=str(exc),
+                    finished_at=utcnow(),
+                )
+                if job["kind"] == "sync":
+                    self.store.update(
+                        "sources", job["target"], status="FAILED", error=str(exc)
+                    )
+                elif job["kind"] == "track":
+                    self.store.fail_operation(job["target"], str(kind), str(exc))
             finally:
                 if job["kind"] == "sync":
-                    delay = max(0.1, float(os.getenv("SYNC_INTERVAL_HOURS", "6"))) * 3600
-                    self.store.update("sources", job["target"], next_sync=time.time() + delay)
-            # Extra boundary spacing protects libraries that have their own per-process limiter.
+                    interval = float(os.getenv("SYNC_INTERVAL_HOURS", "6"))
+                    next_sync = time.time() + interval * 3600 if interval > 0 else 0
+                    self.store.update("sources", job["target"], next_sync=next_sync)
             await asyncio.sleep(1.1)
 
     async def update_downloader(self):
         try:
             await self.downloader.update()
         except Exception:
-            pass  # The runtime updater already persists and displays the full failure.
+            pass
 
     def start_update(self):
-        if self.downloader.lock.locked() or any(not t.done() for t in self.children):
+        if self.downloader.lock.locked() or any(not task.done() for task in self.children):
             raise ValueError("A downloader update is already queued or running")
         task = asyncio.create_task(self.update_downloader())
         self.children.add(task)
@@ -246,18 +924,45 @@ class Pipeline:
             try:
                 now = time.time()
                 if float(os.getenv("SYNC_INTERVAL_HOURS", "6")) > 0:
-                    for source in self.store.rows("SELECT * FROM sources WHERE monitored=1 AND next_sync<=?", (now,)):
+                    for source in self.store.rows(
+                        "SELECT * FROM sources WHERE monitored=1 AND next_sync<=?", (now,)
+                    ):
                         self.store.enqueue("sync", source["id"], source["user_id"])
+
                 if os.getenv("YTDLP_UPDATE_ENABLED", "true").lower() == "true":
                     next_at = self.store.setting("next_downloader_update")
                     if next_at is None or next_at <= now:
-                        future = next_nightly(datetime.now(UTC), os.getenv("YTDLP_UPDATE_TIME", "04:00"),
-                                              os.getenv("TZ", "Europe/Paris"))
+                        future = next_nightly(
+                            datetime.now(UTC),
+                            os.getenv("YTDLP_UPDATE_TIME", "04:00"),
+                            os.getenv("TZ", "Europe/Paris"),
+                        )
                         self.store.set_setting("next_downloader_update", future.timestamp())
                         if next_at is not None:
                             self.start_update()
-                self.store.execute("DELETE FROM events WHERE id < (SELECT COALESCE(MAX(id),0)-20000 FROM events)")
-                self.store.execute("DELETE FROM jobs WHERE state='DONE' AND id < (SELECT COALESCE(MAX(id),0)-2000 FROM jobs)")
+
+                for receipt in self.store.receipts_with_followups():
+                    self.queue_receipt_followup(receipt)
+
+                integrity_hours = float(os.getenv("INTEGRITY_INTERVAL_HOURS", "24"))
+                if integrity_hours > 0:
+                    for user in self.store.rows("SELECT name FROM users"):
+                        key = f"integrity_next:{user['name']}"
+                        due = self.store.setting(key, 0)
+                        if due <= now:
+                            self.store.enqueue(
+                                "integrity", user["name"], user["name"], {"mode": "verify"}
+                            )
+                            self.store.set_setting(key, now + integrity_hours * 3600)
+
+                self.store.execute(
+                    "DELETE FROM events WHERE id < "
+                    "(SELECT COALESCE(MAX(id),0)-20000 FROM events)"
+                )
+                self.store.execute(
+                    "DELETE FROM jobs WHERE state='DONE' AND id < "
+                    "(SELECT COALESCE(MAX(id),0)-2000 FROM jobs)"
+                )
             except Exception:
                 self.store.event("ERROR", traceback.format_exc(), target="scheduler")
             await asyncio.sleep(30)

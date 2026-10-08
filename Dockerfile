@@ -3,17 +3,17 @@ FROM python:3.13-slim-trixie AS builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
-COPY pyproject.toml ./
-# No legacy uv.lock was supplied. Resolve honestly rather than shipping a fake lock.
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --no-install-project
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
-# A second venv prevents downloader updates from modifying beets or API dependencies.
-# CI passes a unique value to refresh this layer even when other build layers are cached.
+# The downloader is isolated so nightly yt-dlp updates never alter the API/beets venv.
 ARG DOWNLOADER_BUILD=initial
 RUN --mount=type=cache,target=/root/.cache/uv \
     echo "$DOWNLOADER_BUILD" \
  && uv venv --python /usr/local/bin/python /opt/ytdlp \
- && uv pip install --python /opt/ytdlp/bin/python --prerelease=allow "yt-dlp[default]" "tenacity>=9,<10"
+ && uv pip install --python /opt/ytdlp/bin/python --prerelease=allow \
+      "yt-dlp[default]" "tenacity>=9,<10"
 
 FROM python:3.13-slim-trixie
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
@@ -27,7 +27,6 @@ RUN apt-get update \
 COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=denoland/deno:latest /usr/bin/deno /usr/local/bin/deno
 COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/uv.lock /app/build-uv.lock
 COPY --from=builder /opt/ytdlp /opt/ytdlp
 WORKDIR /app
 COPY beets.yaml ./

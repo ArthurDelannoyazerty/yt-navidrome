@@ -1,4 +1,4 @@
-"""Provider boundary: all downstream code consumes the same source-neutral snapshot."""
+"""Provider boundary: downstream code consumes source-neutral snapshots."""
 from __future__ import annotations
 
 import os
@@ -27,6 +27,7 @@ class Entry:
     entry_id: str
     position: int
     basis: str = "playlist_added"
+    downloadable: bool = True
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,8 @@ class YouTube:
             video = parts.path.split("/")[2]
         if not video or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video):
             raise ValueError("Use a video or playlist URL, not a channel or search URL")
-        return SourceRef(self.name, "video:" + video, "https://www.youtube.com/watch?v=" + video, False)
+        return SourceRef(self.name, "video:" + video,
+                         "https://www.youtube.com/watch?v=" + video, False)
 
     def resolve(self, source: dict, http: HttpPolicy) -> Snapshot:
         key = os.getenv("YT_API_KEY", "").strip()
@@ -66,9 +68,14 @@ class YouTube:
             raise ApiDeferred("YT_API_KEY is not configured; no date fallback is permitted")
 
         def get(resource, **params):
-            return http.get_json("https://www.googleapis.com/youtube/v3/" + resource,
-                                 params=params, headers={"X-Goog-Api-Key": key,
-                                 "User-Agent": os.getenv("HTTP_USER_AGENT", "Music-Ingestor/0.2")})
+            return http.get_json(
+                "https://www.googleapis.com/youtube/v3/" + resource,
+                params=params,
+                headers={
+                    "X-Goog-Api-Key": key,
+                    "User-Agent": os.getenv("HTTP_USER_AGENT", "Music-Ingestor/0.3"),
+                },
+            )
 
         identity = source["source_key"].split(":", 1)[1]
         if not source["is_playlist"]:
@@ -76,13 +83,17 @@ class YouTube:
             if not data.get("items"):
                 raise ApiDeferred("Video is missing, private, or unavailable to the API")
             title = data["items"][0]["snippet"]["title"]
-            # Direct links have an observation time, not an invented playlist-add time.
-            return Snapshot(title, [Entry(identity, source["url"], title, utcnow(), identity, 0, "first_seen")])
+            observed = utcnow()
+            return Snapshot(title, [Entry(identity, source["url"], title, observed,
+                                          identity, 0, "first_seen", True)])
+
         metadata = get("playlists", part="snippet", id=identity)
         if not metadata.get("items"):
             raise ApiDeferred("Playlist is missing, private, or unavailable to this API key")
         title = metadata["items"][0]["snippet"]["title"]
-        entries, token, seen = [], None, set()
+        entries: list[Entry] = []
+        token = None
+        seen: set[str] = set()
         while True:
             params = {"part": "snippet", "playlistId": identity, "maxResults": 50}
             if token:
@@ -91,14 +102,21 @@ class YouTube:
             for obj in page.get("items", []):
                 snippet = obj["snippet"]
                 name = snippet.get("title", "")
-                vid = snippet.get("resourceId", {}).get("videoId")
-                if not vid or name.lower().strip("[]") in {"private video", "deleted video"}:
+                video = snippet.get("resourceId", {}).get("videoId")
+                if not video or name.lower().strip("[]") in {"private video", "deleted video"}:
                     http.report("WARNING", f"Unavailable playlist entry skipped: {name}")
                     continue
-                # This is the playlist item's publication time, NOT videoPublishedAt.
                 added = timestamp(snippet["publishedAt"])
-                entries.append(Entry(vid, "https://www.youtube.com/watch?v=" + vid, name, added,
-                                     obj["id"], int(snippet["position"])))
+                entries.append(Entry(
+                    video,
+                    "https://www.youtube.com/watch?v=" + video,
+                    name,
+                    added,
+                    obj["id"],
+                    int(snippet["position"]),
+                    "playlist_added",
+                    True,
+                ))
             token = page.get("nextPageToken")
             if not token:
                 return Snapshot(title, entries)
@@ -114,4 +132,7 @@ def parse_source(url: str) -> SourceRef:
     for provider in PROVIDERS.values():
         if ref := provider.parse(url.strip()):
             return ref
-    raise ValueError("Unsupported source. Additional providers can implement parse() and resolve(); Spotify is not enabled yet.")
+    raise ValueError(
+        "Unsupported source. Additional providers can implement parse() and resolve(); "
+        "Spotify is not enabled yet."
+    )
