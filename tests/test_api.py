@@ -49,18 +49,23 @@ def test_integrity_and_ignored_endpoints(db, track):
         assert client.get("/api/integrity", params={"user_id": "admin"}).status_code == 200
 
 
-def test_frontend_assets_are_versioned_and_never_stale(db):
+def test_frontend_assets_are_content_versioned_and_cache_safe(db):
+    import re
+
     with TestClient(create_app(db, start_workers=False)) as client:
         page = client.get("/")
         assert page.status_code == 200
-        assert '/static/style.css?v=2' in page.text
-        assert '/static/app.js?v=2' in page.text
+        assert "__STATIC_VERSION__" not in page.text
+        versions = re.findall(r'/static/(?:style\\.css|app\\.js)\\?v=([0-9a-f]{12})', page.text)
+        assert len(versions) == 2 and versions[0] == versions[1]
         assert 'Loading…' in page.text
         assert page.headers["Cache-Control"] == "no-store, max-age=0"
         assert page.headers["Pragma"] == "no-cache"
 
-        for path in ("/static/style.css?v=2", "/static/app.js?v=2"):
+        for path in (
+            f"/static/style.css?v={versions[0]}",
+            f"/static/app.js?v={versions[0]}",
+        ):
             response = client.get(path)
             assert response.status_code == 200
-            assert response.headers["Cache-Control"] == "no-store, max-age=0"
-            assert response.headers["Pragma"] == "no-cache"
+            assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"

@@ -25,7 +25,8 @@ def test_frontend_dom_contract_and_toolbar_layout():
         "grid-template-columns:minmax(220px,1fr) minmax(220px,1fr) auto"
         in css
     )
-    assert ".control-field input,.control-field select{height:42px" in css
+    assert ".track-toolbar .control-field input,.track-toolbar .control-field select{height:42px" in css
+    assert "margin-bottom:0" in css
 
 
 def test_frontend_exposes_low_friction_navigation_and_actions():
@@ -39,3 +40,9 @@ def test_frontend_exposes_low_friction_navigation_and_actions():
     assert 'button("Delete local copy"' in javascript
     assert 'button("Delete and ignore"' in javascript
     assert 'await api("/api/integrity/run"' in javascript
+
+
+
+def test_keyed_dom_replacement_keeps_a_live_insert_cursor():
+    javascript = (ROOT / "src/static/app.js").read_text()
+    assert "if (cursor === current) cursor = desired;" in javascript

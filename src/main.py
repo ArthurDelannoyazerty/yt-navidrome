@@ -4,6 +4,7 @@ load_dotenv()
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import shutil
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,13 @@ from common import LIBRARY, ROOT
 from pipeline import Pipeline
 from providers import parse_source
 from store import SCHEMA_VERSION, Store
+
+STATIC_ROOT = ROOT / "static"
+INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
+_asset_digest = hashlib.sha256()
+for _asset_name in ("style.css", "app.js"):
+    _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
+STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
 
 class UserInput(BaseModel):
@@ -106,7 +114,7 @@ def create_app(store=None, start_workers=True):
     app = FastAPI(title="Music Ingestor", lifespan=lifespan)
     app.state.store = store
     app.state.pipeline = pipeline
-    app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+    app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 
     @app.middleware("http")
     async def browser_security(request, call_next):
@@ -124,12 +132,14 @@ def create_app(store=None, start_workers=True):
             "default-src 'self'; script-src 'self'; style-src 'self'; "
             "frame-ancestors 'none'; base-uri 'self'"
         )
-        # The UI is deployed atomically with the API. Never let browsers or
-        # reverse proxies combine a new index.html with stale JS/CSS assets.
-        if request.url.path == "/" or request.url.path.startswith("/static/"):
+        # The HTML must always be revalidated so it can point at the current
+        # content-addressed frontend assets. Versioned static URLs are immutable.
+        if request.url.path == "/":
             response.headers["Cache-Control"] = "no-store, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
+        elif request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
     async def error_response(request, exc):
@@ -158,7 +168,9 @@ def create_app(store=None, start_workers=True):
 
     @app.get("/")
     def index():
-        return FileResponse(ROOT / "static" / "index.html")
+        return HTMLResponse(
+            INDEX_TEMPLATE.replace("__STATIC_VERSION__", STATIC_VERSION)
+        )
 
     @app.get("/healthz")
     def health():

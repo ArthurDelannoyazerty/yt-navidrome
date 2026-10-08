@@ -119,7 +119,12 @@ function updateKeyedChildren(container, items, {key, signature, render, backgrou
         desired = render(item);
         desired.dataset.key = itemKey;
         desired.dataset.signature = itemSignature;
-        if (current) current.replaceWith(desired);
+        if (current) {
+          current.replaceWith(desired);
+          // If the replaced node was our insertion cursor, the old node is now
+          // detached. Point at the replacement before the next insertBefore().
+          if (cursor === current) cursor = desired;
+        }
       }
     }
     if (!desired) continue;
