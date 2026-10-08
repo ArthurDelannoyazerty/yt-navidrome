@@ -124,6 +124,12 @@ def create_app(store=None, start_workers=True):
             "default-src 'self'; script-src 'self'; style-src 'self'; "
             "frame-ancestors 'none'; base-uri 'self'"
         )
+        # The UI is deployed atomically with the API. Never let browsers or
+        # reverse proxies combine a new index.html with stale JS/CSS assets.
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         return response
 
     async def error_response(request, exc):

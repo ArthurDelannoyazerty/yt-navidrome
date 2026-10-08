@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Music Ingestor</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=2">
+  <script src="/static/app.js?v=2" defer></script>
 </head>
 <body>
 <header class="app-header">
@@ -13,7 +13,7 @@
     <h1>Music Ingestor</h1>
     <p>Provider-aware, user-separated music library management.</p>
   </div>
-  <label class="user-picker">Library user<select id="user" aria-label="Library user"></select></label>
+  <label class="user-picker">Library user<select id="user" aria-label="Library user"><option value="">Loading…</option></select></label>
 </header>
 
 <nav class="tabs" aria-label="Application sections">
@@ -33,7 +33,7 @@
     </div>
 
     <div id="stats" class="stats"></div>
-    <button id="healthSummary" type="button" class="health-summary secondary"></button>
+    <button id="healthSummary" type="button" class="health-summary secondary">Library health: loading…</button>
 
     <div class="track-toolbar">
       <label class="control-field">Status

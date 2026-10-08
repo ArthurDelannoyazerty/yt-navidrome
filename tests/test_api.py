@@ -47,3 +47,20 @@ def test_integrity_and_ignored_endpoints(db, track):
         restored = client.delete(f"/api/ignored/{ignored_id}", params={"user_id": "admin"})
         assert restored.status_code == 200
         assert client.get("/api/integrity", params={"user_id": "admin"}).status_code == 200
+
+
+def test_frontend_assets_are_versioned_and_never_stale(db):
+    with TestClient(create_app(db, start_workers=False)) as client:
+        page = client.get("/")
+        assert page.status_code == 200
+        assert '/static/style.css?v=2' in page.text
+        assert '/static/app.js?v=2' in page.text
+        assert 'Loading…' in page.text
+        assert page.headers["Cache-Control"] == "no-store, max-age=0"
+        assert page.headers["Pragma"] == "no-cache"
+
+        for path in ("/static/style.css?v=2", "/static/app.js?v=2"):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.headers["Cache-Control"] == "no-store, max-age=0"
+            assert response.headers["Pragma"] == "no-cache"
