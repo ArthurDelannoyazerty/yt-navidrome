@@ -46,3 +46,16 @@ def test_frontend_exposes_low_friction_navigation_and_actions():
 def test_keyed_dom_replacement_keeps_a_live_insert_cursor():
     javascript = (ROOT / "src/static/app.js").read_text()
     assert "if (cursor === current) cursor = desired;" in javascript
+
+
+
+def test_music_table_keeps_origin_urls_visible():
+    javascript = (ROOT / "src/static/app.js").read_text()
+    css = (ROOT / "src/static/style.css").read_text()
+    assert 'const originList = node("div", null, "origin-links");' in javascript
+    assert 'node("a", origin.url, "origin-url")' in javascript
+    assert 'link.target = "_blank";' in javascript
+    assert 'link.rel = "noopener noreferrer";' in javascript
+    # Origin links are rendered in renderTrack before the approval/action controls.
+    assert javascript.index('const originList = node("div", null, "origin-links");') < javascript.index('if (track.operation_state === "NEEDS_APPROVAL")')
+    assert ".origin-links{" in css and ".origin-url{" in css

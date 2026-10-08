@@ -405,7 +405,24 @@ function renderTrack(track) {
   if (track.matched_title && track.matched_title !== track.title) music.append(node("div", track.title, "source-title"));
   if (track.mbid) music.append(musicbrainzLink("recording", track.mbid));
   if (track.release_id) music.append(node("br"), musicbrainzLink("release", track.release_id));
-  music.append(node("div", `${track.origins.length} origin${track.origins.length === 1 ? "" : "s"}`, "hint"));
+
+  const originList = node("div", null, "origin-links");
+  for (const origin of track.origins) {
+    const line = node("div", null, "origin-line");
+    line.append(node("span", `${origin.provider}: `, "origin-provider"));
+    if (origin.url && /^https?:\/\//i.test(origin.url)) {
+      const link = node("a", origin.url, "origin-url");
+      link.href = origin.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.title = `Open ${origin.provider} origin`;
+      line.append(link);
+    } else {
+      line.append(node("span", origin.url || origin.media_key || "Unknown origin", "origin-url"));
+    }
+    originList.append(line);
+  }
+  music.append(originList);
 
   if (track.playlists.length) {
     for (const playlist of track.playlists) {
