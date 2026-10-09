@@ -519,11 +519,32 @@ class Store:
                 if not origin_id:
                     continue
                 origin = con.execute(
-                    "SELECT provider FROM track_origins WHERE id=?",
+                    "SELECT provider,url FROM track_origins WHERE id=?",
                     (origin_id,),
                 ).fetchone()
                 if not origin or origin["provider"] != "youtube":
                     continue
+
+                # A metadata-deferred job may already have a valid downloaded
+                # candidate. It does not need YouTube again, so a playback circuit
+                # must not postpone its independent metadata retry.
+                directory = STATE / "staging" / job["target"]
+                candidate = directory / f"temp_{job['target']}.opus"
+                plan_file = directory / "operation.json"
+                receipt_file = directory / "download-complete.json"
+                if candidate.is_file() and plan_file.is_file() and receipt_file.is_file():
+                    try:
+                        plan = json.loads(plan_file.read_text())
+                        receipt = json.loads(receipt_file.read_text())
+                        payload = json.loads(job["payload"] or "{}")
+                        if (
+                            plan.get("operation") == payload.get("operation")
+                            and receipt.get("source_url") == origin["url"]
+                        ):
+                            continue
+                    except (OSError, TypeError, ValueError):
+                        pass
+
                 con.execute(
                     "UPDATE jobs SET not_before=MAX(not_before,?),error=? WHERE id=?",
                     (retry_at, reason, job["id"]),
