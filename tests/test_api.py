@@ -78,3 +78,98 @@ def test_system_exposes_youtube_circuit_state(db):
         assert data["schema"] == 2
         assert data["youtube_circuit"]["open"] is False
         assert data["youtube_circuit"]["failures"] == 0
+
+
+
+def test_bulk_approve_is_scoped_to_current_user(db, track):
+    from providers import Entry, Snapshot, parse_source
+
+    db.add_user("guest")
+    guest_source = db.add_source(
+        parse_source("https://youtube.com/playlist?list=PLguest"), "guest"
+    )
+    db.apply_snapshot(
+        guest_source,
+        Snapshot("Guest playlist", [
+            Entry(
+                "lmnopqrstuv",
+                "https://www.youtube.com/watch?v=lmnopqrstuv",
+                "Guest Artist - Guest Song",
+                "2022-01-01T00:00:00Z",
+                "guest-entry",
+                0,
+            )
+        ]),
+    )
+    db.execute("UPDATE jobs SET state='DONE'")
+
+    admin_origin = db.one(
+        "SELECT * FROM track_origins WHERE track_id=?",
+        (track["id"],),
+    )
+    guest_track = db.one("SELECT * FROM tracks WHERE user_id='guest'")
+    guest_origin = db.one(
+        "SELECT * FROM track_origins WHERE track_id=?",
+        (guest_track["id"],),
+    )
+    choices = [
+        {
+            "mbid": "11111111-1111-4111-8111-111111111111",
+            "title": "Best match",
+            "artist": "Artist",
+            "album": "Album",
+            "similarity": 95.0,
+            "description": "",
+            "kind": "candidate",
+            "tags": {},
+        },
+        {
+            "mbid": None,
+            "title": "Original",
+            "artist": "",
+            "album": "",
+            "similarity": 0,
+            "description": "source metadata",
+            "kind": "asis",
+            "tags": {},
+        },
+    ]
+    db.pause_for_approval(
+        track["id"],
+        choices,
+        {
+            "action": "ingest",
+            "origin_id": admin_origin["id"],
+            "operation": "admin-approval",
+        },
+        "/tmp/admin.opus",
+    )
+    db.pause_for_approval(
+        guest_track["id"],
+        choices,
+        {
+            "action": "ingest",
+            "origin_id": guest_origin["id"],
+            "operation": "guest-approval",
+        },
+        "/tmp/guest.opus",
+    )
+
+    with TestClient(create_app(db, start_workers=False)) as client:
+        response = client.post(
+            "/api/batch",
+            json={"user_id": "admin", "mode": "best"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Queued 1 tracks"
+
+    admin_after = db.one("SELECT * FROM tracks WHERE id=?", (track["id"],))
+    guest_after = db.one("SELECT * FROM tracks WHERE id=?", (guest_track["id"],))
+    assert admin_after["operation_state"] == "QUEUED"
+    assert json.loads(admin_after["selected"])["title"] == "Best match"
+    assert guest_after["operation_state"] == "NEEDS_APPROVAL"
+    assert guest_after["selected"] is None
+    assert db.one(
+        "SELECT COUNT(*) AS n FROM jobs WHERE user_id='guest' AND state='PENDING'"
+    )["n"] == 0

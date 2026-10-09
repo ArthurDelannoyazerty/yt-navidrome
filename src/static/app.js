@@ -515,6 +515,12 @@ function trackSignature(track) {
 }
 
 function updateStats(stats) {
+  const approveAll = $("approveAll");
+  approveAll.disabled = !stats.approval;
+  approveAll.textContent = stats.approval
+    ? `Approve all (${stats.approval})`
+    : "Approve all";
+
   const values = [
     ["Total", stats.total],
     ["Available", stats.available],
@@ -763,14 +769,14 @@ $("syncAll").addEventListener("click", guard(async () => {
 }));
 
 for (const [id, mode, message] of [
-  ["approveBest", "best", "Approve the top candidate for all waiting tracks?"],
-  ["approveOriginal", "original", "Keep current/source metadata for all waiting tracks?"],
-  ["retryAll", "retry", "Retry all failed operations for this user?"],
+  ["approveAll", "best", () => `Approve the top candidate for every track awaiting approval for "${state.user}"? This only affects the current library user.`],
+  ["approveOriginal", "original", () => `Keep current/source metadata for all waiting tracks for "${state.user}"?`],
+  ["retryAll", "retry", () => `Retry all failed operations for "${state.user}"?`],
 ]) {
   const element = $(id);
   if (!element) continue;
   element.addEventListener("click", guard(async () => {
-    if (!confirm(message)) return;
+    if (!confirm(message())) return;
     const result = await api("/api/batch", {user_id: state.user, mode});
     notice(result.message);
     await refreshTracks(false);
