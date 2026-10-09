@@ -6,7 +6,7 @@ import pytest
 
 import runtime
 from common import atomic_json
-from runtime import DownloaderRuntime, run_process
+from runtime import DownloaderRuntime, ProcessError, run_process
 
 
 def test_subprocess_stdout_and_stderr_are_visible():
@@ -86,3 +86,59 @@ def test_invalid_active_pointer_can_be_repaired(db, monkeypatch):
     monkeypatch.setattr(runtime, "run_process", run)
     asyncio.run(downloader.update())
     assert downloader.active()["version"] == "new"
+
+
+
+def test_process_error_exposes_subprocess_exit_code():
+    with pytest.raises(ProcessError) as exc:
+        asyncio.run(run_process(
+            [sys.executable, "-c", "import sys; print('WARNING temporary'); sys.exit(75)"],
+            lambda *args: None,
+        ))
+    assert exc.value.returncode == 75
+    assert "WARNING temporary" in exc.value.output
+
+
+def test_youtube_circuit_breaker_defers_pending_downloads(db, monkeypatch):
+    from providers import Entry, Snapshot, parse_source
+
+    monkeypatch.setenv("YT_CIRCUIT_FAILURES", "3")
+    monkeypatch.setenv("YT_CIRCUIT_WINDOW_SECONDS", "300")
+    monkeypatch.setenv("YT_CIRCUIT_COOLDOWN_SECONDS", "900")
+    monkeypatch.setenv("YT_CIRCUIT_MAX_COOLDOWN_SECONDS", "3600")
+    now = [1800000000.0]
+    monkeypatch.setattr(runtime.time, "time", lambda: now[0])
+
+    source = db.add_source(
+        parse_source("https://youtube.com/playlist?list=PLbreaker"), "admin"
+    )
+    entries = [
+        Entry(
+            key, f"https://youtube.com/watch?v={key}", f"Song {index}",
+            "2020-01-01T00:00:00Z", f"entry-{index}", index,
+        )
+        for index, key in enumerate(("abcdefghijk", "lmnopqrstuv", "12345678901"))
+    ]
+    db.apply_snapshot(source, Snapshot("Breaker", entries))
+    downloader = DownloaderRuntime(db)
+
+    first, paused = downloader._record_download_block("blocked")
+    second, _ = downloader._record_download_block("blocked")
+    third, paused = downloader._record_download_block("blocked")
+
+    assert not first["until"]
+    assert not second["until"]
+    assert third["until"] == now[0] + 900
+    assert paused == 3
+    assert downloader.circuit_status()["open"]
+    assert all(
+        row["not_before"] >= third["until"]
+        for row in db.rows("SELECT not_before FROM jobs WHERE kind='track' AND state='PENDING'")
+    )
+    assert {
+        row["operation_state"] for row in db.rows("SELECT operation_state FROM tracks")
+    } == {"DEFERRED"}
+
+    downloader._record_download_success()
+    assert not downloader.circuit_status()["open"]
+    assert downloader.circuit_status()["failures"] == 0

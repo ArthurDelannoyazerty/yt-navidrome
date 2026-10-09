@@ -6,6 +6,7 @@ import pytest
 
 from common import atomic_json
 from pipeline import Pipeline, ReplacementIdentityMismatch, write_playlist
+from runtime import DeferredOperation
 
 
 def activate(db, track, environment, mbid="11111111-1111-4111-8111-111111111111"):
@@ -316,3 +317,74 @@ def test_receipt_retry_clears_postcommit_failure_without_redownload(db, track, e
     assert not old_path.exists()
     assert rewrites == [current["id"]]
     assert db.operation_receipt(operation)["finalized_at"]
+
+
+
+def test_metadata_deferral_reuses_downloaded_candidate(db, track, environment, monkeypatch):
+    pipeline = Pipeline(db)
+    origin = db.one("SELECT * FROM track_origins")
+    downloads = []
+    identifies = []
+    final = environment[1] / "admin" / "Artist" / "Album" / "Song.opus"
+
+    async def download(url, track_id, directory, report):
+        downloads.append(url)
+        candidate = directory / f"temp_{track_id}.opus"
+        candidate.write_bytes(b"candidate")
+        receipt = {
+            "source_url": url,
+            "downloader_name": "yt-dlp",
+            "downloader_version": "test",
+        }
+        atomic_json(directory / "download-complete.json", receipt)
+        return candidate, receipt
+
+    async def bridge(job, current, directory, mode, **kwargs):
+        if mode == "identify":
+            identifies.append(1)
+            if len(identifies) == 1:
+                raise DeferredOperation("musicbrainz.org: HTTP 503", retry_at=1)
+            return {
+                "automatic": True,
+                "recommendation": "strong",
+                "choices": [{
+                    "mbid": "11111111-1111-4111-8111-111111111111",
+                    "tags": {}, "title": "Song", "artist": "Artist",
+                    "album": "Album", "similarity": 99.0,
+                    "description": "", "kind": "candidate",
+                }],
+            }
+        if mode == "apply":
+            final.parent.mkdir(parents=True, exist_ok=True)
+            final.write_bytes(Path(kwargs["path"]).read_bytes())
+            return {
+                "file_path": str(final),
+                "beets_id": 1,
+                "matched_title": "Artist - Song",
+                "mbid": "11111111-1111-4111-8111-111111111111",
+                "release_id": None,
+                "warnings": [],
+            }
+        raise AssertionError(mode)
+
+    monkeypatch.setattr(pipeline.downloader, "download", download)
+    monkeypatch.setattr(pipeline, "bridge", bridge)
+    operation = "metadata-defer"
+    db.enqueue(
+        "track", track["id"], "admin",
+        {"mode": "ingest", "origin_id": origin["id"], "operation": operation},
+    )
+    job = db.claim()
+    with pytest.raises(DeferredOperation):
+        asyncio.run(pipeline.process_track(job))
+
+    db.defer_job(job["id"], "musicbrainz.org: HTTP 503", retry_at=1)
+    db.update("jobs", job["id"], not_before=0)
+    retried = db.claim()
+    asyncio.run(pipeline.process_track(retried))
+
+    assert len(downloads) == 1
+    assert len(identifies) == 2
+    updated = db.one("SELECT * FROM tracks WHERE id=?", (track["id"],))
+    assert updated["health"] == "AVAILABLE"
+    assert final.read_bytes() == b"candidate"

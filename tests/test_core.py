@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -300,3 +301,111 @@ def test_metadata_only_origin_is_recorded_without_download_job(db):
         db.queue_track(track["id"], "admin", {
             "mode": "ingest", "origin_id": origin["id"],
         })
+
+
+
+def test_deferred_job_is_not_claimed_before_due(db):
+    source = db.add_source(
+        parse_source("https://youtube.com/playlist?list=PLdeferred"), "admin"
+    )
+    db.apply_snapshot(source, Snapshot("Deferred", [
+        Entry(
+            "abcdefghijk", "https://youtu.be/abcdefghijk", "Artist - Song",
+            "2020-01-01T00:00:00Z", "entry", 0,
+        )
+    ]))
+    job = db.one("SELECT * FROM jobs WHERE kind='track'")
+    db.update("jobs", job["id"], not_before=9999999999.0)
+    assert db.claim() is None
+    db.update("jobs", job["id"], not_before=0)
+    assert db.claim()["id"] == job["id"]
+
+
+def test_schema_v1_upgrade_preserves_staged_approval(environment):
+    from store import Store
+
+    path = environment[0] / "upgrade.sqlite"
+    old = Store(path)
+    old.init()
+    source = old.add_source(
+        parse_source("https://youtube.com/playlist?list=PLupgrade"), "admin"
+    )
+    old.apply_snapshot(source, Snapshot("Upgrade", [
+        Entry(
+            "abcdefghijk", "https://youtu.be/abcdefghijk", "Artist - Song",
+            "2020-01-01T00:00:00Z", "entry", 0,
+        )
+    ]))
+    track = old.one("SELECT * FROM tracks")
+    origin = old.one("SELECT * FROM track_origins")
+    first_job = old.one("SELECT * FROM jobs WHERE kind='track'")
+    old.update("jobs", first_job["id"], state="DONE")
+
+    candidate = environment[0] / "staging" / track["id"] / f"temp_{track['id']}.opus"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"already-downloaded")
+    pending = {
+        "action": "ingest",
+        "origin_id": origin["id"],
+        "operation": "original-approval",
+    }
+    old.pause_for_approval(
+        track["id"],
+        [{"title": "Artist - Song", "mbid": None, "kind": "asis"}],
+        pending,
+        str(candidate),
+    )
+
+    # Recreate the old v1 bug: a monitored sync queues another ingest without
+    # clearing the still-valid approval candidate.
+    old.enqueue(
+        "track", track["id"], "admin",
+        {"mode": "ingest", "origin_id": origin["id"]},
+    )
+    old.update(
+        "tracks", track["id"], operation_state="QUEUED",
+        operation_kind="INGEST", operation_error=None,
+    )
+
+    with sqlite3.connect(path) as con:
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.execute("DROP INDEX one_active_job")
+        con.execute("ALTER TABLE jobs RENAME TO jobs_v2")
+        con.execute(
+            """CREATE TABLE jobs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               target TEXT NOT NULL,
+               payload TEXT NOT NULL DEFAULT '{}',
+               state TEXT NOT NULL DEFAULT 'PENDING',
+               error TEXT,
+               created_at TEXT NOT NULL,
+               finished_at TEXT
+            )"""
+        )
+        con.execute(
+            """INSERT INTO jobs(id,user_id,kind,target,payload,state,error,created_at,finished_at)
+               SELECT id,user_id,kind,target,payload,state,error,created_at,finished_at
+               FROM jobs_v2"""
+        )
+        con.execute("DROP TABLE jobs_v2")
+        con.execute(
+            """CREATE UNIQUE INDEX one_active_job ON jobs(kind,target)
+               WHERE state IN ('PENDING','RUNNING')"""
+        )
+        con.execute("PRAGMA user_version=1")
+
+    migrated = Store(path)
+    migrated.init()
+    assert migrated.one("PRAGMA user_version")["user_version"] == 2
+    columns = {row["name"] for row in migrated.rows("PRAGMA table_info(jobs)")}
+    assert {"not_before", "defer_count"} <= columns
+    restored = migrated.one("SELECT * FROM tracks WHERE id=?", (track["id"],))
+    assert restored["operation_state"] == "NEEDS_APPROVAL"
+    assert json.loads(restored["pending_operation"]) == pending
+    assert migrated.one(
+        "SELECT state FROM jobs WHERE kind='track' AND target=? ORDER BY id DESC LIMIT 1",
+        (track["id"],),
+    )["state"] == "CANCELLED"
+    assert list((environment[0] / "backups").glob("ingestor-schema-v1-*.sqlite"))

@@ -59,3 +59,16 @@ def test_music_table_keeps_origin_urls_visible():
     # Origin links are rendered in renderTrack before the approval/action controls.
     assert javascript.index('const originList = node("div", null, "origin-links");') < javascript.index('if (track.operation_state === "NEEDS_APPROVAL")')
     assert ".origin-links{" in css and ".origin-url{" in css
+
+
+
+def test_frontend_exposes_deferred_retry_state():
+    html = (ROOT / "src/static/index.html").read_text()
+    javascript = (ROOT / "src/static/app.js").read_text()
+    css = (ROOT / "src/static/style.css").read_text()
+    assert '<option value="DEFERRED">Deferred retry</option>' in html
+    assert '["QUEUED", "RUNNING", "DEFERRED"]' in javascript
+    assert '["Deferred", stats.deferred]' in javascript
+    assert '["Processing", stats.running]' in javascript
+    assert "Retry after" in javascript
+    assert ".NEEDS_APPROVAL,.UNAVAILABLE,.DEFERRED" in css

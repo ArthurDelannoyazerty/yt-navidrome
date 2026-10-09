@@ -100,9 +100,11 @@ def test_network_retry_exhaustion(db, clock):
         raise requests.ConnectionError("offline")
 
     policy = HttpPolicy(db)
-    with pytest.raises(requests.ConnectionError):
+    with pytest.raises(ApiDeferred) as exc:
         policy.send(send, requests.Session(), request)
-    assert len(calls) == 3 and policy.failures
+    assert len(calls) == 3
+    assert policy.deferred_failures
+    assert exc.value.retry_at > clock[0]
 
 
 def test_retry_after_http_date():
