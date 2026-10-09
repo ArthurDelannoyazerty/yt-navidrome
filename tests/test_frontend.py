@@ -72,3 +72,17 @@ def test_frontend_exposes_deferred_retry_state():
     assert '["Processing", stats.running]' in javascript
     assert "Retry after" in javascript
     assert ".NEEDS_APPROVAL,.UNAVAILABLE,.DEFERRED" in css
+
+
+
+def test_music_view_exposes_current_user_approve_all():
+    html = (ROOT / "src/static/index.html").read_text()
+    javascript = (ROOT / "src/static/app.js").read_text()
+
+    assert 'id="approveAll"' in html
+    assert '>Approve all</button>' in html
+    assert '["approveAll", "best"' in javascript
+    assert 'This only affects the current library user.' in javascript
+    assert 'approveAll.disabled = !stats.approval;' in javascript
+    assert 'Approve all (${stats.approval})' in javascript
+    assert 'await api("/api/batch", {user_id: state.user, mode})' in javascript
