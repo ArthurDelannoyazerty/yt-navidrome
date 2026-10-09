@@ -480,9 +480,14 @@ class Store:
             if not job:
                 raise LookupError("Job not found")
             count = int(job["defer_count"] or 0) + 1
-            if retry_at is None:
-                retry_at = now + min(1800.0, base_delay * (2 ** min(count - 1, 5)))
-            retry_at = max(float(retry_at), now + 1.0)
+            backoff_at = now + min(
+                1800.0, base_delay * (2 ** min(count - 1, 5))
+            )
+            retry_at = max(
+                float(retry_at or 0),
+                backoff_at,
+                now + 1.0,
+            )
             con.execute(
                 """UPDATE jobs SET state='PENDING',error=?,finished_at=NULL,
                    not_before=?,defer_count=? WHERE id=?""",
