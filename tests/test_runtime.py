@@ -122,12 +122,17 @@ def test_youtube_circuit_breaker_defers_pending_downloads(db, monkeypatch):
     db.apply_snapshot(source, Snapshot("Breaker", entries))
     downloader = DownloaderRuntime(db)
 
-    first, paused = downloader._record_download_block("blocked")
+    first, _ = downloader._record_download_block("blocked")
+    downloader._record_download_success()
+    now[0] += 60
     second, _ = downloader._record_download_block("blocked")
+    downloader._record_download_success()
+    now[0] += 60
     third, paused = downloader._record_download_block("blocked")
 
     assert not first["until"]
     assert not second["until"]
+    assert third["failures"] == 3
     assert third["until"] == now[0] + 900
     assert paused == 3
     assert downloader.circuit_status()["open"]
@@ -139,9 +144,18 @@ def test_youtube_circuit_breaker_defers_pending_downloads(db, monkeypatch):
         row["operation_state"] for row in db.rows("SELECT operation_state FROM tracks")
     } == {"DEFERRED"}
 
+    # A stray success must not erase a still-open circuit or recent failures.
+    downloader._record_download_success()
+    assert downloader.circuit_status()["open"]
+    assert downloader.circuit_status()["failures"] == 3
+
+    # Once both the cooldown and rolling failure window have elapsed, a success
+    # returns the breaker to its baseline state.
+    now[0] = third["until"] + 1
     downloader._record_download_success()
     assert not downloader.circuit_status()["open"]
     assert downloader.circuit_status()["failures"] == 0
+    assert downloader.circuit_status()["opens"] == 0
 
 
 
@@ -189,3 +203,19 @@ def test_youtube_circuit_does_not_delay_staged_metadata_retry(db, track, environ
     assert refreshed["error"] == "musicbrainz.org temporarily unavailable"
     assert refreshed_track["operation_state"] == "DEFERRED"
     assert refreshed_track["operation_error"] == "musicbrainz.org temporarily unavailable"
+
+
+
+def test_youtube_circuit_prunes_old_failures(db, monkeypatch):
+    monkeypatch.setenv("YT_CIRCUIT_FAILURES", "3")
+    monkeypatch.setenv("YT_CIRCUIT_WINDOW_SECONDS", "300")
+    now = [1800000000.0]
+    monkeypatch.setattr(runtime.time, "time", lambda: now[0])
+    downloader = DownloaderRuntime(db)
+
+    downloader._record_download_block("blocked")
+    now[0] += 301
+    state, _ = downloader._record_download_block("blocked")
+
+    assert state["failures"] == 1
+    assert not state["until"]
