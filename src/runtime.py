@@ -90,15 +90,6 @@ class DownloaderRuntime:
             "version": "bundled",
         }
 
-    def circuit_status(self):
-        state = dict(self.store.setting("youtube_download_circuit", {}) or {})
-        until = float(state.get("until") or 0)
-        state["until"] = until
-        state["open"] = until > time.time()
-        state.setdefault("failures", 0)
-        state.setdefault("opens", 0)
-        return state
-
     @staticmethod
     def _env_number(name, default, cast=float):
         raw = (os.getenv(name) or "").split("#", 1)[0].strip()
@@ -107,6 +98,38 @@ class DownloaderRuntime:
         except (TypeError, ValueError):
             return default
 
+    def _circuit_failure_times(self, state, now, window):
+        raw = state.get("failure_times")
+        if isinstance(raw, list):
+            values = raw
+        else:
+            # Compatibility with the first v2 circuit state shape.
+            legacy_count = max(0, int(state.get("failures") or 0))
+            legacy_at = float(state.get("last_failure_at") or 0)
+            values = [legacy_at] * legacy_count if legacy_at else []
+        result = []
+        for value in values:
+            try:
+                timestamp = float(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= now - timestamp <= window:
+                result.append(timestamp)
+        return result
+
+    def circuit_status(self):
+        now = time.time()
+        state = dict(self.store.setting("youtube_download_circuit", {}) or {})
+        window = max(30.0, self._env_number("YT_CIRCUIT_WINDOW_SECONDS", 300.0))
+        failures = self._circuit_failure_times(state, now, window)
+        until = float(state.get("until") or 0)
+        state["failure_times"] = failures
+        state["failures"] = len(failures)
+        state["until"] = until
+        state["open"] = until > now
+        state.setdefault("opens", 0)
+        return state
+
     def _record_download_block(self, reason: str):
         now = time.time()
         previous = dict(self.store.setting("youtube_download_circuit", {}) or {})
@@ -114,38 +137,51 @@ class DownloaderRuntime:
         threshold = max(1, self._env_number("YT_CIRCUIT_FAILURES", 3, int))
         base = max(60.0, self._env_number("YT_CIRCUIT_COOLDOWN_SECONDS", 900.0))
         maximum = max(base, self._env_number("YT_CIRCUIT_MAX_COOLDOWN_SECONDS", 3600.0))
-        last_at = float(previous.get("last_failure_at") or 0)
-        failures = int(previous.get("failures") or 0) + 1 if now - last_at <= window else 1
+
+        failure_times = self._circuit_failure_times(previous, now, window)
+        failure_times.append(now)
+        failures = len(failure_times)
         opens = int(previous.get("opens") or 0)
-        until = 0.0
-        if failures >= threshold:
+        previous_until = float(previous.get("until") or 0)
+        until = previous_until if previous_until > now else 0.0
+        if failures >= threshold and not until:
             opens += 1
             until = now + min(maximum, base * (2 ** min(opens - 1, 4)))
+
         state = {
+            "failure_times": failure_times,
             "failures": failures,
             "opens": opens,
             "last_failure_at": now,
             "until": until,
             "reason": reason,
+            "last_success_at": previous.get("last_success_at"),
         }
         self.store.set_setting("youtube_download_circuit", state)
         paused = 0
-        if until:
+        if until and until != previous_until:
             paused = self.store.defer_pending_youtube_jobs(until, reason)
         return state, paused
 
     def _record_download_success(self):
-        current = self.store.setting("youtube_download_circuit", {}) or {}
-        if current.get("failures") or current.get("until"):
-            self.store.set_setting(
-                "youtube_download_circuit",
-                {
-                    "failures": 0,
-                    "opens": 0,
-                    "until": 0,
-                    "last_success_at": time.time(),
-                },
-            )
+        now = time.time()
+        current = dict(self.store.setting("youtube_download_circuit", {}) or {})
+        window = max(30.0, self._env_number("YT_CIRCUIT_WINDOW_SECONDS", 300.0))
+        failures = self._circuit_failure_times(current, now, window)
+        until = float(current.get("until") or 0)
+        opens = int(current.get("opens") or 0)
+        if not failures and until <= now:
+            opens = 0
+        current.update(
+            {
+                "failure_times": failures,
+                "failures": len(failures),
+                "opens": opens,
+                "until": until,
+                "last_success_at": now,
+            }
+        )
+        self.store.set_setting("youtube_download_circuit", current)
 
     async def download(self, url, track_id, directory, report):
         circuit = self.circuit_status()
