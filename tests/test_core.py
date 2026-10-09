@@ -26,6 +26,61 @@ def test_same_origin_in_multiple_playlists_is_one_track_and_one_origin(db):
     assert db.one("SELECT COUNT(*) AS n FROM jobs WHERE kind='track'")["n"] == 1
 
 
+def test_source_resync_preserves_pending_approval_without_redownload(db):
+    source = db.add_source(
+        parse_source("https://youtube.com/playlist?list=PLapproval"), "admin"
+    )
+    entry = Entry(
+        "abcdefghijk", "https://youtu.be/abcdefghijk", "Artist - Song",
+        "2020-01-01T00:00:00Z", "entry-a", 0,
+    )
+    db.apply_snapshot(source, Snapshot("Approval", [entry]))
+    track = db.one("SELECT * FROM tracks")
+    job = db.one("SELECT * FROM jobs WHERE kind='track'")
+    db.update("jobs", job["id"], state="DONE")
+    pending = {
+        "action": "ingest",
+        "origin_id": db.one("SELECT id FROM track_origins")["id"],
+        "operation": "approval-operation",
+    }
+    db.pause_for_approval(
+        track["id"],
+        [{"title": "Artist - Song", "mbid": None, "kind": "asis"}],
+        pending,
+        "/tmp/pending-candidate.opus",
+    )
+
+    db.apply_snapshot(source, Snapshot("Approval", [entry]))
+
+    current = db.one("SELECT * FROM tracks WHERE id=?", (track["id"],))
+    assert current["operation_state"] == "NEEDS_APPROVAL"
+    assert json.loads(current["pending_operation"]) == pending
+    assert current["temp_path"] == "/tmp/pending-candidate.opus"
+    assert db.one("SELECT COUNT(*) AS n FROM jobs WHERE kind='track'")["n"] == 1
+
+
+def test_source_resync_does_not_implicitly_retry_failed_ingest(db):
+    source = db.add_source(
+        parse_source("https://youtube.com/playlist?list=PLfailed"), "admin"
+    )
+    entry = Entry(
+        "abcdefghijk", "https://youtu.be/abcdefghijk", "Artist - Song",
+        "2020-01-01T00:00:00Z", "entry-a", 0,
+    )
+    db.apply_snapshot(source, Snapshot("Failed", [entry]))
+    track = db.one("SELECT * FROM tracks")
+    job = db.one("SELECT * FROM jobs WHERE kind='track'")
+    db.update("jobs", job["id"], state="FAILED", error="provider unavailable")
+    db.fail_operation(track["id"], "ingest", "provider unavailable")
+
+    db.apply_snapshot(source, Snapshot("Failed", [entry]))
+
+    current = db.one("SELECT * FROM tracks WHERE id=?", (track["id"],))
+    assert current["operation_state"] == "FAILED"
+    assert "provider unavailable" in current["operation_error"]
+    assert db.one("SELECT COUNT(*) AS n FROM jobs WHERE kind='track'")["n"] == 1
+
+
 def test_playlist_discovery_beats_first_seen_and_never_moves_later(db):
     direct = db.add_source(parse_source("https://youtube.com/watch?v=abcdefghijk"), "admin")
     db.apply_snapshot(direct, Snapshot("Direct", [

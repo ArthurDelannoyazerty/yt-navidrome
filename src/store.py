@@ -633,7 +633,14 @@ class Store:
                             origin_playlist, now, origin_id,
                         ),
                     )
-                    if entry.downloadable and origin["health"] in {"UNAVAILABLE", "MISSING"}:
+                    # Source refreshes must never steal a track from an explicit
+                    # operation state. NEEDS_APPROVAL has no current asset yet, so
+                    # health remains UNAVAILABLE while its candidate waits in staging.
+                    if (
+                        entry.downloadable
+                        and origin["health"] in {"UNAVAILABLE", "MISSING"}
+                        and origin["operation_state"] == "IDLE"
+                    ):
                         queued = self.enqueue(
                             "track", track_id, source["user_id"],
                             {"mode": "ingest", "origin_id": origin_id}, con=con,
@@ -654,8 +661,16 @@ class Store:
 
             for track_id in touched:
                 changed = self._recompute_discovery_locked(con, track_id)
-                track = con.execute("SELECT file_path FROM tracks WHERE id=?", (track_id,)).fetchone()
-                if changed and track and track["file_path"]:
+                track = con.execute(
+                    "SELECT file_path,operation_state FROM tracks WHERE id=?",
+                    (track_id,),
+                ).fetchone()
+                if (
+                    changed
+                    and track
+                    and track["file_path"]
+                    and track["operation_state"] == "IDLE"
+                ):
                     if self.enqueue(
                         "track", track_id, source["user_id"], {"mode": "comment"}, con=con
                     ):
