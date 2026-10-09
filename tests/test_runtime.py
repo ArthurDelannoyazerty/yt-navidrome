@@ -142,3 +142,37 @@ def test_youtube_circuit_breaker_defers_pending_downloads(db, monkeypatch):
     downloader._record_download_success()
     assert not downloader.circuit_status()["open"]
     assert downloader.circuit_status()["failures"] == 0
+
+
+
+def test_youtube_circuit_does_not_delay_staged_metadata_retry(db, track, environment):
+    origin = db.one("SELECT * FROM track_origins")
+    operation = "metadata-only-retry"
+    db.enqueue(
+        "track", track["id"], "admin",
+        {"mode": "ingest", "origin_id": origin["id"], "operation": operation},
+    )
+    job = db.one(
+        "SELECT * FROM jobs WHERE kind='track' AND target=? AND state='PENDING'",
+        (track["id"],),
+    )
+    directory = environment[0] / "staging" / track["id"]
+    directory.mkdir(parents=True)
+    (directory / f"temp_{track['id']}.opus").write_bytes(b"candidate")
+    atomic_json(
+        directory / "operation.json",
+        {"operation": operation, "action": "ingest", "origin_id": origin["id"]},
+    )
+    atomic_json(
+        directory / "download-complete.json",
+        {"source_url": origin["url"], "downloader_name": "yt-dlp"},
+    )
+
+    changed = db.defer_pending_youtube_jobs(9999999999.0, "YouTube paused")
+    refreshed = db.one("SELECT * FROM jobs WHERE id=?", (job["id"],))
+
+    assert changed == 0
+    assert refreshed["not_before"] == 0
+    assert db.one(
+        "SELECT operation_state FROM tracks WHERE id=?", (track["id"],)
+    )["operation_state"] == "IDLE"

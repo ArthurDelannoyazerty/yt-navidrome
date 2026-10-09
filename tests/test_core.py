@@ -315,6 +315,7 @@ def test_deferred_job_is_not_claimed_before_due(db):
         )
     ]))
     job = db.one("SELECT * FROM jobs WHERE kind='track'")
+    db.execute("UPDATE jobs SET state='DONE' WHERE kind='sync'")
     db.update("jobs", job["id"], not_before=9999999999.0)
     assert db.claim() is None
     db.update("jobs", job["id"], not_before=0)
