@@ -80,7 +80,7 @@ Each current/replaced asset records:
 - current/replaced state.
 
 Track health (`AVAILABLE`, `MISSING`, `UNAVAILABLE`) is separate from the latest
-operation state (`QUEUED`, `RUNNING`, `NEEDS_APPROVAL`, `FAILED`, `IDLE`). A failed
+operation state (`QUEUED`, `RUNNING`, `DEFERRED`, `NEEDS_APPROVAL`, `FAILED`, `IDLE`). A failed
 redownload therefore reports an operation error without making an intact current
 asset unavailable.
 
@@ -142,6 +142,10 @@ The committed `uv.lock` is used by both CI and Docker with `uv sync --frozen`.
 | `YT_DLP_COOKIES_FILE` | empty | optional in-container cookie path |
 | `DOWNLOAD_SLEEP_MIN` | `2` | preserved downloader pacing |
 | `DOWNLOAD_SLEEP_MAX` | `6` | preserved downloader pacing |
+| `YT_CIRCUIT_FAILURES` | `3` | blocked YouTube downloads before the shared circuit opens |
+| `YT_CIRCUIT_WINDOW_SECONDS` | `300` | rolling window for blocked-download detection |
+| `YT_CIRCUIT_COOLDOWN_SECONDS` | `900` | initial YouTube circuit cooldown |
+| `YT_CIRCUIT_MAX_COOLDOWN_SECONDS` | `3600` | maximum repeated circuit cooldown |
 | `YTDLP_UPDATE_ENABLED` | `true` | isolated nightly downloader update |
 | `YTDLP_UPDATE_TIME` | `04:00` | local scheduled time |
 | `TZ` | `Europe/Paris` | updater timezone |
@@ -153,9 +157,16 @@ downloadable origins.
 
 ## SQLite schema versioning
 
-The database uses `PRAGMA user_version`. Schema v1 is created directly for an
-empty state directory. An unversioned database containing data is refused rather
-than silently changed. Future schema upgrades should:
+The database uses `PRAGMA user_version`. Fresh installations create schema v2.
+An unversioned database containing data is refused rather than silently changed.
+
+Schema v1 upgrades automatically to v2 in place. Before the migration changes the
+durable job queue, it creates a consistent backup under `state/backups/`. The v2
+migration adds deferred-job scheduling and also repairs approval candidates that
+the old monitored-source resync bug may have changed back to `QUEUED`, provided
+their staged audio still exists.
+
+Future schema upgrades follow the same pattern:
 
 1. make a consistent SQLite backup under `state/backups/`;
 2. run an explicit transactional migration;
@@ -163,6 +174,20 @@ than silently changed. Future schema upgrades should:
 
 This intentionally avoids a heavy migration framework while retaining deterministic,
 testable upgrades for the small SQLite schema.
+
+## Provider deferral and YouTube circuit breaker
+
+Transient metadata-provider failures (for example MusicBrainz 503/429 responses)
+do not discard a downloaded candidate. The same durable job is marked
+`DEFERRED` with exponential retry timing; when it becomes due, the staging receipt
+is reused and the metadata stage resumes without another YouTube download.
+
+YouTube playback blocks are handled separately. Several bot-verification,
+HTTP 403/429, or equivalent playback failures inside the configured rolling
+window open a shared circuit breaker. Pending YouTube jobs receive the same
+cooldown and are skipped by the worker until it expires, while source sync,
+maintenance, and other due jobs remain claimable. A successful YouTube download
+resets the breaker.
 
 ## Nightly yt-dlp updates
 

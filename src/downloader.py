@@ -57,10 +57,13 @@ def download_audio_file(url: str, track_uuid: str):
         return f"{temp_filename}.opus"
     except yt_dlp.utils.DownloadError as e:
         err = str(e).lower()
-        if any(k in err for k in ("sign in", "403", "429", "bot", "not available", "try again later", "precondition check failed")):
+        if any(k in err for k in ("unavailable", "private video", "removed")):
+            raise DownloadUnavailableError("Video unavailable, private, or removed.") from e
+        if any(k in err for k in (
+            "sign in to confirm", "403", "429", "bot",
+            "try again later", "precondition check failed",
+        )):
             raise DownloadBotError(f"yt-dlp blocked the download: {e}") from e
-        if any(k in err for k in ("unavailable", "private", "removed")):
-            raise DownloadUnavailableError("Video unavailable or removed.")
         raise DownloadNetworkError(f"Network error during download: {e}")
 
 
@@ -70,6 +73,12 @@ if __name__ == "__main__":
     except DownloadBotError:
         traceback.print_exc()
         sys.exit(20)
+    except DownloadUnavailableError:
+        traceback.print_exc()
+        sys.exit(21)
+    except DownloadNetworkError:
+        traceback.print_exc()
+        sys.exit(22)
     except Exception:
         traceback.print_exc()
         sys.exit(1)

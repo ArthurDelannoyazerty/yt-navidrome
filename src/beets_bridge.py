@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from common import LIBRARY, ROOT, STATE, atomic_json, discovery_comment, user_name
-from http_policy import HttpPolicy
+from http_policy import ApiDeferred, HttpPolicy
 from store import Store
 
 
@@ -118,6 +118,7 @@ class Bridge:
         session = SimpleNamespace(config=config["import"])
         plugins.send("import_task_start", session=session, task=task)
         candidates, recommendation = tag_item(Source.from_item(item))
+        self.raise_if_deferred()
         if self.http.failures:
             raise RuntimeError("; ".join(self.http.failures))
         plugins.send("import_task_apply", session=session, task=task)
@@ -147,9 +148,17 @@ class Bridge:
             "recommendation": recommendation.name,
         }
 
+    def raise_if_deferred(self):
+        if self.http.deferred_failures:
+            raise ApiDeferred(
+                "; ".join(self.http.deferred_failures),
+                retry_at=self.http.deferred_until or None,
+            )
+
     def metadata_for_recording(self, recording_id: str):
         mb = self.plugins["musicbrainz"]
         info = mb.track_for_id(recording_id)
+        self.raise_if_deferred()
         if not info:
             raise ValueError("MusicBrainz recording was not found")
         return {
@@ -186,6 +195,7 @@ class Bridge:
                 key=lambda release: (release.get("date") or "9999", release["id"]),
             )["id"]
         album = mb.album_for_id(release_id)
+        self.raise_if_deferred()
         if not album:
             raise ValueError("MusicBrainz release was not found")
         matches = [track for track in album.tracks if track.track_id == recording_id]
@@ -391,6 +401,16 @@ if __name__ == "__main__":
         request = json.loads(Path(sys.argv[1]).read_text())
         result = main(request)
         atomic_json(Path(sys.argv[2]), result)
+    except ApiDeferred as exc:
+        print(
+            "WARNING DEFERRED " + json.dumps({
+                "message": str(exc),
+                "retry_at": getattr(exc, "retry_at", None),
+            }),
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(75)
     except Exception:
         traceback.print_exc()
         sys.exit(1)

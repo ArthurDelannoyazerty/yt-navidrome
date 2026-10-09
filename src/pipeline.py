@@ -24,9 +24,9 @@ from common import (
     sha256_file,
     utcnow,
 )
-from http_policy import HttpPolicy
+from http_policy import ApiDeferred, HttpPolicy
 from providers import PROVIDERS
-from runtime import DownloaderRuntime, run_process
+from runtime import DeferredOperation, DownloaderRuntime, ProcessError, run_process
 
 
 class ReplacementIdentityMismatch(RuntimeError):
@@ -91,11 +91,31 @@ class Pipeline:
         result_path = directory / f"{name}-result.json"
         result_path.unlink(missing_ok=True)
         atomic_json(request_path, request)
-        await run_process(
-            [sys.executable, ROOT / "beets_bridge.py", request_path, result_path],
-            self.report(job),
-            timeout=timeout,
-        )
+        try:
+            await run_process(
+                [sys.executable, ROOT / "beets_bridge.py", request_path, result_path],
+                self.report(job),
+                timeout=timeout,
+            )
+        except ProcessError as exc:
+            if exc.returncode != 75:
+                raise
+            marker = "WARNING DEFERRED "
+            payload = None
+            for line in reversed(exc.output):
+                if line.startswith(marker):
+                    try:
+                        payload = json.loads(line[len(marker):])
+                    except (TypeError, ValueError):
+                        payload = None
+                    break
+            message = (
+                payload.get("message")
+                if isinstance(payload, dict) and payload.get("message")
+                else "Metadata provider temporarily unavailable"
+            )
+            retry_at = payload.get("retry_at") if isinstance(payload, dict) else None
+            raise DeferredOperation(message, retry_at=retry_at) from exc
         if not result_path.exists():
             raise RuntimeError("Metadata worker returned no result")
         return json.loads(result_path.read_text())
@@ -401,6 +421,14 @@ class Pipeline:
             candidate, receipt = await self.downloader.download(
                 origin["url"], track["id"], directory, self.report(job)
             )
+        except DeferredOperation as exc:
+            self.store.update(
+                "track_origins",
+                origin["id"],
+                availability="DEFERRED",
+                last_error=str(exc),
+            )
+            raise
         except Exception as exc:
             self.store.update(
                 "track_origins",
@@ -432,6 +460,8 @@ class Pipeline:
                         job, track, directory, track["mbid"]
                     )
                     choices.append(current)
+                except DeferredOperation:
+                    raise
                 except Exception as exc:
                     self.report(job)(
                         "WARNING", f"Could not load current identity metadata: {exc}"
@@ -715,7 +745,7 @@ class Pipeline:
             if not asset:
                 if (
                     track["health"] == "UNAVAILABLE"
-                    and track["operation_state"] in {"QUEUED", "RUNNING", "NEEDS_APPROVAL"}
+                    and track["operation_state"] in {"QUEUED", "RUNNING", "DEFERRED", "NEEDS_APPROVAL"}
                 ):
                     # Initial ingestion and approval are valid transient states.
                     continue
@@ -887,6 +917,17 @@ class Pipeline:
                     )
             except asyncio.CancelledError:
                 raise
+            except (DeferredOperation, ApiDeferred) as exc:
+                retry_at = self.store.defer_job(
+                    job["id"],
+                    str(exc),
+                    retry_at=getattr(exc, "retry_at", None),
+                )
+                when = datetime.fromtimestamp(retry_at, UTC).isoformat()
+                self.report(job)(
+                    "WARNING",
+                    f"{str(kind).upper()} deferred until {when}: {exc}",
+                )
             except Exception as exc:
                 self.report(job)("ERROR", traceback.format_exc())
                 self.store.update(

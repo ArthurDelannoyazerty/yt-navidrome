@@ -14,6 +14,19 @@ from pathlib import Path
 from common import ROOT, STATE, atomic_json
 
 
+class ProcessError(RuntimeError):
+    def __init__(self, returncode: int, output: list[str]):
+        self.returncode = returncode
+        self.output = list(output)
+        super().__init__(f"Process exited {returncode}: " + "\n".join(self.output[-8:]))
+
+
+class DeferredOperation(RuntimeError):
+    def __init__(self, message: str, *, retry_at: float | None = None):
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
 async def run_process(args, report, *, cwd=None, timeout=1800):
     proc = await asyncio.create_subprocess_exec(
         *map(str, args),
@@ -37,7 +50,7 @@ async def run_process(args, report, *, cwd=None, timeout=1800):
             report(level, line)
         code = await proc.wait()
         if code:
-            raise RuntimeError(f"Process exited {code}: " + "\n".join(tail[-8:]))
+            raise ProcessError(code, tail)
         return "\n".join(tail)
 
     try:
@@ -77,20 +90,117 @@ class DownloaderRuntime:
             "version": "bundled",
         }
 
+    def circuit_status(self):
+        state = dict(self.store.setting("youtube_download_circuit", {}) or {})
+        until = float(state.get("until") or 0)
+        state["until"] = until
+        state["open"] = until > time.time()
+        state.setdefault("failures", 0)
+        state.setdefault("opens", 0)
+        return state
+
+    @staticmethod
+    def _env_number(name, default, cast=float):
+        raw = (os.getenv(name) or "").split("#", 1)[0].strip()
+        try:
+            return cast(raw) if raw else default
+        except (TypeError, ValueError):
+            return default
+
+    def _record_download_block(self, reason: str):
+        now = time.time()
+        previous = dict(self.store.setting("youtube_download_circuit", {}) or {})
+        window = max(30.0, self._env_number("YT_CIRCUIT_WINDOW_SECONDS", 300.0))
+        threshold = max(1, self._env_number("YT_CIRCUIT_FAILURES", 3, int))
+        base = max(60.0, self._env_number("YT_CIRCUIT_COOLDOWN_SECONDS", 900.0))
+        maximum = max(base, self._env_number("YT_CIRCUIT_MAX_COOLDOWN_SECONDS", 3600.0))
+        last_at = float(previous.get("last_failure_at") or 0)
+        failures = int(previous.get("failures") or 0) + 1 if now - last_at <= window else 1
+        opens = int(previous.get("opens") or 0)
+        until = 0.0
+        if failures >= threshold:
+            opens += 1
+            until = now + min(maximum, base * (2 ** min(opens - 1, 4)))
+        state = {
+            "failures": failures,
+            "opens": opens,
+            "last_failure_at": now,
+            "until": until,
+            "reason": reason,
+        }
+        self.store.set_setting("youtube_download_circuit", state)
+        paused = 0
+        if until:
+            paused = self.store.defer_pending_youtube_jobs(until, reason)
+        return state, paused
+
+    def _record_download_success(self):
+        current = self.store.setting("youtube_download_circuit", {}) or {}
+        if current.get("failures") or current.get("until"):
+            self.store.set_setting(
+                "youtube_download_circuit",
+                {
+                    "failures": 0,
+                    "opens": 0,
+                    "until": 0,
+                    "last_success_at": time.time(),
+                },
+            )
+
     async def download(self, url, track_id, directory, report):
+        circuit = self.circuit_status()
+        if circuit["open"]:
+            raise DeferredOperation(
+                "YouTube downloads are temporarily paused after repeated bot/403 blocks.",
+                retry_at=circuit["until"],
+            )
+
         runtime = self.active()
         python = runtime["python"]
         environment = str(Path(python).parent.parent)
         self.in_use.add(environment)
         try:
-            await run_process(
-                [python, ROOT / "downloader.py", url, track_id],
-                report,
-                cwd=directory,
-            )
+            try:
+                await run_process(
+                    [python, ROOT / "downloader.py", url, track_id],
+                    report,
+                    cwd=directory,
+                )
+            except ProcessError as exc:
+                if exc.returncode == 20:
+                    reason = (
+                        "YouTube temporarily blocked media downloads "
+                        "(bot verification, HTTP 403/429, or equivalent playback restriction)."
+                    )
+                    state, paused = self._record_download_block(reason)
+                    if state["until"]:
+                        report(
+                            "WARNING",
+                            f"YouTube circuit breaker opened; paused {paused} queued "
+                            f"download(s) until {state['until']:.0f}.",
+                        )
+                        retry_at = state["until"]
+                    else:
+                        retry_at = time.time() + 120
+                        report(
+                            "WARNING",
+                            f"YouTube download blocked ({state['failures']} recent failure(s)); "
+                            "this track will retry later.",
+                        )
+                    raise DeferredOperation(reason, retry_at=retry_at) from exc
+                if exc.returncode == 21:
+                    raise RuntimeError("Video unavailable, private, or removed.") from exc
+                if exc.returncode == 22:
+                    raise DeferredOperation(
+                        "YouTube download failed with a transient network error.",
+                        retry_at=time.time() + 60,
+                    ) from exc
+                raise
+
             output = directory / f"temp_{track_id}.opus"
             if not output.is_file():
                 raise RuntimeError("Downloader exited successfully but no Opus file was produced")
+            self._record_download_success()
             receipt = {
                 "track_id": track_id,
                 "python": python,
