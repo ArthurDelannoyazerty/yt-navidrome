@@ -1,6 +1,4 @@
-# syntax=docker/dockerfile:1
-FROM python:3.13-slim-trixie AS builder
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim AS builder
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
@@ -15,7 +13,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
  && uv pip install --python /opt/ytdlp/bin/python --prerelease=allow \
       "yt-dlp[default]" "tenacity>=9,<10"
 
-FROM python:3.13-slim-trixie
+FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
     INGESTOR_STATE_DIR=/data/state NAVIDROME_LIB_DIR=/data/library \
@@ -24,8 +22,7 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools ca-certificates tzdata \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
-COPY --from=denoland/deno:latest /usr/bin/deno /usr/local/bin/deno
+COPY --from=ghcr.io/denoland/deno:bin-2.9.5 /deno /usr/local/bin/deno
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /opt/ytdlp /opt/ytdlp
 WORKDIR /app
