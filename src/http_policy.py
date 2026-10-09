@@ -76,7 +76,9 @@ class HttpPolicy:
         body, headers = request.body, request.headers.copy()
         for attempt in range(3):
             wait = self.store.reserve_api(host, interval)
-            if wait > 60:
+            # Normal API spacing (1.1s/0.4s) can wait inline. Longer shared
+            # cooldowns should release the single ingestion worker to other jobs.
+            if wait > 5:
                 message = f"{host}: waiting for provider cooldown ({wait:.0f}s remaining); job deferred"
                 raise self._defer(message, time.time() + wait)
             if wait:
