@@ -337,6 +337,7 @@ def create_app(store=None, start_workers=True):
             active = {"error": str(exc)}
         return {
             "downloader": active,
+            "youtube_circuit": pipeline.downloader.circuit_status(),
             "last_update": store.setting("downloader_update"),
             "next_update": store.setting("next_downloader_update"),
             "beets": "2.14.1",

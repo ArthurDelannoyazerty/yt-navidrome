@@ -436,15 +436,21 @@ function renderTrack(track) {
   health.append(badge(track.health));
   if (track.operation_state !== "IDLE") health.append(badge(track.operation_state));
   if (track.operation_kind) health.append(node("div", track.operation_kind, "hint"));
+  if (track.operation_state === "DEFERRED" && track.retry_at) {
+    health.append(node("div", `Retry after ${new Date(track.retry_at * 1000).toLocaleString()}`, "hint"));
+  }
   if (track.issue_count) health.append(node("div", `${track.issue_count} integrity issue${track.issue_count === 1 ? "" : "s"}`, "issue-link"));
   if (track.operation_error) {
     const details = node("details", null, "error-text");
-    details.append(node("summary", "Last operation error"), node("div", track.operation_error));
+    details.append(
+      node("summary", track.operation_state === "DEFERRED" ? "Deferred reason" : "Last operation error"),
+      node("div", track.operation_error),
+    );
     health.append(details);
   }
 
   const controls = node("div", null, "actions");
-  const busy = ["QUEUED", "RUNNING"].includes(track.operation_state);
+  const busy = ["QUEUED", "RUNNING", "DEFERRED"].includes(track.operation_state);
   if (track.operation_state === "NEEDS_APPROVAL") {
     const select = node("select", null, "approval");
     track.choices.forEach((choice, index) => {
@@ -501,6 +507,8 @@ function trackSignature(track) {
     operation_state: track.operation_state,
     operation_kind: track.operation_kind,
     operation_error: track.operation_error,
+    retry_at: track.retry_at,
+    defer_count: track.defer_count,
     choices: track.choices,
     issue_count: track.issue_count,
   });
@@ -510,8 +518,11 @@ function updateStats(stats) {
   const values = [
     ["Total", stats.total],
     ["Available", stats.available],
-    ["Working", stats.working],
+    ["Queued", stats.queued],
+    ["Processing", stats.running],
+    ["Deferred", stats.deferred],
     ["Approval", stats.approval],
+    ["Failed", stats.failed],
     ["Attention", stats.attention],
   ];
   updateKeyedChildren($("stats"), values, {
@@ -601,10 +612,17 @@ async function loadSystem(background = true) {
   if (signature === state.systemSignature) return;
   if (background && elementIsBusy($("runtime"))) return;
   const when = value => value ? new Date(value * 1000).toLocaleString() : "Not scheduled";
+  const circuit = data.youtube_circuit || {};
+  const youtubeStatus = circuit.open
+    ? `Paused until ${when(circuit.until)} · ${circuit.reason || "temporary block"}`
+    : circuit.failures
+      ? `Ready · ${circuit.failures} recent block${circuit.failures === 1 ? "" : "s"}`
+      : "Ready";
   const values = [
     ["Schema", data.schema],
     ["Beets", data.beets],
     ["yt-dlp", data.downloader.version || data.downloader.error],
+    ["YouTube downloads", youtubeStatus],
     ["Next update", when(data.next_update)],
     ["Last update", data.last_update ? `${data.last_update.status}${data.last_update.error ? `: ${data.last_update.error}` : ""}` : "Bundled runtime"],
   ];
