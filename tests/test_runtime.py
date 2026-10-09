@@ -168,11 +168,24 @@ def test_youtube_circuit_does_not_delay_staged_metadata_retry(db, track, environ
         {"source_url": origin["url"], "downloader_name": "yt-dlp"},
     )
 
+    metadata_retry_at = 1234567890.0
+    db.update(
+        "jobs", job["id"],
+        not_before=metadata_retry_at,
+        error="musicbrainz.org temporarily unavailable",
+    )
+    db.update(
+        "tracks", track["id"],
+        operation_state="DEFERRED",
+        operation_error="musicbrainz.org temporarily unavailable",
+    )
+
     changed = db.defer_pending_youtube_jobs(9999999999.0, "YouTube paused")
     refreshed = db.one("SELECT * FROM jobs WHERE id=?", (job["id"],))
+    refreshed_track = db.one("SELECT * FROM tracks WHERE id=?", (track["id"],))
 
     assert changed == 0
-    assert refreshed["not_before"] == 0
-    assert db.one(
-        "SELECT operation_state FROM tracks WHERE id=?", (track["id"],)
-    )["operation_state"] == "IDLE"
+    assert refreshed["not_before"] == metadata_retry_at
+    assert refreshed["error"] == "musicbrainz.org temporarily unavailable"
+    assert refreshed_track["operation_state"] == "DEFERRED"
+    assert refreshed_track["operation_error"] == "musicbrainz.org temporarily unavailable"
