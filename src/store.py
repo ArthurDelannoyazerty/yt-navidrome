@@ -14,7 +14,7 @@ from typing import Any
 
 from common import STATE, utcnow, user_name
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -187,7 +187,9 @@ CREATE TABLE IF NOT EXISTS jobs (
  state TEXT NOT NULL DEFAULT 'PENDING',
  error TEXT,
  created_at TEXT NOT NULL,
- finished_at TEXT
+ finished_at TEXT,
+ not_before REAL NOT NULL DEFAULT 0,
+ defer_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_job
  ON jobs(kind, target) WHERE state IN ('PENDING', 'RUNNING');
@@ -295,7 +297,7 @@ class Store:
                 if populated:
                     raise RuntimeError(
                         "The unversioned database contains data. Back it up and migrate or "
-                        "start with an empty state directory before using schema v1."
+                        "start with an empty state directory before using schema v2."
                     )
                 con.execute("PRAGMA foreign_keys=OFF")
                 for table in DROP_ORDER:
@@ -303,11 +305,67 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
                 )
+
+            if version == 1:
+                # v2 only extends the durable job queue. Back up the live SQLite
+                # database before touching it so an image rollback has a recovery path.
+                backup_dir = self.path.parent / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                destination = backup_dir / f"ingestor-schema-v1-{int(time.time())}.sqlite"
+                target = sqlite3.connect(destination)
+                try:
+                    con.backup(target)
+                finally:
+                    target.close()
+
+                con.execute(
+                    "ALTER TABLE jobs ADD COLUMN not_before REAL NOT NULL DEFAULT 0"
+                )
+                con.execute(
+                    "ALTER TABLE jobs ADD COLUMN defer_count INTEGER NOT NULL DEFAULT 0"
+                )
+
+                # v1 could accidentally requeue a track that was already waiting for
+                # approval. If its staged candidate is still present, restore the
+                # approval instead of letting the duplicate ingest delete that work.
+                for row in con.execute(
+                    """SELECT id,pending_operation,temp_path,choices
+                       FROM tracks
+                       WHERE operation_state IN ('QUEUED','RUNNING')
+                         AND pending_operation IS NOT NULL
+                         AND temp_path IS NOT NULL
+                         AND choices <> '[]'"""
+                ).fetchall():
+                    if not Path(row["temp_path"]).is_file():
+                        continue
+                    try:
+                        pending = json.loads(row["pending_operation"] or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    action = str(pending.get("action") or "ingest").upper()
+                    con.execute(
+                        """UPDATE jobs SET state='CANCELLED',finished_at=?,error=?
+                           WHERE kind='track' AND target=?
+                             AND state IN ('PENDING','RUNNING')""",
+                        (
+                            utcnow(),
+                            "Cancelled during schema v2 migration: preserved staged approval candidate",
+                            row["id"],
+                        ),
+                    )
+                    con.execute(
+                        """UPDATE tracks SET operation_state='NEEDS_APPROVAL',
+                           operation_kind=?,operation_error=NULL,updated_at=?
+                           WHERE id=?""",
+                        (action, utcnow(), row["id"]),
+                    )
+                con.execute("PRAGMA user_version=2")
+                version = 2
 
             con.executescript(SCHEMA)
             con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -411,6 +469,74 @@ class Store:
             return con.execute(sql, args).rowcount > 0
         return self.execute(sql, args) > 0
 
+    def defer_job(self, job_id: int, reason: str, *, retry_at: float | None = None,
+                  base_delay: float = 60.0) -> float:
+        """Return a running job to the durable queue without losing staged work."""
+        reason = redact(reason)
+        now = time.time()
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            job = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not job:
+                raise LookupError("Job not found")
+            count = int(job["defer_count"] or 0) + 1
+            if retry_at is None:
+                retry_at = now + min(1800.0, base_delay * (2 ** min(count - 1, 5)))
+            retry_at = max(float(retry_at), now + 1.0)
+            con.execute(
+                """UPDATE jobs SET state='PENDING',error=?,finished_at=NULL,
+                   not_before=?,defer_count=? WHERE id=?""",
+                (reason, retry_at, count, job_id),
+            )
+            if job["kind"] == "track":
+                con.execute(
+                    """UPDATE tracks SET operation_state='DEFERRED',
+                       operation_error=?,updated_at=? WHERE id=?""",
+                    (reason, utcnow(), job["target"]),
+                )
+            elif job["kind"] == "sync":
+                con.execute(
+                    "UPDATE sources SET status='DEFERRED',error=? WHERE id=?",
+                    (reason, job["target"]),
+                )
+        return retry_at
+
+    def defer_pending_youtube_jobs(self, retry_at: float, reason: str) -> int:
+        """Pause queued YouTube downloads when the shared circuit breaker opens."""
+        reason = redact(reason)
+        changed = 0
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            pending = con.execute(
+                "SELECT id,target,payload,not_before FROM jobs "
+                "WHERE kind='track' AND state='PENDING'"
+            ).fetchall()
+            for job in pending:
+                try:
+                    origin_id = json.loads(job["payload"] or "{}").get("origin_id")
+                except (TypeError, ValueError):
+                    continue
+                if not origin_id:
+                    continue
+                origin = con.execute(
+                    "SELECT provider FROM track_origins WHERE id=?",
+                    (origin_id,),
+                ).fetchone()
+                if not origin or origin["provider"] != "youtube":
+                    continue
+                con.execute(
+                    "UPDATE jobs SET not_before=MAX(not_before,?),error=? WHERE id=?",
+                    (retry_at, reason, job["id"]),
+                )
+                con.execute(
+                    """UPDATE tracks SET operation_state='DEFERRED',
+                       operation_error=?,updated_at=?
+                       WHERE id=? AND operation_state='QUEUED'""",
+                    (reason, utcnow(), job["target"]),
+                )
+                changed += 1
+        return changed
+
     def operation_receipt(self, operation_id: str | None):
         if not operation_id:
             return None
@@ -464,14 +590,18 @@ class Store:
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
-                "SELECT * FROM jobs WHERE state='PENDING' ORDER BY id LIMIT 1"
+                """SELECT * FROM jobs
+                   WHERE state='PENDING' AND not_before<=?
+                   ORDER BY id LIMIT 1""",
+                (time.time(),),
             ).fetchone()
             if not row:
                 return None
             con.execute("UPDATE jobs SET state='RUNNING',error=NULL WHERE id=?", (row["id"],))
             if row["kind"] == "track":
                 con.execute(
-                    "UPDATE tracks SET operation_state='RUNNING',updated_at=? WHERE id=?",
+                    """UPDATE tracks SET operation_state='RUNNING',
+                       operation_error=NULL,updated_at=? WHERE id=?""",
                     (utcnow(), row["target"]),
                 )
             return dict(row)
@@ -1329,6 +1459,7 @@ class Store:
             "MISSING": "t.health='MISSING'",
             "UNAVAILABLE": "t.health='UNAVAILABLE'",
             "WORKING": "t.operation_state IN ('QUEUED','RUNNING')",
+            "DEFERRED": "t.operation_state='DEFERRED'",
             "NEEDS_APPROVAL": "t.operation_state='NEEDS_APPROVAL'",
             "FAILED": "t.operation_state='FAILED'",
         }
@@ -1358,6 +1489,14 @@ class Store:
             row.pop("selected", None)
             row.pop("pending_operation", None)
             row["origins"] = self.origins_for_track(row["id"], user)
+            active_job = self.one(
+                """SELECT not_before,defer_count FROM jobs
+                   WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')
+                   ORDER BY id DESC LIMIT 1""",
+                (row["id"],),
+            )
+            row["retry_at"] = active_job["not_before"] if active_job else None
+            row["defer_count"] = int(active_job["defer_count"] or 0) if active_job else 0
             row["playlists"] = self.rows(
                 """SELECT s.id,s.title,MIN(m.added_at) AS added_at
                    FROM memberships m
@@ -1377,9 +1516,13 @@ class Store:
             """SELECT
                COUNT(*) AS total,
                SUM(health='AVAILABLE') AS available,
+               SUM(operation_state='QUEUED') AS queued,
+               SUM(operation_state='RUNNING') AS running,
                SUM(operation_state IN ('QUEUED','RUNNING')) AS working,
+               SUM(operation_state='DEFERRED') AS deferred,
                SUM(operation_state='NEEDS_APPROVAL') AS approval,
-               SUM(health IN ('MISSING','UNAVAILABLE') OR operation_state='FAILED') AS attention
+               SUM(operation_state='FAILED') AS failed,
+               SUM(health='MISSING' OR operation_state='FAILED') AS attention
                FROM tracks WHERE user_id=?""",
             (user,),
         )[0]
