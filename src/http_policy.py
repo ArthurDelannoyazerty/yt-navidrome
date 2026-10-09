@@ -18,7 +18,9 @@ from store import Store
 
 
 class ApiDeferred(requests.RequestException):
-    pass
+    def __init__(self, message: str, *, retry_at: float | None = None):
+        super().__init__(message)
+        self.retry_at = retry_at
 
 
 def retry_delay(value: str | None, now=None) -> float:
@@ -38,6 +40,14 @@ class HttpPolicy:
         self.store = store
         self.report = report or (lambda level, text: store.event(level, text))
         self.failures = []
+        self.deferred_failures = []
+        self.deferred_until = 0.0
+
+    def _defer(self, message: str, retry_at: float | None = None):
+        retry_at = float(retry_at or (time.time() + 60))
+        self.deferred_failures.append(message)
+        self.deferred_until = max(self.deferred_until, retry_at)
+        return ApiDeferred(message, retry_at=retry_at)
 
     def _budget(self):
         pacific = datetime.now(ZoneInfo("America/Los_Angeles"))
@@ -47,7 +57,14 @@ class HttpPolicy:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT used FROM quota WHERE day=?", (day,)).fetchone()
             if row and row[0] >= limit:
-                raise ApiDeferred(f"Local daily API budget ({limit} units) exhausted; retry after Pacific midnight")
+                reset = (pacific + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                raise self._defer(
+                    f"Local daily API budget ({limit} units) exhausted; "
+                    "retry after Pacific midnight",
+                    reset.timestamp(),
+                )
             con.execute("INSERT INTO quota VALUES (?,1) ON CONFLICT(day) DO UPDATE SET used=used+1", (day,))
 
     def send(self, original, session, request, **kwargs):
@@ -61,8 +78,7 @@ class HttpPolicy:
             wait = self.store.reserve_api(host, interval)
             if wait > 60:
                 message = f"{host}: waiting for provider cooldown ({wait:.0f}s remaining); job deferred"
-                self.failures.append(message)
-                raise ApiDeferred(message)
+                raise self._defer(message, time.time() + wait)
             if wait:
                 time.sleep(wait)
             if host == "www.googleapis.com":
@@ -77,8 +93,8 @@ class HttpPolicy:
             except requests.RequestException as exc:
                 self.report("ERROR", f"{host}: request failed ({type(exc).__name__}), attempt {attempt + 1}/3")
                 if attempt == 2:
-                    self.failures.append(f"{host}: connection failed after three attempts")
-                    raise
+                    message = f"{host}: connection failed after three attempts"
+                    raise self._defer(message, time.time() + 60) from exc
                 time.sleep(2 ** (attempt + 1) + random.random())
                 continue
             status = response.status_code
@@ -103,7 +119,10 @@ class HttpPolicy:
                 reset = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
                 self.store.defer_api(host, reset.timestamp())
                 response.close()
-                raise ApiDeferred("Provider daily quota exhausted; paused until the next Pacific midnight")
+                raise self._defer(
+                    "Provider daily quota exhausted; paused until the next Pacific midnight",
+                    reset.timestamp(),
+                )
             transient = status in {429, 500, 502, 503, 504} or reason in {"rateLimitExceeded", "userRateLimitExceeded"}
             if not transient:
                 if status >= 400 and status != 404:
@@ -116,8 +135,9 @@ class HttpPolicy:
             response.close()
             if attempt == 2 or delay > 60:
                 message = f"{host}: HTTP {status}; automatic attempts exhausted or long provider cooldown"
-                self.failures.append(message)
-                raise ApiDeferred(message)
+                retry_at = time.time() + max(delay, 60)
+                self.store.defer_api(host, retry_at)
+                raise self._defer(message, retry_at)
         raise AssertionError("Unreachable")
 
     def install(self):
