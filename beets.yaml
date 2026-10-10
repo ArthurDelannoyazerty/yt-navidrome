@@ -1,4 +1,5 @@
-# Matching thresholds/weights are deliberately not overridden.
+# Preserve native matching thresholds. The bridge explicitly orchestrates plugins;
+# auto:false prevents a second implicit import pass and duplicate provider calls.
 plugins: [musicbrainz, chroma, fetchart, embedart, lyrics, replaygain]
 threaded: false
 original_date: true
@@ -28,4 +29,9 @@ replaygain:
   backend: ffmpeg
   threads: 0
   parallel_on_import: false
-  r128_targetlevel: 89
+  peak: "true"
+  # Opus R128 is -23 LUFS (84); Navidrome converts it to -18 LUFS (+5 dB).
+  # The bridge forces fresh analysis and retains a peak-only compatibility tag
+  # for clipping protection, without a conflicting conventional track-gain tag.
+  targetlevel: 89
+  r128_targetlevel: 84
