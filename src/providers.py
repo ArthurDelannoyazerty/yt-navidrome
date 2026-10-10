@@ -47,16 +47,18 @@ class YouTube:
         if parts.scheme not in {"http", "https"} or parts.username or parts.port not in {None, 80, 443}:
             raise ValueError("Invalid source URL")
         query = parse_qs(parts.query)
-        if playlist := query.get("list", [None])[0]:
-            if not re.fullmatch(r"[A-Za-z0-9_-]+", playlist) or playlist.startswith(("RD", "UL")):
-                raise ValueError("Radio mixes and unbounded auto-playlists are not supported")
-            return SourceRef(self.name, "playlist:" + playlist,
-                             "https://www.youtube.com/playlist?list=" + playlist, True)
         video = query.get("v", [None])[0]
         if parts.hostname == "youtu.be":
             video = parts.path.strip("/")
         elif parts.path.startswith(("/shorts/", "/embed/", "/live/")):
             video = parts.path.split("/")[2]
+        # A watch/share URL names one video even when copied from a playlist.
+        # Importing the whole playlist requires an explicit playlist-only URL.
+        if not video and (playlist := query.get("list", [None])[0]):
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", playlist) or playlist.startswith(("RD", "UL")):
+                raise ValueError("Radio mixes and unbounded auto-playlists are not supported")
+            return SourceRef(self.name, "playlist:" + playlist,
+                             "https://www.youtube.com/playlist?list=" + playlist, True)
         if not video or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video):
             raise ValueError("Use a video or playlist URL, not a channel or search URL")
         return SourceRef(self.name, "video:" + video,
