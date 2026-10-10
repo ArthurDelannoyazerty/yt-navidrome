@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Music Ingestor</title>
   <link rel="stylesheet" href="/static/style.css?v=__STATIC_VERSION__">
+  <script src="/static/ui-state.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/app.js?v=__STATIC_VERSION__" defer></script>
 </head>
 <body>
@@ -21,6 +22,7 @@
   <button type="button" class="tab" data-tab="sources">Sources</button>
   <button type="button" class="tab" data-tab="activity">Activity</button>
   <button type="button" class="tab" data-tab="maintenance">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></button>
+  <button type="button" class="tab" data-tab="help">Help</button>
 </nav>
 
 <div id="notice" role="status" aria-live="polite" hidden></div>
@@ -30,11 +32,14 @@
     <div class="panel-heading">
       <div><h2>Music</h2><p class="hint">One logical recording can belong to several playlists and have several origins.</p></div>
       <div class="row">
-        <button id="approveAll" type="button" disabled>Approve all</button>
+        <button id="retryAll" type="button" disabled>Retry all failed</button>
+         <button id="approveAll" class="secondary" type="button" disabled>Approve all</button>
         <button id="verifyFromMusic" class="secondary">Verify library</button>
       </div>
     </div>
 
+    <h3 id="libraryScope" class="scope-label">Library totals</h3>
+    <p class="hint scope-hint">Whole selected library, independent of search. Health and operation counts overlap.</p>
     <div id="stats" class="stats"></div>
     <button id="healthSummary" type="button" class="health-summary secondary">Library health: loading…</button>
 
@@ -44,6 +49,11 @@
           <option value="ALL">All music</option>
           <option value="AVAILABLE">Available</option>
           <option value="WORKING">Working</option>
+          <option value="QUEUED">Queued</option>
+          <option value="RUNNING">Processing</option>
+          <option value="ATTENTION">Needs attention</option>
+          <option value="UNMATCHED">Unmatched identity</option>
+          <option value="INTEGRITY">Integrity issues</option>
           <option value="DEFERRED">Deferred retry</option>
           <option value="NEEDS_APPROVAL">Needs approval</option>
           <option value="FAILED">Last operation failed</option>
@@ -61,6 +71,7 @@
       </div>
     </div>
 
+    <p id="resultsSummary" class="results-summary" role="status" aria-live="polite">Loading matching tracks...</p>
     <div class="table-scroll">
       <table>
         <thead><tr><th>Music</th><th>Playlists</th><th>Discovery</th><th>Health</th><th>Actions</th></tr></thead>
@@ -103,6 +114,13 @@
       <div class="subpanel">
         <div class="panel-heading compact"><h3>Library integrity</h3><button id="verify" class="secondary">Verify now</button></div>
         <div id="integritySummary" class="maintenance-summary"></div>
+        <div class="maintenance-controls">
+          <button id="repairAll" type="button" disabled>Repair eligible tags (0)</button>
+          <a id="exportFailures" class="button-link secondary" href="/api/failures/export" download>Export failed report</a>
+        </div>
+        <p class="hint">Audit first. Repair preserves audio and identity; unexplained hash changes are excluded.</p>
+        <label class="control-field">Issue type<select id="issueKind"><option value="ALL">All issue types</option></select></label>
+        <div class="pagination issue-pagination"><button id="issuePrev" class="secondary">Previous issues</button><span id="issuePage"></span><button id="issueNext" class="secondary">Next issues</button></div>
         <div id="integrityIssues" class="issue-list"></div>
       </div>
       <div class="subpanel">
@@ -117,6 +135,77 @@
       <div id="ignored"></div>
     </div>
   </section>
+  <section class="panel help-panel" data-panel="help" hidden>
+    <div class="panel-heading"><div><h2>How Music Ingestor works</h2><p class="hint">From a source URL to a playable, user-separated library. No audio is re-encoded by tag repair.</p></div></div>
+    <h3>The workflow</h3>
+    <ol class="workflow" aria-label="Music ingestion workflow">
+      <li><span class="step-number">1</span><strong>Discover</strong><p>A video URL imports one video, even with a playlist parameter. Use a <code>/playlist?list=...</code> URL to import a playlist.</p></li>
+      <li><span class="step-number">2</span><strong>Download to staging</strong><p>yt-dlp creates a candidate. Quota limits, retries and a shared YouTube circuit breaker protect the providers.</p></li>
+      <li><span class="step-number">3</span><strong>Identify &amp; review</strong><p>AcoustID and MusicBrainz supply candidates. Beets' native strong matches can proceed; ambiguous or changed identities need approval.</p></li>
+      <li><span class="step-number">4</span><strong>Enrich &amp; measure</strong><p>Beets applies release metadata, artwork and lyrics. Fresh loudness and true-peak measurements become playback tags.</p></li>
+      <li><span class="step-number">5</span><strong>Activate &amp; export</strong><p>The asset is committed and playlists are rewritten. Navidrome picks up file changes on its next scan.</p></li>
+    </ol>
+    <div class="help-callout"><strong>One recording, many origins.</strong> The same video in several playlists is downloaded once per library user. Different uploads identified as the same recording share a logical track. Other users' libraries stay separate.</div>
+
+    <h3>Two independent states</h3>
+    <p>A song can be <strong>Available</strong> while its latest redownload is <strong>Failed</strong>. Health and operation counters overlap; they must not be added together. The counters describe the entire selected library, while the results line describes the current search and filter.</p>
+    <div class="columns state-columns">
+      <section class="subpanel"><h4>Audio health</h4>
+        <div class="state-path"><span class="badge UNAVAILABLE">UNAVAILABLE</span><span aria-hidden="true">&rarr;</span><span class="badge AVAILABLE">AVAILABLE</span></div>
+        <p>Successful ingestion creates the current audio asset.</p>
+        <div class="state-path"><span class="badge AVAILABLE">AVAILABLE</span><span aria-hidden="true">&rarr;</span><span class="badge MISSING">MISSING</span></div>
+        <p>An audit finds a missing or unsafe current file.</p>
+        <div class="state-path"><span class="badge MISSING">MISSING</span><span aria-hidden="true">&rarr;</span><span class="badge AVAILABLE">AVAILABLE</span></div>
+        <p>Redownload restores audio. Tag repair cannot recreate a missing file.</p>
+      </section>
+      <section class="subpanel"><h4>Operation state machine</h4>
+        <div class="state-path"><span class="badge QUEUED">QUEUED</span><span aria-hidden="true">&rarr;</span><span class="badge RUNNING">RUNNING</span><span aria-hidden="true">&rarr;</span><span class="badge IDLE">IDLE</span></div>
+        <div class="state-branches">
+          <div><span class="badge NEEDS_APPROVAL">NEEDS APPROVAL</span><p>Review a candidate &rarr; Approve &rarr; Queued. Approval is bound to the actual staged audio.</p></div>
+          <div><span class="badge DEFERRED">DEFERRED</span><p>Temporary provider failure &rarr; wait until the shown retry time &rarr; Running automatically. Existing staged audio is reused.</p></div>
+          <div><span class="badge FAILED">FAILED</span><p>Terminal error &rarr; inspect the reason &rarr; Retry or Retry all failed &rarr; Queued.</p></div>
+        </div>
+        <p class="hint">Each branch starts at Running. Delete removes the logical track; Delete and ignore also blocks its recording and origins. Interrupted cleanup remains in the durable queue.</p>
+      </section>
+    </div>
+
+    <h3>Managing thousands of songs</h3>
+    <p>Use the clickable global counters and the <strong>Unmatched identity</strong>, <strong>Integrity issues</strong>, or <strong>Needs approval</strong> filters to focus review. Export failures for an offline report. Retry all failed queues only failed operations, keeps provider pacing, and never touches approval or deferred work.</p>
+    <p>For existing files, run <strong>Verify library</strong>, inspect the paginated issues, then use <strong>Repair eligible tags</strong>. Repair recalculates loudness and restores discovery tags without downloading, moving files or changing musical identity. Unexplained hash changes, unreadable files and unsafe paths are excluded from batch repair. Check those separately rather than treating corruption as a normal tag change.</p>
+    <div class="help-callout warning-callout"><strong>Approval is a decision, not a repair.</strong> Approve all accepts the top candidate for every waiting song in this library, including weak matches and identity changes. Review ambiguous songs individually when correct identification matters. Nothing automatically loosens beets' matching thresholds.</div>
+
+    <h3>Button reference</h3>
+    <div class="table-scroll"><table class="help-table"><thead><tr><th>Button</th><th>Effect and scope</th></tr></thead><tbody>
+      <tr><td>Import / Monitor playlists</td><td>Add sources to the selected library. Monitored sources are synchronized on schedule; playlist memberships can change without deleting retained music.</td></tr>
+      <tr><td>Sync / retry / Sync monitored sources</td><td>Refresh source metadata and memberships. Active or deferred syncs are not queued twice.</td></tr>
+      <tr><td>Remove source</td><td>Remove the source and its exported playlist; retain music files.</td></tr>
+      <tr><td>Retry / Retry all failed</td><td>Repeat the failed operation using durable receipts and staging where possible. The bulk button covers every failed track for this user, regardless of page or search.</td></tr>
+      <tr><td>Approve / Approve all</td><td>Accept a reviewed candidate, or the top candidate for all waiting tracks. A changed staged file requires fresh review.</td></tr>
+      <tr><td>Redownload</td><td>Fetch new audio from the selected origin. A confirmed recording must strongly match; otherwise the existing file is retained.</td></tr>
+      <tr><td>Reprocess</td><td>Download, identify and enrich again. A change to a confirmed identity requires approval and is recorded in history.</td></tr>
+      <tr><td>Edit metadata</td><td>Set explicit artist, title, album or MusicBrainz identifiers. An explicit identity correction can merge or split origins. Leave a field blank to preserve it.</td></tr>
+      <tr><td>Technical details</td><td>Read actual COMMENT, DESCRIPTION and loudness tags, plus origins, asset provenance and identity history.</td></tr>
+      <tr><td>Repair tags / loudness</td><td>Repair one idle, available file. No download, no identity change, no audio re-encoding. Refresh the player's library after it finishes.</td></tr>
+      <tr><td>Delete local copy</td><td>Remove this user's track and memberships. A monitored source may import it again.</td></tr>
+      <tr><td>Delete and ignore / Restore</td><td>Delete and block the recording and known origins. Restore removes the block; the next source sync can import it again.</td></tr>
+      <tr><td>Verify library / Repair eligible tags</td><td>Audit current files, tags, hashes and beets paths without changing audio; optionally queue safe tag-only repairs across the whole library.</td></tr>
+      <tr><td>Export failed report</td><td>Download a JSON report of all failures for this user, independent of search and pagination.</td></tr>
+      <tr><td>Update nightly build / Roll back</td><td>Change the isolated yt-dlp runtime for future downloads. Running downloads and the API keep their current runtime.</td></tr>
+      <tr><td>Clear view</td><td>Clear displayed Activity messages only; server events are retained.</td></tr>
+    </tbody></table></div>
+
+    <h3>Discovery dates in Navidrome and Feishin</h3>
+    <p>The <strong>Discovery</strong> column is the source history, not the release date or Navidrome's import date. Both <code>COMMENT</code> and <code>DESCRIPTION</code> contain the exact UTC timestamp. Technical details reads these values from disk, so you can distinguish a missing tag from a client that does not display it.</p>
+    <p>Navidrome imports the comment field, but available columns depend on the client and version. Current Feishin development sources call the comment column <strong>Note</strong>; older releases and some views may not offer it. A raw-tag inspector is useful when a client has no visible comment column. This application cannot add columns to another application's UI.</p>
+
+    <h3>Loudness without modifying the audio</h3>
+    <p>ReplayGain is playback metadata, not compression or permanent normalization. In Navidrome's personal options, select <strong>ReplayGain Mode &rarr; Use Track Gain</strong> and start with <strong>PreAmp 0 dB</strong> (labels vary by version). Scan the library after repairs, then reload or requeue the song so the player receives updated gain and peak values.</p>
+    <p>Opus R128 gain uses the standard <strong>&minus;23 LUFS</strong> reference. Navidrome adds 5 dB for its ReplayGain playback reference. The ingestor also writes a measured true peak because Navidrome's web player skips gain adjustment when a peak is missing. No conflicting conventional gain tag is added, and no album gain is invented from a single song. Use Track Gain, not Album Gain, for this pipeline.</p>
+    <p>Clipping protection may reduce the boost for a very dynamic song. That is preferable to distorting the audio; perfect equal perceived loudness cannot be guaranteed without compression. Silent or invalid measurements fail rather than silently publishing misleading gain tags.</p>
+    <details><summary>Why beets has <code>auto: false</code></summary><p>The adapter explicitly runs artwork, lyrics and loudness steps after identity selection. Disabling beets' automatic import hooks prevents duplicate processing; it does not disable these features. Artwork and lyrics are best-effort external lookups. Loudness analysis is required. Additional plugins are not enabled without a clear need because they add provider traffic and failure modes.</p></details>
+    <p class="hint">Implementation references: <a href="https://docs.beets.io/en/stable/plugins/replaygain.html" target="_blank" rel="noopener noreferrer">beets ReplayGain</a>, <a href="https://github.com/navidrome/navidrome/blob/master/ui/src/utils/calculateReplayGain.js" target="_blank" rel="noopener noreferrer">Navidrome gain and peak handling</a>, <a href="https://github.com/navidrome/navidrome/blob/master/model/metadata/map_mediafile.go" target="_blank" rel="noopener noreferrer">Navidrome R128 conversion</a>, <a href="https://github.com/jeffvli/feishin/blob/development/src/renderer/components/item-list/item-table-list/default-columns.ts" target="_blank" rel="noopener noreferrer">Feishin column definitions</a>. Checked October 2026; your installed versions may differ.</p>
+  </section>
+
 </main>
 
 <dialog id="operationDialog">

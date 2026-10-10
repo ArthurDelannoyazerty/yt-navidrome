@@ -8,6 +8,7 @@ import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
+from audio_tags import loudness_values, write_loudness_tags
 from common import LIBRARY, ROOT, STATE, atomic_json, discovery_comment, user_name
 from http_policy import ApiDeferred, HttpPolicy
 from store import Store
@@ -67,6 +68,14 @@ class Bridge:
         from beets.dbcore.query import MatchQuery
 
         item = self.lib.get_item(track["beets_id"]) if track.get("beets_id") else None
+        if item:
+            owner = item.get("pipeline_id")
+            recorded = track.get("file_path")
+            if (owner and owner != track["id"]) or (
+                not owner and recorded
+                and Path(os.fsdecode(item.path)).resolve() != Path(recorded).resolve()
+            ):
+                item = None
         return item or self.lib.items(
             MatchQuery("pipeline_id", track["id"], fast=False)
         ).get()
@@ -83,7 +92,7 @@ class Bridge:
         audio.save()
         return comment
 
-    def delete(self, track):
+    def delete(self, track, *, delete_file=True):
         item = self.find_existing(track)
         if not item:
             return {"removed": False}
@@ -92,7 +101,7 @@ class Bridge:
             raise ValueError(
                 "Refusing to delete a beets item outside this user's library"
             )
-        item.remove(delete=candidate.is_file(), with_album=True)
+        item.remove(delete=delete_file and candidate.is_file(), with_album=True)
         return {"removed": True}
 
     def audit_many(self, tracks: list[dict]):
@@ -203,6 +212,59 @@ class Bridge:
             raise ValueError("The selected release does not contain this recording")
         return album, matches[0].merge_with_album(album)
 
+    def measure_loudness(self, item):
+        """Force fresh true-peak analysis, including when source gain tags exist.
+
+        The pinned R128Task intentionally drops peak data. The regular task can
+        measure both without storing a conflicting conventional gain tag.
+        """
+        from beetsplug.replaygain import PeakMethod, RgTask
+
+        plugin = self.plugins["replaygain"]
+        if plugin.backend_name != "ffmpeg":
+            raise ValueError("This pipeline requires the ffmpeg ReplayGain backend")
+        task = RgTask([item], None, 84, PeakMethod.true, "ffmpeg", plugin._log)
+        task = plugin.backend_instance.compute_track_gain(task)
+        if not task.track_gains or len(task.track_gains) != 1:
+            raise ValueError("ReplayGain produced no track measurement")
+        measured = task.track_gains[0]
+        values = loudness_values(measured.gain, measured.peak)
+        item.r128_track_gain = values["r128_track_gain"] / 256.0
+        item.rg_track_gain = None
+        item.rg_track_peak = values["replaygain_track_peak"]
+        item.r128_album_gain = None
+        item.rg_album_gain = None
+        item.rg_album_peak = None
+        return values
+
+    def repair_file(self, track, path):
+        """Only touch the staged copy; no identify, download, move or DB writes."""
+        from beets.library import Item
+
+        item = Item.from_path(str(path))
+        values = self.measure_loudness(item)
+        item.write()
+        self.write_discovery_tags(path, track.get("discovered_at"))
+        write_loudness_tags(path, values)
+        return {"file_path": str(path), "loudness": values}
+
+    def refresh_item(self, track):
+        from beets.library import Item
+
+        path = Path(track["file_path"]).resolve()
+        if not path.is_relative_to(self.directory) or not path.is_file():
+            raise ValueError("Current audio is missing or outside this user's library")
+        item = self.find_existing(track)
+        if item:
+            item.path = os.fsencode(path)
+            item.read()
+            item.store()
+        else:
+            item = Item.from_path(str(path))
+            item.pipeline_id = track["id"]
+            item.add(self.lib)
+        return self.result(item)
+
     def finalize(self, track, path, selected, *, mode="apply", overrides=None,
                  operation=None):
         from beets.dbcore.query import MatchQuery
@@ -216,6 +278,8 @@ class Bridge:
                 existing = Item.from_path(str(path))
                 existing.pipeline_id = track["id"]
                 existing.add(self.lib)
+            if Path(os.fsdecode(existing.path)).resolve() != Path(path).resolve():
+                raise ValueError("Beets path differs from the current asset; audit before changing tags")
             if track.get("discovered_at"):
                 existing.comments = discovery_comment(track["discovered_at"])
             existing.write()
@@ -274,6 +338,9 @@ class Bridge:
         item.discovered_at = track.get("discovered_at") or ""
         item.pipeline_operation = operation or ""
         item.pipeline_complete = "no"
+        # Analyze before any persistent beets mutation. Failure must not activate
+        # audio with absent or stale gain values.
+        loudness = self.measure_loudness(item)
         if not item.id:
             item.add(self.lib)
 
@@ -325,9 +392,9 @@ class Bridge:
 
         optional("Artwork", artwork)
         optional("Lyrics", lambda: self.plugins["lyrics"].add_item_lyrics(item, True))
-        optional("ReplayGain", lambda: self.plugins["replaygain"].handle_track(item, True))
-        # Plugins may write the file again, so force both raw comment keys last.
+        # Plugins may write the file again, so force the raw compatibility tags last.
         self.write_discovery_tags(final_path, track.get("discovered_at"))
+        write_loudness_tags(final_path, loudness)
         item.pipeline_complete = "yes"
         item.store()
         warnings.extend(self.http.failures)
@@ -361,8 +428,12 @@ def main(request):
 
     track = request["track"]
     path = request.get("path", "")
-    if mode == "delete":
-        return bridge.delete(track)
+    if mode in {"delete", "forget"}:
+        return bridge.delete(track, delete_file=mode == "delete")
+    if mode == "repair":
+        return bridge.repair_file(track, path)
+    if mode == "refresh":
+        return bridge.refresh_item(track)
     if mode == "inspect":
         item = bridge.find_existing(track)
         if item and item.get("pipeline_operation") == request.get("operation"):

@@ -90,14 +90,17 @@ not silently delete or repair music.
 
 ## Interface layout
 
-The single-page interface is split into four low-friction tabs:
+The single-page interface is split into five tabs:
 
 - **Music** — search, status filter, pagination, health, Reprocess/Redownload, and a
   compact More menu for metadata, details, deletion, and ignore;
 - **Sources** — URL ingestion and monitored playlists;
 - **Activity** — persistent server events plus a `Clear view` button that only
   clears the browser display;
-- **Maintenance** — integrity issues, ignored music, and downloader updates.
+- **Maintenance** — paginated integrity issues, optional batch tag/loudness repair,
+  failed-operation export, ignored music, and downloader updates;
+- **Help** — illustrated workflow, separate health/operation state diagrams,
+  button reference, playback settings, and large-library guidance.
 
 Search is server-side and matches source titles and identified artist/title.
 Pagination is applied after filtering/search and uses 50 rows per page.
@@ -187,7 +190,8 @@ HTTP 403/429, or equivalent playback failures inside the configured rolling
 window open a shared circuit breaker. Pending YouTube jobs receive the same
 cooldown and are skipped by the worker until it expires, while source sync,
 maintenance, and other due jobs remain claimable. A successful YouTube download
-resets the breaker.
+resets the breaker only after the cooldown and rolling failure window have elapsed;
+an unrelated success cannot erase recent blocks.
 
 ## Nightly yt-dlp updates
 
@@ -206,7 +210,59 @@ uv sync --frozen --extra test
 uv run python -m compileall -q src tools tests
 uv run pytest
 node --check src/static/app.js
+node --check src/static/ui-state.js
+node --test tests/frontend_runtime.test.cjs
 ```
 
 CI runs these checks for every pull request. The container intentionally uses one
 Uvicorn worker because the durable SQLite job worker is single-instance.
+
+## Managing a large library
+
+Counters always describe the **whole selected library user**. Search and status
+filters affect the matching-results count and table, not those counters. Health
+and operation states overlap: an available track can have a failed redownload.
+The Attention filter has the same definition as its counter (missing audio or a
+failed operation). Click a counter to select its corresponding filter.
+
+**Retry all failed** queues every FAILED track for the selected user, across all
+pages and regardless of search. It does not retry deferred, queued, processing,
+or approval tracks. It preserves the original failed operation and recovery
+receipt. The response reports queued and skipped tracks. A shared circuit and
+provider pacing still apply; this does not launch hundreds of parallel downloads.
+
+Maintenance includes a JSON export of failed operations for diagnosis and
+paginated/filterable audit results. Repair eligible tags operates on safe, audited,
+idle files only. It never approves identities or downloads audio. Hash mismatches,
+unreadable files and outside-library paths are excluded rather than silently
+accepting changed files. Individual repair is also in the track's More menu.
+
+## Playback loudness and discovery tags
+
+See [Playback and maintenance](docs/playback-maintenance.md) for rollout and
+client configuration. Opus audio is not re-encoded by tag repair. The pipeline
+measures fresh loudness and true peak using beets' ffmpeg backend and writes
+standard -23 LUFS R128 gain plus a peak-only compatibility tag for Navidrome.
+`auto: false` avoids duplicate beets import hooks: the bridge invokes processing
+explicitly. Do not enable extra plugins merely to get these steps to run.
+
+Track details reads COMMENT, DESCRIPTION and loudness fields from the **actual
+current file**, alongside the expected discovery value. Navidrome and Feishin
+column support is client/version dependent; the ingestor does not change their UI.
+
+## Reliability boundaries
+
+Approval is bound to the staged candidate hash. Missing or changed candidates,
+including legacy approvals without a hash, require another review. Deduplication
+only discards a new candidate when the canonical asset exists and its hash agrees.
+Successful discovery-tag updates refresh the asset fingerprint.
+
+Deletion commits logical removal, optional ignore rules and a cleanup receipt in
+one transaction before changing files. A cleanup failure is deferred and resumes
+after restart even when the track row is already gone. Source resync can recreate
+a normally deleted track; Delete and ignore prevents that. Migrations acquire the
+instance lock first, back up SQLite, and apply v1 changes and version atomically.
+
+CI retains the exact source snapshot, Python JUnit results and browser-state test
+output as validation artifacts. The Python integration suite exercises real pinned
+beets and ffmpeg offline; it does not prove live external providers are available.

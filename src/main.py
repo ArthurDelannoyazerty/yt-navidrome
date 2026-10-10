@@ -14,11 +14,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from common import LIBRARY, ROOT
+from audio_tags import inspect_tags
+from common import LIBRARY, ROOT, utcnow
 from pipeline import Pipeline
 from providers import parse_source
 from store import SCHEMA_VERSION, Store
@@ -26,7 +27,7 @@ from store import SCHEMA_VERSION, Store
 STATIC_ROOT = ROOT / "static"
 INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
 _asset_digest = hashlib.sha256()
-for _asset_name in ("style.css", "app.js"):
+for _asset_name in ("style.css", "ui-state.js", "app.js"):
     _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
@@ -47,6 +48,7 @@ class ActionInput(BaseModel):
     mode: str = "retry"
     origin_id: str | None = None
     index: int | None = None
+    approval_token: str | None = None
     overrides: dict[str, str | None] = Field(default_factory=dict)
 
 
@@ -68,13 +70,19 @@ def create_app(store=None, start_workers=True):
 
     @asynccontextmanager
     async def lifespan(app):
-        store.init()
+        store.path.parent.mkdir(parents=True, exist_ok=True)
         lock = (store.path.parent / "instance.lock").open("w")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             lock.close()
             raise RuntimeError("Run one API worker/replica per state directory")
+        try:
+            # Migrations must not run concurrently with another live instance.
+            store.init()
+        except BaseException:
+            lock.close()
+            raise
         handler = EventHandler(store)
         logging.getLogger().addHandler(handler)
         tasks = []
@@ -243,13 +251,27 @@ def create_app(store=None, start_workers=True):
 
     @app.get("/api/tracks/{track_id}")
     def track_details(track_id: str, user_id: str):
-        return store.track_details(track_id, user_id)
+        details = store.track_details(track_id, user_id)
+        asset = store.current_asset(track_id)
+        if asset:
+            path = Path(asset["path"]).resolve()
+            # Resolve from the current configuration, not client-supplied paths.
+            from common import LIBRARY as library_root
+            if not path.is_relative_to((library_root / user_id).resolve()):
+                details["file_tags"] = {"issues": ["PATH_OUTSIDE_LIBRARY"],
+                                        "error": "Refusing to inspect another library"}
+            else:
+                details["file_tags"] = inspect_tags(path, details.get("discovered_at"))
+        else:
+            details["file_tags"] = {"issues": ["NO_CURRENT_ASSET"],
+                                    "error": "There is no current audio file"}
+        return details
 
     @app.post("/api/tracks/{track_id}/action")
     def track_action(track_id: str, data: ActionInput):
         allowed = {
             "retry", "approve", "redownload", "reprocess", "retag",
-            "delete", "delete_ignore",
+            "delete", "delete_ignore", "repair",
         }
         if data.mode not in allowed:
             raise ValueError("Unsupported track action")
@@ -268,29 +290,29 @@ def create_app(store=None, start_workers=True):
 
     @app.post("/api/batch")
     def batch(data: ActionInput):
-        if data.mode not in {"retry", "best", "original"}:
-            raise ValueError("Unsupported batch action")
-        store.require_user(data.user_id)
-        state = "FAILED" if data.mode == "retry" else "NEEDS_APPROVAL"
-        queued = 0
-        for track in store.rows(
-            "SELECT * FROM tracks WHERE user_id=? AND operation_state=?",
-            (data.user_id, state),
-        ):
-            if data.mode == "retry":
-                payload = {"mode": "retry"}
-            else:
-                choices = json.loads(track["choices"] or "[]")
-                if not choices:
-                    continue
-                index = 0 if data.mode == "best" else len(choices) - 1
-                payload = {"mode": "approve", "index": index}
-            try:
-                store.queue_track(track["id"], data.user_id, payload)
-                queued += 1
-            except ValueError:
-                pass
-        return {"message": f"Queued {queued} tracks"}
+        return store.queue_bulk(data.user_id, data.mode)
+
+    @app.get("/api/failures/export")
+    def export_failures(user_id: str):
+        """Export every failure for this user, independent of UI page/search."""
+        store.require_user(user_id)
+        rows = store.rows(
+            """SELECT t.id,t.title,t.matched_title,t.health,t.operation_state,
+                      t.operation_kind,t.operation_error,t.mbid,t.file_path,
+                      o.provider,o.url AS source_url
+               FROM tracks t LEFT JOIN track_origins o ON o.id=COALESCE(
+                 t.current_origin_id,
+                 (SELECT id FROM track_origins WHERE track_id=t.id ORDER BY id LIMIT 1)
+               ) WHERE t.user_id=? AND t.operation_state='FAILED'
+               ORDER BY t.operation_kind,t.id""", (user_id,),
+        )
+        body = {"user_id": user_id, "scope": "library_user", "generated_at": utcnow(),
+                "count": len(rows), "failures": rows}
+        return Response(
+            json.dumps(body, ensure_ascii=False, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="failures-{user_id}.json"'},
+        )
 
     @app.get("/api/events")
     def events(user_id: str, after: int = Query(0, ge=0)):
@@ -308,8 +330,11 @@ def create_app(store=None, start_workers=True):
         )
 
     @app.get("/api/integrity")
-    def integrity(user_id: str):
-        return store.integrity_report(user_id)
+    def integrity(
+        user_id: str, page: int = Query(1, ge=1),
+        limit: int = Query(50, ge=1, le=100), kind: str = Query("ALL", max_length=80),
+    ):
+        return store.integrity_report(user_id, page, limit, kind)
 
     @app.post("/api/integrity/run")
     def run_integrity(data: ActionInput):

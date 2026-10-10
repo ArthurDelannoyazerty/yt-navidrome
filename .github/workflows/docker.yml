@@ -21,10 +21,30 @@ jobs:
       - run: python -m pip install uv
       - run: uv sync --frozen --extra test
       - run: uv run python -m compileall -q src tools tests
-      - run: uv run pytest
+      - run: uv run pytest --junitxml=validation/pytest.xml
         env:
           REQUIRE_BEETS: '1'
-      - run: node --check src/static/app.js
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check src/static/app.js && node --check src/static/ui-state.js
+      - name: Run browser-state regressions
+        shell: bash
+        run: |
+          mkdir -p validation
+          node --test tests/frontend_runtime.test.cjs | tee validation/frontend-tests.txt
+      - name: Archive the exact reviewed source
+        if: always()
+        run: |
+          mkdir -p validation
+          git rev-parse HEAD > validation/commit.txt
+          git archive --format=tar.gz HEAD > validation/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-${{ github.sha }}
+          path: validation/
+          retention-days: 14
   build-push:
     needs: test
     runs-on: ubuntu-latest

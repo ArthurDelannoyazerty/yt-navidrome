@@ -1,5 +1,5 @@
 """The original working yt-dlp download path, isolated in a fresh process.
-Only the removed secondary-download branch is changed. Do not tune its options here.
+Download options are preserved; only error classification is application policy.
 """
 import os
 import sys
@@ -26,6 +26,7 @@ YT_COOKIES_FILE = os.getenv("YT_DLP_COOKIES_FILE", "")
 class DownloadBotError(Exception): pass
 class DownloadUnavailableError(Exception): pass
 class DownloadNetworkError(Exception): pass
+class DownloadPermanentError(Exception): pass
 
 @retry(
     stop=stop_after_attempt(3),
@@ -57,14 +58,25 @@ def download_audio_file(url: str, track_uuid: str):
         return f"{temp_filename}.opus"
     except yt_dlp.utils.DownloadError as e:
         err = str(e).lower()
-        if any(k in err for k in ("unavailable", "private video", "removed")):
-            raise DownloadUnavailableError("Video unavailable, private, or removed.") from e
         if any(k in err for k in (
             "sign in to confirm", "403", "429", "bot",
             "try again later", "precondition check failed",
         )):
             raise DownloadBotError(f"yt-dlp blocked the download: {e}") from e
-        raise DownloadNetworkError(f"Network error during download: {e}")
+        if any(k in err for k in (
+            "connection reset", "connection refused", "connection aborted",
+            "timed out", "timeout", "temporary failure", "network is unreachable",
+            "remote end closed", "name resolution", "temporarily unavailable",
+            "http error 500", "http error 502", "http error 503", "http error 504",
+            "incomplete read", "incompleteread",
+        )):
+            raise DownloadNetworkError(f"Network error during download: {e}") from e
+        if any(k in err for k in ("video unavailable", "private video", "removed", "deleted video")):
+            raise DownloadUnavailableError("Video unavailable, private, or removed.") from e
+        raise DownloadPermanentError(
+            f"Download requires attention (format, extractor, or configuration): {e}"
+        ) from e
+
 
 
 if __name__ == "__main__":
@@ -79,6 +91,9 @@ if __name__ == "__main__":
     except DownloadNetworkError:
         traceback.print_exc()
         sys.exit(22)
+    except DownloadPermanentError:
+        traceback.print_exc()
+        sys.exit(23)
     except Exception:
         traceback.print_exc()
         sys.exit(1)
