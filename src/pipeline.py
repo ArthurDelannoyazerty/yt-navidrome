@@ -597,6 +597,10 @@ class Pipeline:
         )
         if review_again:
             selected = None
+            # A failed pre-apply attempt may have saved an identity plan for the
+            # previous audio. Fresh approval must not reuse that obsolete route.
+            for name in ("identity-plan.json", "apply-request.json", "apply-result.json"):
+                (directory / name).unlink(missing_ok=True)
             self.report(job)("WARNING", "Approval no longer matches the staged audio. Fresh review is required.")
         if selected is None:
             identified, choices = await self._identification_choices(job, track, directory, candidate)
