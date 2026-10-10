@@ -68,8 +68,8 @@ def test_frontend_exposes_deferred_retry_state():
     css = (ROOT / "src/static/style.css").read_text()
     assert '<option value="DEFERRED">Deferred retry</option>' in html
     assert '["QUEUED", "RUNNING", "DEFERRED"]' in javascript
-    assert '["Deferred", stats.deferred]' in javascript
-    assert '["Processing", stats.running]' in javascript
+    assert '["Deferred", stats.deferred, "DEFERRED"]' in javascript
+    assert '["Processing", stats.running, "RUNNING"]' in javascript
     assert "Retry after" in javascript
     assert ".NEEDS_APPROVAL,.UNAVAILABLE,.DEFERRED" in css
 
@@ -85,4 +85,17 @@ def test_music_view_exposes_current_user_approve_all():
     assert 'This only affects the current library user.' in javascript
     assert 'approveAll.disabled = !stats.approval;' in javascript
     assert 'Approve all (${stats.approval})' in javascript
-    assert 'await api("/api/batch", {user_id: state.user, mode})' in javascript
+    assert 'await api("/api/batch", {user_id: user, mode})' in javascript
+
+
+def test_help_and_bulk_maintenance_have_accessible_dom_targets():
+    html = (ROOT / "src/static/index.html").read_text()
+    for target in ("retryAll", "repairAll", "exportFailures", "resultsSummary", "libraryScope", "issueKind", "issuePrev", "issueNext"):
+        assert f'id="{target}"' in html
+    assert 'data-tab="help"' in html and 'data-panel="help"' in html
+    assert 'aria-label="Music ingestion workflow"' in html
+    assert "Two independent states" in html
+    assert "Button reference" in html
+    assert "Why beets has" in html
+    assert "No conflicting conventional gain tag" in html
+    assert html.index('/static/ui-state.js?v=') < html.index('/static/app.js?v=')

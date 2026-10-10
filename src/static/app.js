@@ -18,7 +18,26 @@ const state = {
   fastPolling: false,
   slowPolling: false,
   systemSignature: "",
+  integrityPage: 1,
+  integrityMaxPage: 1,
+  batchPending: false,
+  repairable: 0,
 };
+
+const requestGate = new IngestorUI.RequestGate();
+function beginRequest(scope) {
+  const current = requestGate.begin(scope);
+  const user = state.user;
+  const generation = state.generation;
+  return () => current() && user === state.user && generation === state.generation;
+}
+
+function setFilter(value) {
+  $("filter").value = value;
+  state.page = 1;
+  state.generation += 1;
+  guard(() => refreshTracks(false))();
+}
 
 const node = (tag, text, cls) => {
   const element = document.createElement(tag);
@@ -34,18 +53,26 @@ function notice(message, error = false) {
   element.className = error ? "error" : "success";
 }
 
-async function api(path, body, method) {
+async function api(path, body, method, current = () => true) {
   const requestMethod = method || (body ? "POST" : "GET");
-  const response = await fetch(path, {
+  let response;
+  try {
+    response = await fetch(path, {
     method: requestMethod,
     cache: requestMethod === "GET" ? "no-store" : "default",
     headers: body ? {"Content-Type": "application/json"} : {},
     body: body ? JSON.stringify(body) : undefined,
-  });
+    });
+  } catch (error) {
+    if (!current()) return null;
+    throw error;
+  }
+  if (!current()) return null;
   const data = await response.json().catch(() => ({
     error: `Invalid response (HTTP ${response.status})`,
   }));
-  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!current()) return null;
+  if (!data || !response.ok || data.error) throw new Error(data?.error || `Invalid response (HTTP ${response.status})`);
   return data;
 }
 
@@ -181,7 +208,30 @@ async function loadUsers(preferred) {
 }
 
 function changeUser() {
+  requestGate.reset();
   state.user = $("user").value;
+  state.sources = [];
+  state.integrityPage = 1;
+  state.integrityMaxPage = 1;
+  state.repairable = 0;
+  delete $("issueKind").dataset.signature;
+  $("stats").replaceChildren();
+  $("approveAll").disabled = true;
+  $("retryAll").disabled = true;
+  $("approveAll").textContent = "Approve all";
+  $("retryAll").textContent = "Retry all failed";
+  $("issueKind").replaceChildren(node("option", "All issue types"));
+  $("issueKind").firstElementChild.value = "ALL";
+  $("integrityIssues").replaceChildren();
+  $("ignored").replaceChildren();
+  $("integritySummary").textContent = "Loading library audit...";
+  $("healthSummary").textContent = "Library health: loading...";
+  $("repairAll").disabled = true;
+  $("maintenanceBadge").hidden = true;
+  $("libraryScope").textContent = `Library totals for ${state.user}`;
+  $("resultsSummary").textContent = "Loading matching tracks...";
+  $("exportFailures").href = `/api/failures/export?user_id=${encodeURIComponent(state.user)}`;
+  for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
   localStorage.setItem("music-user", state.user);
   state.page = 1;
   state.after = 0;
@@ -249,8 +299,9 @@ function renderSource(source) {
 }
 
 async function loadSources(generation, background = false) {
-  const sources = await api(`/api/sources?user_id=${encodeURIComponent(state.user)}`);
-  if (generation !== state.generation) return;
+  const current = beginRequest("sources");
+  const sources = await api(`/api/sources?user_id=${encodeURIComponent(state.user)}`, null, null, current);
+  if (!current() || generation !== state.generation) return;
   state.sources = sources;
   updateKeyedChildren($("sources"), sources, {
     key: source => source.id,
@@ -262,11 +313,15 @@ async function loadSources(generation, background = false) {
 }
 
 async function action(track, mode, extra = {}) {
+  if (!track || (track.user_id && track.user_id !== state.user)) throw new Error("Library changed; reopen this action.");
+  const user = state.user;
+  if (mode === "approve") extra.approval_token = track.approval_token;
   const result = await api(`/api/tracks/${encodeURIComponent(track.id)}/action`, {
     user_id: state.user,
     mode,
     ...extra,
   });
+  if (user !== state.user) return;
   notice(result.message);
   state.approvals.delete(track.id);
   await refreshTracks(false);
@@ -278,6 +333,7 @@ function openOperation(track, mode) {
     notice("This music has no downloadable origin.", true);
     return;
   }
+  $("operationForm").dataset.user = state.user;
   $("operationTrackId").value = track.id;
   $("operationMode").value = mode;
   $("operationTrack").textContent = track.matched_title || track.title;
@@ -299,7 +355,7 @@ function openOperation(track, mode) {
 $("cancelOperation").addEventListener("click", () => $("operationDialog").close());
 $("operationForm").addEventListener("submit", guard(async event => {
   event.preventDefault();
-  const track = state.tracks.get($("operationTrackId").value);
+  const track = {id: $("operationTrackId").value, user_id: $("operationForm").dataset.user};
   const mode = $("operationMode").value;
   await action(track, mode, {origin_id: $("operationOrigin").value});
   $("operationDialog").close();
@@ -307,6 +363,7 @@ $("operationForm").addEventListener("submit", guard(async event => {
 
 function showEditor(track) {
   $("editForm").reset();
+  $("editForm").dataset.user = state.user;
   $("editId").value = track.id;
   $("editTitle").textContent = track.matched_title || track.title;
   $("editDialog").showModal();
@@ -324,7 +381,7 @@ $("editForm").addEventListener("submit", guard(async event => {
     if (value) overrides[field] = value;
   }
   if (!Object.keys(overrides).length) throw new Error("Enter at least one metadata change.");
-  await action({id: $("editId").value}, "retag", {overrides});
+  await action({id: $("editId").value, user_id: $("editForm").dataset.user}, "retag", {overrides});
   $("editDialog").close();
 }));
 
@@ -337,7 +394,9 @@ function musicbrainzLink(kind, id) {
 }
 
 async function showDetails(track) {
-  const details = await api(`/api/tracks/${encodeURIComponent(track.id)}?user_id=${encodeURIComponent(state.user)}`);
+  const current = beginRequest("details");
+  const details = await api(`/api/tracks/${encodeURIComponent(track.id)}?user_id=${encodeURIComponent(state.user)}`, null, null, current);
+  if (!current()) return;
   $("detailsTitle").textContent = details.matched_title || details.title;
   const body = $("detailsBody");
   const grid = node("div", null, "details-grid");
@@ -385,7 +444,25 @@ async function showDetails(track) {
     node("div", `MusicBrainz: ${details.mbid || "none"}`),
   );
 
-  grid.append(origins, assets, history, technical);
+  const tags = node("div", null, "details-block file-tags");
+  tags.append(node("h3", "Actual file tags"));
+  const values = details.file_tags || {};
+  for (const [label, value] of [
+    ["Expected discovery", values.expected_discovery],
+    ["COMMENT", values.comment], ["DESCRIPTION", values.description],
+    ["R128 gain (Q7.8)", values.r128_track_gain],
+    ["Navidrome track gain (dB)", values.navidrome_gain_db],
+    ["Playback true peak", values.replaygain_track_peak],
+    ["Loudness policy", values.policy],
+  ]) {
+    const field = node("div", null, "tag-field");
+    field.append(node("strong", label), node("code", value ?? "Not present"));
+    tags.append(field);
+  }
+  if (values.error) tags.append(node("p", values.error, "error-text"));
+  if (values.issues?.length) tags.append(node("p", `Audit: ${values.issues.join(", ")}`, "warning-text"));
+  tags.append(node("p", "These values are read from the current audio file. Playback clients may not expose every field.", "hint"));
+  grid.append(tags, technical, origins, assets, history);
   body.replaceChildren(grid);
   $("detailsDialog").showModal();
 }
@@ -464,8 +541,8 @@ function renderTrack(track) {
   } else {
     const reprocess = button("Reprocess", () => openOperation(track, "reprocess"));
     const redownload = button("Redownload", () => openOperation(track, "redownload"));
-    reprocess.disabled = busy || !track.origins.some(origin => origin.downloadable);
-    redownload.disabled = busy || !track.origins.some(origin => origin.downloadable);
+    reprocess.disabled = busy || !["AVAILABLE", "MISSING"].includes(track.health) || !track.origins.some(origin => origin.downloadable);
+    redownload.disabled = busy || !["AVAILABLE", "MISSING"].includes(track.health) || !track.origins.some(origin => origin.downloadable);
     controls.append(reprocess, redownload);
   }
   if (track.operation_state === "FAILED") controls.append(button("Retry", () => action(track, "retry")));
@@ -476,6 +553,10 @@ function renderTrack(track) {
   menuItems.append(
     button("Edit metadata", () => showEditor(track)),
     button("Technical details", () => showDetails(track)),
+    button("Repair tags / loudness", async () => {
+      if (!confirm("Recalculate loudness and discovery tags on this existing file? Audio and identity are preserved. No download is needed.")) return;
+      await action(track, "repair");
+    }),
     button("Delete local copy", async () => {
       if (!confirm(`Delete "${track.matched_title || track.title}" for ${state.user}? It can return on the next monitored sync.`)) return;
       await action(track, "delete");
@@ -486,6 +567,9 @@ function renderTrack(track) {
     }, "danger"),
   );
   for (const child of menuItems.children) child.disabled = busy;
+  menuItems.children[0].disabled = busy || track.health !== "AVAILABLE";
+  menuItems.children[1].disabled = false;
+  menuItems.children[2].disabled = track.health !== "AVAILABLE" || track.operation_state !== "IDLE";
   menu.append(menuItems);
   controls.append(menu);
   actions.append(controls);
@@ -511,47 +595,49 @@ function trackSignature(track) {
     defer_count: track.defer_count,
     choices: track.choices,
     issue_count: track.issue_count,
+    approval_token: track.approval_token,
   });
 }
 
 function updateStats(stats) {
   const approveAll = $("approveAll");
   approveAll.disabled = !stats.approval;
-  approveAll.textContent = stats.approval
-    ? `Approve all (${stats.approval})`
-    : "Approve all";
-
+  approveAll.disabled ||= state.batchPending;
+  approveAll.textContent = stats.approval ? `Approve all (${stats.approval})` : "Approve all";
+  const retryAll = $("retryAll");
+  retryAll.disabled = !stats.failed || state.batchPending;
+  retryAll.textContent = stats.failed ? `Retry all failed (${stats.failed})` : "Retry all failed";
   const values = [
-    ["Total", stats.total],
-    ["Available", stats.available],
-    ["Queued", stats.queued],
-    ["Processing", stats.running],
-    ["Deferred", stats.deferred],
-    ["Approval", stats.approval],
-    ["Failed", stats.failed],
-    ["Attention", stats.attention],
+    ["Total", stats.total, "ALL"], ["Available", stats.available, "AVAILABLE"],
+    ["Queued", stats.queued, "QUEUED"], ["Processing", stats.running, "RUNNING"],
+    ["Deferred", stats.deferred, "DEFERRED"], ["Approval", stats.approval, "NEEDS_APPROVAL"],
+    ["Failed", stats.failed, "FAILED"], ["Attention", stats.attention, "ATTENTION"],
   ];
-  updateKeyedChildren($("stats"), values, {
-    key: value => value[0],
-    signature: value => value.join(":"),
-    render: ([label, count]) => {
-      const element = node("span", null, "stat");
-      element.append(node("strong", count), document.createTextNode(label));
-      return element;
-    },
-    background: true,
-  });
+  for (const [label, count, filter] of values) {
+    let element = $("stats").querySelector(`[data-filter="${filter}"]`);
+    if (!element) {
+      element = button(null, () => setFilter(filter), "stat");
+      element.dataset.filter = filter;
+      element.append(node("strong", "0"), node("span", label));
+      $("stats").append(element);
+    }
+    element.firstElementChild.textContent = count.toLocaleString();
+    element.setAttribute("aria-pressed", String($("filter").value === filter));
+    element.title = `Filter by ${label.toLowerCase()}; the count is for the whole selected library`;
+  }
 }
 
 async function refreshTracks(background = true) {
+  const current = beginRequest("tracks");
   const generation = state.generation;
   const data = await api(
     `/api/tracks?user_id=${encodeURIComponent(state.user)}`
     + `&page=${state.page}&limit=50`
     + `&status=${encodeURIComponent($("filter").value)}`
     + `&q=${encodeURIComponent($("search").value.trim())}`,
+    null, null, current,
   );
-  if (generation !== state.generation) return;
+  if (!current() || generation !== state.generation) return;
   state.maxPage = Math.max(1, Math.ceil(data.total / data.limit));
   if (state.page > state.maxPage) {
     state.page = state.maxPage;
@@ -561,8 +647,10 @@ async function refreshTracks(background = true) {
   $("prev").disabled = state.page <= 1;
   $("next").disabled = state.page >= state.maxPage;
   updateStats(data.stats);
+  $("resultsSummary").textContent = IngestorUI.resultsLabel(data.page, data.limit, data.total, data.stats.total);
   const ids = new Set(data.tracks.map(track => track.id));
   for (const id of state.tracks.keys()) if (!ids.has(id)) state.tracks.delete(id);
+  for (const track of data.tracks) state.tracks.set(track.id, track);
   updateKeyedChildren($("tracks"), data.tracks, {
     key: track => track.id,
     signature: trackSignature,
@@ -593,7 +681,10 @@ function renderEvents() {
 }
 
 async function loadEvents() {
-  const events = await api(`/api/events?user_id=${encodeURIComponent(state.user)}&after=${state.after}`);
+  const current = beginRequest("events");
+  const response = await api(`/api/events?user_id=${encodeURIComponent(state.user)}&after=${state.after}`, null, null, current);
+  if (!current()) return;
+  const events = response.filter(event => event.id > state.after);
   if (!events.length) return;
   state.after = events.at(-1).id;
   state.events.push(...events);
@@ -613,7 +704,9 @@ $("clearLogs").addEventListener("click", () => {
 $("errorsOnly").addEventListener("change", renderEvents);
 
 async function loadSystem(background = true) {
-  const data = await api("/api/system");
+  const current = beginRequest("system");
+  const data = await api("/api/system", null, null, current);
+  if (!current()) return;
   const signature = stable(data);
   if (signature === state.systemSignature) return;
   if (background && elementIsBusy($("runtime"))) return;
@@ -645,14 +738,39 @@ function renderIntegrityIssue(issue) {
   if (issue.track) item.append(button("Show music", () => {
     setTab("music");
     $("search").value = issue.track.matched_title || issue.track.title;
-    state.page = 1;
-    guard(() => refreshTracks(false))();
+    setFilter("ALL");
   }));
   return item;
 }
 
 async function loadIntegrity(background = true) {
-  const data = await api(`/api/integrity?user_id=${encodeURIComponent(state.user)}`);
+  const current = beginRequest("integrity");
+  const data = await api(`/api/integrity?user_id=${encodeURIComponent(state.user)}&page=${state.integrityPage}&limit=50&kind=${encodeURIComponent($("issueKind").value)}`, null, null, current);
+  if (!current()) return;
+  state.integrityMaxPage = Math.max(1, Math.ceil(data.total / data.limit));
+  if (state.integrityPage > state.integrityMaxPage) {
+    state.integrityPage = state.integrityMaxPage;
+    return loadIntegrity(background);
+  }
+  state.repairable = data.repairable_tracks || 0;
+  $("repairAll").textContent = `Repair eligible tags (${state.repairable})`;
+  $("repairAll").disabled = !state.repairable || data.running || state.batchPending;
+  $("issuePage").textContent = `${data.page} / ${state.integrityMaxPage} (${data.total} matching issues)`;
+  $("issuePrev").disabled = data.page <= 1;
+  $("issueNext").disabled = data.page >= state.integrityMaxPage;
+  const kind = $("issueKind").value;
+  const options = [{kind: "ALL", count: data.summary.total}, ...data.kinds];
+  if (!options.some(value => value.kind === kind)) options.push({kind, count: 0});
+  const signature = stable(options);
+  if ($("issueKind").dataset.signature !== signature) {
+    $("issueKind").replaceChildren(...options.map(value => {
+      const option = node("option", `${value.kind === "ALL" ? "All issue types" : value.kind.replaceAll("_", " ")} (${value.count})`);
+      option.value = value.kind;
+      return option;
+    }));
+    $("issueKind").value = kind;
+    $("issueKind").dataset.signature = signature;
+  }
   const summary = data.running
     ? "Verification running…"
     : data.summary.total
@@ -677,7 +795,9 @@ async function loadIntegrity(background = true) {
 }
 
 async function runIntegrity() {
+  const user = state.user;
   const result = await api("/api/integrity/run", {user_id: state.user});
+  if (user !== state.user) return;
   notice(result.message);
   await loadIntegrity(false);
 }
@@ -699,7 +819,9 @@ function renderIgnored(entry) {
 }
 
 async function loadIgnored(background = true) {
-  const entries = await api(`/api/ignored?user_id=${encodeURIComponent(state.user)}`);
+  const current = beginRequest("ignored");
+  const entries = await api(`/api/ignored?user_id=${encodeURIComponent(state.user)}`, null, null, current);
+  if (!current()) return;
   updateKeyedChildren($("ignored"), entries, {
     key: entry => entry.id,
     signature: stable,
@@ -761,9 +883,12 @@ $("next").addEventListener("click", guard(async () => {
 }));
 
 $("syncAll").addEventListener("click", guard(async () => {
-  for (const source of state.sources.filter(source => source.monitored && !["PENDING", "SYNCING"].includes(source.status))) {
-    await api(`/api/sources/${encodeURIComponent(source.id)}/retry`, {user_id: state.user});
+  const user = state.user;
+  for (const source of state.sources.filter(source => source.monitored && !["PENDING", "SYNCING", "DEFERRED"].includes(source.status))) {
+    if (user !== state.user) return;
+    await api(`/api/sources/${encodeURIComponent(source.id)}/retry`, {user_id: user});
   }
+  if (user !== state.user) return;
   notice("Monitored sources queued");
   await loadSources(state.generation, false);
 }));
@@ -771,17 +896,39 @@ $("syncAll").addEventListener("click", guard(async () => {
 for (const [id, mode, message] of [
   ["approveAll", "best", () => `Approve the top candidate for every track awaiting approval for "${state.user}"? This only affects the current library user.`],
   ["approveOriginal", "original", () => `Keep current/source metadata for all waiting tracks for "${state.user}"?`],
-  ["retryAll", "retry", () => `Retry all failed operations for "${state.user}"?`],
+  ["retryAll", "retry", () => `Retry ALL failed tracks for "${state.user}", across every page? Search and filters do not limit this action. Deferred, queued and approval tracks are not changed.`],
+  ["repairAll", "repair", () => `Repair discovery and loudness tags on ${state.repairable} eligible existing files for "${state.user}"? This uses the latest audit across all pages. No downloads, identity changes or audio re-encoding. Files with unexplained hash changes are excluded.`],
 ]) {
   const element = $(id);
   if (!element) continue;
   element.addEventListener("click", guard(async () => {
-    if (!confirm(message())) return;
-    const result = await api("/api/batch", {user_id: state.user, mode});
-    notice(result.message);
-    await refreshTracks(false);
+    if (state.batchPending || !confirm(message())) return;
+    const user = state.user;
+    state.batchPending = true;
+    element.disabled = true;
+    try {
+      const result = await api("/api/batch", {user_id: user, mode});
+      if (user !== state.user) return;
+      notice(`${result.message}. ${result.skipped || 0} skipped because their state changed or they were ineligible.`);
+    } finally {
+      state.batchPending = false;
+      await refreshAll(false);
+    }
   }));
 }
+
+$("issueKind").addEventListener("change", () => {
+  state.integrityPage = 1;
+  guard(() => loadIntegrity(false))();
+});
+$("issuePrev").addEventListener("click", guard(async () => {
+  state.integrityPage = Math.max(1, state.integrityPage - 1);
+  await loadIntegrity(false);
+}));
+$("issueNext").addEventListener("click", guard(async () => {
+  state.integrityPage = Math.min(state.integrityMaxPage, state.integrityPage + 1);
+  await loadIntegrity(false);
+}));
 
 $("update").addEventListener("click", guard(async () => {
   const result = await api("/api/downloader/update", {});
