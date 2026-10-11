@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/static/style.css?v=__STATIC_VERSION__">
   <script src="/static/ui-state.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/app.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/spotify-ui.js?v=__STATIC_VERSION__" defer></script>
 </head>
 <body>
 <header class="app-header">
@@ -58,6 +59,7 @@
           <option value="NEEDS_APPROVAL">Needs approval</option>
           <option value="FAILED">Last operation failed</option>
           <option value="MISSING">Missing audio</option>
+          <option value="NEEDS_AUDIO">Spotify: needs audio link</option>
           <option value="UNAVAILABLE">No audio yet</option>
         </select>
       </label>
@@ -82,12 +84,25 @@
 
   <section class="panel" data-panel="sources" hidden>
     <div class="panel-heading"><div><h2>Sources</h2><p class="hint">Add tracks or monitored playlists. Playlist names never become album tags.</p></div><button id="syncAll" class="secondary">Sync monitored sources</button></div>
+    <div class="subpanel spotify-panel">
+      <div class="panel-heading compact"><div><h3>Spotify sources</h3><p id="spotifyStatus" class="hint">Loading Spotify connection...</p></div>
+        <div class="row"><button id="spotifyConnect" type="button" class="secondary" disabled>Connect Spotify</button><button id="spotifyDisconnect" type="button" class="secondary" disabled>Disconnect</button></div>
+      </div>
+      <p>Import Spotify tracks, albums or playlists. Spotify provides metadata, not downloadable audio. Reuse library recordings or explicitly supply a YouTube video for unlinked entries.</p>
+      <div class="row"><button id="spotifyBrowse" type="button" class="secondary" disabled>Browse my playlists</button><button id="spotifyReviewMatches" type="button">Review library matches</button></div>
+      <details class="spotify-setup"><summary>Connection setup and Spotify access limits</summary>
+        <p>Create an app in the Spotify Developer Dashboard. Set <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code> in your server environment, then restart. A client secret is not required.</p>
+        <p>Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code></p>
+        <p>Use HTTPS, or HTTP with an explicit loopback IP for local development. Spotify does not accept localhost. Development-mode apps require an eligible Premium app owner and allowlisted users. Playlist contents are available only for playlists you own or collaborate on.</p>
+        <p>This is read-only access. Music Ingestor does not modify your Spotify library. Each library user connects separately; keep this administration interface behind authentication.</p>
+      </details>
+    </div>
     <div class="columns">
       <div class="subpanel">
         <h3>Add music</h3>
         <form id="ingestForm">
           <label for="urls">Source URLs, one per line</label>
-          <textarea id="urls" placeholder="Paste playlist or track URLs" required></textarea>
+          <textarea id="urls" placeholder="YouTube video/playlist or Spotify track/playlist/album URLs" required></textarea>
           <div class="row spread"><label class="check"><input id="monitor" type="checkbox" checked> Monitor playlists periodically</label><button type="submit">Import</button></div>
         </form>
         <hr>
@@ -136,6 +151,21 @@
     </div>
   </section>
   <section class="panel help-panel" data-panel="help" hidden>
+    <div class="subpanel spotify-help">
+      <h3>Spotify: metadata first, audio separately</h3>
+      <div class="spotify-flow" role="group" aria-label="Spotify workflow">
+        <div><strong>1. Connect</strong><p>Read-only Spotify account per library user.</p></div>
+        <span aria-hidden="true">&#8594;</span><div><strong>2. Sync</strong><p>Track names, playlist positions and exact addition dates.</p></div>
+        <span aria-hidden="true">&#8594;</span><div><strong>3. Review links</strong><p>Reuse confirmed library audio, or select a YouTube video.</p></div>
+        <span aria-hidden="true">&#8594;</span><div><strong>4. Export</strong><p>Linked recordings appear in the generated local playlists.</p></div>
+      </div>
+      <p><strong>Needs audio link</strong> is an expected catalog-only state, not a failed download or missing file. Spotify itself is never passed to the downloader.</p>
+      <p><strong>Review library matches</strong> previews exact artist/title suggestions. <strong>Link unique matches</strong> applies your confirmation across all preview pages. Names cannot prove recording identity; ambiguous editions remain for individual review.</p>
+      <p><strong>Link audio</strong> searches your available confirmed recordings or accepts one YouTube video. YouTube imports use the existing identification, approval and loudness pipeline. Different artist/title results require explicit review. <strong>Cancel waiting link</strong> cancels only the metadata link, not an independent audio import.</p>
+      <p><strong>Browse my playlists</strong> allows multi-selection (up to 100 per import). Paste full open.spotify.com links or spotify:track/playlist/album URIs in Add music. Episodes, local Spotify files and short links are not supported.</p>
+      <p>Missing addition times remain unknown; album release dates never become discovery dates. Failed/partial snapshots retain previous memberships. Removing a Spotify source retains your audio.</p>
+    </div>
+
     <div class="panel-heading"><div><h2>How Music Ingestor works</h2><p class="hint">From a source URL to a playable, user-separated library. No audio is re-encoded by tag repair.</p></div></div>
     <h3>The workflow</h3>
     <ol class="workflow" aria-label="Music ingestion workflow">
@@ -239,6 +269,30 @@
   <div id="detailsBody"></div>
 </dialog>
 
+<dialog id="spotifyPlaylistsDialog" class="wide-dialog">
+  <div class="panel-heading compact"><h2>Spotify playlists</h2><button id="spotifyClosePlaylists" type="button" class="secondary">Close</button></div>
+  <p class="hint">Select up to 100 playlists. Playlists you only follow may be listed but Spotify can deny their contents.</p>
+  <div id="spotifyPlaylists" class="spotify-results"></div>
+  <div class="dialog-actions"><button id="spotifyPlaylistPrev" type="button" class="secondary">Previous</button><span id="spotifyPlaylistPage"></span><button id="spotifyPlaylistNext" type="button" class="secondary">Next</button></div>
+  <div class="dialog-actions"><label class="check"><input id="spotifyMonitor" type="checkbox" checked> Monitor selected playlists</label><button id="spotifyImportSelected" type="button" disabled>Import selected (0)</button></div>
+</dialog>
+<dialog id="spotifyMatchesDialog" class="wide-dialog">
+  <div class="panel-heading compact"><h2>Review Spotify library matches</h2><button id="spotifyCloseMatches" type="button" class="secondary">Close</button></div>
+  <p id="spotifyMatchesSummary"></p><p class="hint">Artist/title equality is a suggestion, not proof of the same recording. Review versions before bulk linking. No existing recording identity or audio is overwritten.</p>
+  <div id="spotifyMatches" class="spotify-results"></div>
+  <div class="dialog-actions"><button id="spotifyMatchPrev" type="button" class="secondary">Previous</button><span id="spotifyMatchPage"></span><button id="spotifyMatchNext" type="button" class="secondary">Next</button><button id="spotifyLinkExact" type="button" disabled>Link unique matches</button></div>
+</dialog>
+<dialog id="spotifyLinkDialog" class="wide-dialog">
+  <div class="panel-heading compact"><h2>Link audio</h2><button id="spotifyCloseLink" type="button" class="secondary">Close</button></div>
+  <p id="spotifyLinkTitle" class="dialog-track"></p>
+  <form id="spotifySearchForm" class="row"><label class="spotify-search">Find a confirmed recording in this library<input id="spotifySearch" type="search" maxlength="200" placeholder="Artist or title"></label><button type="submit">Search library</button></form>
+  <div id="spotifyCandidates" class="spotify-results"></div>
+  <div class="dialog-actions"><button id="spotifyCandidatePrev" type="button" class="secondary">Previous</button><span id="spotifyCandidatePage"></span><button id="spotifyCandidateNext" type="button" class="secondary">Next</button></div>
+  <details class="spotify-setup"><summary>Use a YouTube video instead</summary>
+    <p class="hint">Choose a video you are authorized to download. Audio is imported independently and identified by beets. Approve the YouTube track when requested; the Spotify link waits without another download.</p>
+    <form id="spotifyAudioForm"><label>Single YouTube video URL<input id="spotifyAudioUrl" type="url" required maxlength="2048" placeholder="https://www.youtube.com/watch?v=..."></label><button type="submit">Import audio and link</button></form>
+  </details>
+</dialog>
 <footer>Local administration interface. User folders are not authentication; keep this application behind your authenticated reverse proxy.</footer>
 </body>
 </html>

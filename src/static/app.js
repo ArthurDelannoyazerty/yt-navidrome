@@ -208,6 +208,7 @@ async function loadUsers(preferred) {
 }
 
 function changeUser() {
+  window.SpotifyUI?.reset();
   requestGate.reset();
   state.user = $("user").value;
   state.sources = [];
@@ -511,6 +512,7 @@ function renderTrack(track) {
 
   discovery.append(node("div", time(track.discovered_at)), node("small", track.discovery_basis));
   health.append(badge(track.health));
+  if (!track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable)) health.append(node("div", "Spotify metadata: needs audio link", "hint"));
   if (track.operation_state !== "IDLE") health.append(badge(track.operation_state));
   if (track.operation_kind) health.append(node("div", track.operation_kind, "hint"));
   if (track.operation_state === "DEFERRED" && track.retry_at) {
@@ -545,6 +547,7 @@ function renderTrack(track) {
     redownload.disabled = busy || !["AVAILABLE", "MISSING"].includes(track.health) || !track.origins.some(origin => origin.downloadable);
     controls.append(reprocess, redownload);
   }
+  if (window.SpotifyUI) controls.append(...window.SpotifyUI.controls(track));
   if (track.operation_state === "FAILED") controls.append(button("Retry", () => action(track, "retry")));
 
   const menu = node("details", null, "action-menu");
@@ -850,7 +853,7 @@ async function refreshMaintenance(background = true) {
 
 async function refreshSlow(background = true) {
   if (!state.user) return;
-  const results = await Promise.allSettled([loadSources(state.generation, background), refreshMaintenance(background)]);
+  const results = await Promise.allSettled([loadSources(state.generation, background), refreshMaintenance(background), window.SpotifyUI?.refresh()]);
   reportErrors(results);
 }
 
@@ -961,7 +964,13 @@ async function pollSlow() {
 
 (async () => {
   try {
-    await loadUsers(localStorage.getItem("music-user"));
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("spotify") === "connected";
+    await loadUsers(connected ? params.get("library") : localStorage.getItem("music-user"));
+    if (connected) {
+      setTab("sources"); notice("Spotify connected. Import a source or browse your playlists.");
+      window.history.replaceState(null, "", window.location.pathname);
+    }
   } catch (error) {
     notice(error?.message || String(error), true);
   } finally {
