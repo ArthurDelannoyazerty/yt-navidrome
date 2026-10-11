@@ -125,6 +125,23 @@ class HttpPolicy:
                     "Provider daily quota exhausted; paused until the next Pacific midnight",
                     reset.timestamp(),
                 )
+            if host == "api.spotify.com" and status == 429:
+                try:
+                    value = response.json()
+                    quota_reason = value.get("error", {}).get("reason") or value.get("reason")
+                except (ValueError, AttributeError):
+                    quota_reason = None
+                if quota_reason == "QUOTA_EXCEEDED":
+                    # Spotify developer-account quota is shared across Client IDs.
+                    # This is a retry cooldown, not an assumed provider reset time.
+                    delay = max(3600.0, retry_delay(response.headers.get("Retry-After")))
+                    retry_at = time.time() + delay
+                    self.store.defer_api(host, retry_at)
+                    response.close()
+                    raise self._defer(
+                        "Spotify developer-account quota exhausted; source synchronization paused. "
+                        "Other apps on that Spotify developer account share the quota.", retry_at,
+                    )
             transient = status in {429, 500, 502, 503, 504} or reason in {"rateLimitExceeded", "userRateLimitExceeded"}
             if not transient:
                 if status >= 400 and status != 404:

@@ -36,13 +36,17 @@ an explicit disconnect first, preventing accidental account replacement.
 Credentials and one-use login attempts are kept under `state/spotify/`, with
 0700 directories and 0600 files. Access/refresh tokens are never returned to the
 browser or stored in application events. They are not encrypted at rest: protect
-the state volume and backups. Disconnect deletes local credentials and pending
+the state volume and backups. A permanently rejected refresh grant removes that user's local token file so
+Sources shows Disconnected and a new authorization is required. Transient errors
+retain credentials. Disconnect deletes local credentials and pending
 logins but retains imported metadata and audio. Revoke the app in Spotify's
 account settings as well when revocation is desired.
 
 The admin UI still requires your authenticated reverse proxy; library user
 names are organization, **not authentication**. Keep the OAuth callback protected
 by that proxy, and avoid logging its query parameters (short-lived OAuth codes).
+Ingestor redacts callback query strings in Uvicorn's access log; configure the
+reverse proxy's logs separately.
 
 ## Supported sources and access restrictions
 
@@ -105,6 +109,9 @@ playlist revisions, unsafe/repeated `next` URLs, or permission errors preserve t
 previous memberships and local playlist. The provider constructs its own API
 URLs: access tokens are not forwarded to pagination URLs supplied by responses.
 Requests share the existing host pacing and Retry-After/backoff behavior.
+A Spotify `QUOTA_EXCEEDED` response pauses that API host for at least one hour
+(or a longer Retry-After), rather than repeatedly retrying within seconds. This
+is a conservative retry cooldown, not an assumed Spotify quota reset time.
 
 Playlists and albums are paginated in batches of 50, with a 10,000-item safety
 bound. Duplicate track occurrences preserve their separate positions. Null,

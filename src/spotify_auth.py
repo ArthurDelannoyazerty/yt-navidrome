@@ -9,6 +9,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import logging
 import math
 import os
 import re
@@ -26,6 +27,26 @@ from http_policy import ApiDeferred, HttpPolicy
 SCOPES = frozenset({"playlist-read-private", "playlist-read-collaborative"})
 CALLBACK_PATH = "/api/spotify/callback"
 _LOCK = threading.RLock()
+
+
+class SpotifyAccessLogFilter(logging.Filter):
+    """Keep one-use OAuth codes and state out of Uvicorn access logs."""
+
+    def filter(self, record):
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            args = list(record.args)
+            if isinstance(args[2], str) and args[2].split("?", 1)[0] == CALLBACK_PATH:
+                args[2] = CALLBACK_PATH + "?[REDACTED]"
+                record.args = tuple(args)
+        return True
+
+
+def install_access_log_redaction():
+    # The filter has no app/account state and can safely serve multiple app
+    # factories. Install once, without replacing existing logging configuration.
+    logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(value, SpotifyAccessLogFilter) for value in logger.filters):
+        logger.addFilter(SpotifyAccessLogFilter())
 
 
 def configuration():
@@ -187,9 +208,16 @@ class SpotifyAuth:
                 raise ValueError("Connect Spotify for this library in Sources before syncing")
             if token.get("expires_at", 0) > time.time() + 60 and token.get("access_token") != rejected:
                 return token["access_token"]
-            raw = request_json(http, "POST", "https://accounts.spotify.com/api/token", data={
-                "grant_type": "refresh_token", "client_id": client, "refresh_token": token["refresh_token"],
-            })
+            try:
+                raw = request_json(http, "POST", "https://accounts.spotify.com/api/token", data={
+                    "grant_type": "refresh_token", "client_id": client, "refresh_token": token["refresh_token"],
+                })
+            except SpotifyHTTPError as exc:
+                if exc.status in {400, 401}:
+                    # A revoked/expired refresh grant cannot recover by retrying.
+                    # Leave other users and all imported sources/music untouched.
+                    self._path(user).unlink(missing_ok=True)
+                raise
             token = self._validated(raw, client, token)
             atomic_json(self._path(user), token)
             return token["access_token"]

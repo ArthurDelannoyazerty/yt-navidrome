@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from http_policy import ApiDeferred, HttpPolicy
-from spotify_auth import CALLBACK_PATH, SpotifyAuth, SpotifyClient, configuration
+from spotify_auth import CALLBACK_PATH, SpotifyAuth, SpotifyClient, configuration, install_access_log_redaction
 from spotify_library import cancel_waiting, preview, queue_exact, queue_link
 
 COOKIE = "spotify_oauth"
@@ -32,6 +32,7 @@ def private_response(response):
 
 
 def install_spotify_routes(app, store):
+    install_access_log_redaction()
     auth = SpotifyAuth(store)
 
     @app.get("/api/spotify/status")
