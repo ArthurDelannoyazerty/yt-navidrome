@@ -127,7 +127,9 @@ class YouTube:
             seen.add(token)
 
 
-PROVIDERS = {"youtube": YouTube()}
+from spotify_provider import Spotify
+
+PROVIDERS = {"youtube": YouTube(), "spotify": Spotify()}
 
 
 def parse_source(url: str) -> SourceRef:
@@ -135,6 +137,5 @@ def parse_source(url: str) -> SourceRef:
         if ref := provider.parse(url.strip()):
             return ref
     raise ValueError(
-        "Unsupported source. Additional providers can implement parse() and resolve(); "
-        "Spotify is not enabled yet."
+        "Unsupported source. Use a YouTube video/playlist or Spotify track/playlist/album URL."
     )
