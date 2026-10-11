@@ -27,7 +27,7 @@ from store import SCHEMA_VERSION, Store
 STATIC_ROOT = ROOT / "static"
 INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
 _asset_digest = hashlib.sha256()
-for _asset_name in ("style.css", "ui-state.js", "app.js"):
+for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js"):
     _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
@@ -381,6 +381,8 @@ def create_app(store=None, start_workers=True):
         previous = await pipeline.downloader.rollback()
         return {"message": f"Downloader rolled back to {previous['version']}"}
 
+    from spotify_routes import install_spotify_routes
+    install_spotify_routes(app, store)
     return app
 
 

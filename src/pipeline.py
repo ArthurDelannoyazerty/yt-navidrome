@@ -529,6 +529,10 @@ class Pipeline:
         mode = payload.get("mode", "ingest")
         operation = payload.get("operation", str(job["id"]))
         directory = STATE / "staging" / job["target"]
+        if mode in {"spotify_link", "spotify_audio"}:
+            from spotify_library import process_link
+            await process_link(self, job, directory)
+            return
         completed = self.store.operation_receipt(operation)
         if completed:
             await self.finish_operation_receipt(job, completed, directory)
@@ -637,6 +641,15 @@ class Pipeline:
         for track in tracks:
             asset = self.store.current_asset(track["id"])
             if not asset:
+                # Catalog-only sources are awaiting an audio link, not lost files.
+                if self.store.one(
+                    "SELECT 1 FROM track_origins WHERE track_id=? AND downloadable=0",
+                    (track["id"],),
+                ) and not self.store.one(
+                    "SELECT 1 FROM track_origins WHERE track_id=? AND downloadable=1",
+                    (track["id"],),
+                ):
+                    continue
                 if track["health"] == "UNAVAILABLE" and track["operation_state"] in {"QUEUED", "RUNNING", "DEFERRED", "NEEDS_APPROVAL"}:
                     continue
                 issues.append({"issue_key": f"track:{track['id']}:no-current-asset", "track_id": track["id"],

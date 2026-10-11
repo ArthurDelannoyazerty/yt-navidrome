@@ -764,6 +764,8 @@ class Store:
                 raise LookupError("Track not found for this user")
             if con.execute("SELECT 1 FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')", (track_id,)).fetchone():
                 raise ValueError("This track already has an active job")
+            if track["operation_kind"] == "SPOTIFY_LINK" and track["operation_state"] in {"QUEUED", "RUNNING", "DEFERRED"}:
+                raise ValueError("Wait for the Spotify link to finish updating this track")
             payload = dict(payload)
             mode = payload.get("mode", "retry")
             if mode == "retry":
@@ -1214,6 +1216,7 @@ class Store:
             "DEFERRED": "t.operation_state='DEFERRED'", "NEEDS_APPROVAL": "t.operation_state='NEEDS_APPROVAL'",
             "FAILED": "t.operation_state='FAILED'", "ATTENTION": "(t.health='MISSING' OR t.operation_state='FAILED')",
             "UNMATCHED": "(t.mbid IS NULL OR t.mbid='')",
+            "NEEDS_AUDIO": "t.current_asset_id IS NULL AND EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.provider='spotify') AND NOT EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.downloadable=1)",
             "INTEGRITY": "EXISTS(SELECT 1 FROM integrity_issues i WHERE i.track_id=t.id AND i.resolved_at IS NULL)",
         }
         if status != "ALL":
