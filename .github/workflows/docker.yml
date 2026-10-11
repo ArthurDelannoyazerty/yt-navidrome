@@ -27,12 +27,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --check src/static/app.js && node --check src/static/ui-state.js
+      - run: node --check src/static/app.js && node --check src/static/ui-state.js && node --check src/static/spotify-ui.js
       - name: Run browser-state regressions
         shell: bash
         run: |
           mkdir -p validation
-          node --test tests/frontend_runtime.test.cjs | tee validation/frontend-tests.txt
+          node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs | tee validation/frontend-tests.txt
       - name: Archive the exact reviewed source
         if: always()
         run: |
