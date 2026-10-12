@@ -196,35 +196,74 @@ class Bridge:
         }
 
     def release_metadata(self, recording_id, explicit_release=None):
+        """Enrich a confirmed recording only with a release containing that MBID.
+
+        MusicBrainz's release browse results are associations, not a guarantee
+        that beets will expose the recording in its filtered album track list
+        (e.g. video/data tracks). Never fail an import just because the earliest
+        *automatically* chosen edition cannot be used for enrichment.
+        """
         mb = self.plugins["musicbrainz"]
-        release_id = explicit_release
-        if not release_id:
-            releases, offset = [], 0
-            while True:
-                data = mb.mb_api.get_json(
-                    mb.mb_api.api_root + "/release",
-                    params={"recording": recording_id, "limit": 100, "offset": offset},
+
+        def compatible_release(release_id):
+            album = mb.album_for_id(release_id)
+            # A provider cooldown must still defer the entire operation; it is
+            # not evidence that the recording has no matching release.
+            self.raise_if_deferred()
+            if not album:
+                return None
+            for track in album.tracks:
+                if str(track.track_id).lower() == str(recording_id).lower():
+                    return album, track.merge_with_album(album)
+            return None
+
+        if explicit_release:
+            matched = compatible_release(explicit_release)
+            if matched is None:
+                raise ValueError(
+                    f"MusicBrainz release {explicit_release} is missing or does not "
+                    f"contain recording {recording_id} in its usable tracks. "
+                    "Select another edition or choose automatic release selection."
                 )
-                page = data.get("releases", [])
-                releases.extend(page)
-                offset += len(page)
-                if offset >= data.get("release_count", offset) or not page:
-                    break
-            official = [release for release in releases if release.get("status") == "Official"]
-            if not official:
-                return None, None
-            release_id = min(
-                official,
-                key=lambda release: (release.get("date") or "9999", release["id"]),
-            )["id"]
-        album = mb.album_for_id(release_id)
-        self.raise_if_deferred()
-        if not album:
-            raise ValueError("MusicBrainz release was not found")
-        matches = [track for track in album.tracks if track.track_id == recording_id]
-        if not matches:
-            raise ValueError("The selected release does not contain this recording")
-        return album, matches[0].merge_with_album(album)
+            return matched
+
+        releases, offset = [], 0
+        while True:
+            data = mb.mb_api.get_json(
+                mb.mb_api.api_root + "/release",
+                params={"recording": recording_id, "limit": 100, "offset": offset},
+            )
+            self.raise_if_deferred()
+            page = data.get("releases", [])
+            releases.extend(page)
+            offset += len(page)
+            if offset >= data.get("release_count", offset) or not page:
+                break
+        official = sorted(
+            (release for release in releases
+             if release.get("status") == "Official" and release.get("id")),
+            key=lambda release: (release.get("date") or "9999", release["id"]),
+        )
+        # A popular recording can occur on hundreds of compilations. Keep the
+        # lookup bounded instead of holding the ingestion worker for minutes.
+        max_lookups = 5
+        for release in official[:max_lookups]:
+            matched = compatible_release(release["id"])
+            if matched is not None:
+                return matched
+            print(
+                f"WARNING MusicBrainz release {release['id']} does not expose "
+                f"recording {recording_id}; checking another official edition",
+                file=sys.stderr,
+            )
+        if official:
+            print(
+                f"WARNING No usable official MusicBrainz release found for recording "
+                f"{recording_id} among {min(len(official), max_lookups)} checked; "
+                "saving the confirmed recording without album/date enrichment",
+                file=sys.stderr,
+            )
+        return None, None
 
     def measure_loudness(self, item):
         """Force fresh true-peak analysis, including when source gain tags exist.
@@ -319,6 +358,7 @@ class Bridge:
         if source_reset or not replace_identity:
             self.seed(item, selected["source"]["source_title"] if source_reset else track["title"])
         album_info = None
+        release_warning = None
         if replace_identity and not source_reset:
             for field in (
                 "album", "albumartist", "mb_albumid", "mb_releasegroupid",
@@ -342,10 +382,19 @@ class Bridge:
                 if data:
                     item.update(data)
                 else:
-                    print(
-                        "WARNING No official release found; album/date left unfilled rather than invented",
-                        file=sys.stderr,
+                    # The recording identity is independent of release metadata.
+                    # A candidate's embedded album ID/date must not survive when
+                    # no official release containing this recording was resolved.
+                    for field in ("album", "mb_albumid", "mb_releasegroupid", "mb_releasetrackid"):
+                        item[field] = ""
+                    for field in ("year", "month", "day", "original_year", "original_month", "original_day"):
+                        item[field] = 0
+                    release_warning = (
+                        "Recording identity was applied without album/release date: "
+                        "no usable official MusicBrainz release contains this recording. "
+                        "Use Search MusicBrainz to select a compatible edition if needed."
                     )
+                    print(f"WARNING {release_warning}", file=sys.stderr)
 
         if overrides.get("album") is not None and overrides["album"] != item.album:
             item.mb_albumid = ""
@@ -390,6 +439,8 @@ class Bridge:
         if not final_path.is_file():
             raise RuntimeError("beets did not produce a final audio file")
         warnings: list[str] = []
+        if release_warning:
+            warnings.append(release_warning)
 
         def optional(label, action):
             try:
