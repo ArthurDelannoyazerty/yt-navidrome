@@ -176,7 +176,7 @@
       <li><span class="step-number">4</span><strong>Enrich &amp; measure</strong><p>Beets applies release metadata, artwork and lyrics. Fresh loudness and true-peak measurements become playback tags.</p></li>
       <li><span class="step-number">5</span><strong>Activate &amp; export</strong><p>The asset is committed and playlists are rewritten. Navidrome picks up file changes on its next scan.</p></li>
     </ol>
-    <div class="help-callout"><strong>One recording, many origins.</strong> The same video in several playlists is downloaded once per library user. Different uploads identified as the same recording share a logical track. Other users' libraries stay separate.</div>
+    <div class="help-callout"><strong>One recording, many origins.</strong> The same video in several playlists is downloaded once per library user. Different uploads identified as the same recording share a logical track. If a full-album video was incorrectly merged with a song, open <strong>More → Technical details → Origins</strong> to <strong>Detach origin</strong> into a separate music row or <strong>Remove &amp; ignore origin</strong> to keep it out of local playlists and future monitored imports. Neither action changes your YouTube playlist online. You cannot detach the origin supplying the current audio: first reprocess the track using the correct origin. Other users' libraries stay separate.</div>
 
     <h3>Two independent states</h3>
     <p>A song can be <strong>Available</strong> while its latest redownload is <strong>Failed</strong>. Health and operation counters overlap; they must not be added together. The counters describe the entire selected library, while the results line describes the current search and filter.</p>
@@ -217,6 +217,8 @@
       <tr><td>Edit metadata</td><td>Set explicit artist, title, album or MusicBrainz identifiers. An explicit identity correction can merge or split origins. Leave a field blank to preserve it.</td></tr>
       <tr><td>Technical details</td><td>Read actual COMMENT, DESCRIPTION and loudness tags, plus origins, asset provenance and identity history.</td></tr>
       <tr><td>Repair tags / loudness</td><td>Repair one idle, available file. No download, no identity change, no audio re-encoding. Refresh the player's library after it finishes.</td></tr>
+      <tr><td>Detach origin (Technical details)</td><td>Split one non-active source URL into its own entry, with its playlist memberships but without copying the current audio or MusicBrainz identity.</td></tr>
+      <tr><td>Remove &amp; ignore origin (Technical details)</td><td>Remove just one non-active source URL from local playlists and block its reimport. The recording and other origins remain untouched; restore this URL under Maintenance if needed. Does not edit YouTube remotely.</td></tr>
       <tr><td>Delete local copy</td><td>Remove this user's track and memberships. A monitored source may import it again.</td></tr>
       <tr><td>Delete and ignore / Restore</td><td>Delete and block the recording and known origins. Restore removes the block; the next source sync can import it again.</td></tr>
       <tr><td>Verify library / Repair eligible tags</td><td>Audit current files, tags, hashes and beets paths without changing audio; optionally queue safe tag-only repairs across the whole library.</td></tr>

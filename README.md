@@ -219,6 +219,30 @@ node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs test
 CI runs these checks for every pull request. The container intentionally uses one
 Uvicorn worker because the durable SQLite job worker is single-instance.
 
+## Correct an accidentally merged YouTube origin
+
+A confirmed recording can have several YouTube origins, but a full-album upload
+might have been incorrectly approved as the same song. In **Music → More →
+Technical details → Origins**, choose the *specific incorrect URL*:
+
+- **Detach origin** creates a separate logical track without claiming that it
+  already has the existing recording's audio or MusicBrainz identity. Its playlist
+  membership stays attached to the new row. You may then review/reprocess or
+  delete that independent entry.
+- **Remove & ignore origin** removes only that URL from locally generated
+  playlists, retains the good track/audio/remaining origins, and records an
+  origin-only ignore rule so monitored sync does not re-add it. It is reversible
+  in **Maintenance → Ignored music → Restore**.
+
+Both operations require at least two origins, an idle track, and selecting an
+origin that **does not supply the currently active audio**. If the wrong video is
+the active audio source, first **Reprocess** using the correct video's URL and
+approve it, then detach/ignore the wrong one. Existing audio is never blindly
+assigned to another URL. If discovery dates change, a normal durable comment
+job updates the existing file and fingerprint. Local playlist exports refresh.
+**These actions never edit your YouTube playlist online**; remove the video on
+YouTube separately if you also want the remote playlist cleaned.
+
 ## Managing a large library
 
 Counters always describe the **whole selected library user**. Search and status
