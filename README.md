@@ -280,3 +280,20 @@ existing confirmed track or a separate YouTube video. Unlinked entries have a
 **Spotify: needs audio link** filter; they are not marked as integrity failures.
 Automatic unreviewed Spotify-to-YouTube searching is intentionally not performed.
 Tokens remain in protected server-side files; no client secret is needed.
+
+## Correcting misidentified music
+
+Use **Search MusicBrainz** on a music row to search by song title and/or artist,
+preview a recording and release, and apply it without copying IDs or downloading
+available audio again. Search waits 500 ms after typing; all MusicBrainz traffic
+shares the application's 1.1-second server-side limiter.
+
+**More > Restore source metadata** is different from keeping current applied
+tags: it clears a bad MusicBrainz identity and restores the values retained from
+the original source. New downloads archive their pre-beets descriptive tags;
+older imports explicitly fall back to the retained provider title, without
+inventing missing album/date metadata. Both choices are distinct during approval.
+
+See [Metadata correction and recognition diagnostics](docs/metadata-corrections.md)
+for source provenance, safe replacement/splitting, API limits, and why a recording
+present on the MusicBrainz website may not be an automatic fingerprint candidate.
