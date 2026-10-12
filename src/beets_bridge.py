@@ -390,8 +390,8 @@ class Bridge:
                     for field in ("year", "month", "day", "original_year", "original_month", "original_day"):
                         item[field] = 0
                     release_warning = (
-                        "Recording identity was applied without album/release date: "
-                        "no usable official MusicBrainz release contains this recording. "
+                        "Recording identity was applied without verified release metadata: "
+                        "no usable official MusicBrainz release was resolved for this recording. "
                         "Use Search MusicBrainz to select a compatible edition if needed."
                     )
                     print(f"WARNING {release_warning}", file=sys.stderr)
@@ -480,7 +480,7 @@ class Bridge:
         elif release_warning:
             # A release lookup can fail after the recording was identified.
             # Do not let beets republish an incompatible edition's raw tags.
-            clear_release_tags(final_path)
+            clear_release_tags(final_path, overrides.get("album"))
         # Plugins may write the file again, so force the raw compatibility tags last.
         self.write_discovery_tags(final_path, track.get("discovered_at"))
         write_loudness_tags(final_path, loudness)

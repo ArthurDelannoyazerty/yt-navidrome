@@ -180,7 +180,7 @@ assert result["release_id"] is None
 assert raw["musicbrainz_trackid"] == [recording]
 assert not raw.get("musicbrainz_albumid") and not raw.get("album")
 assert not raw.get("date")
-assert any("Recording identity was applied without album" in w for w in result["warnings"])
+assert any("without verified release metadata" in w for w in result["warnings"])
 assert raw.get("r128_track_gain") and raw.get("replaygain_track_peak")
 assert raw["comment"] == raw["description"]
 print("Recording-only fallback with real beets passed")
@@ -230,3 +230,6 @@ def test_release_tag_cleanup_keeps_recording_and_playback_metadata(tmp_path):
     assert result["r128_track_gain"] == ["-1200"]
     assert result["replaygain_track_peak"] == ["0.3"]
     assert result["comment"] == ["Discovery Date: 2021-01-02--03-04-05 UTC"]
+    clear_release_tags(audio, album_override="User-confirmed album")
+    assert OggOpus(audio)["album"] == ["User-confirmed album"]
+    assert "musicbrainz_albumid" not in OggOpus(audio)

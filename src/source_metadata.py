@@ -124,12 +124,14 @@ RELEASE_TAGS = {
 }
 
 
-def clear_release_tags(path: str | Path):
-    """Strip unverified edition tags, leaving the recording ID intact."""
+def clear_release_tags(path: str | Path, album_override: str | None = None):
+    """Strip unverified edition tags but honor an explicit manual album title."""
     audio = OggOpus(str(path))
     for key in list(audio):
         if key in RELEASE_TAGS or key.startswith("musicbrainz_album"):
             del audio[key]
+    if album_override and album_override.strip():
+        audio["album"] = [album_override.strip()]
     audio.save()
 
 
