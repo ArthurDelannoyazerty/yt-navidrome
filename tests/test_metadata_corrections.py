@@ -252,11 +252,21 @@ with patch("requests.sessions.Session.send", forbid):
     result = b.finalize(track, candidate, selected, operation="restore")
 raw = OggOpus(result["file_path"])
 assert raw["artist"] == ["Right artist"] and raw["title"] == ["Right song"]
-assert not any(k.startswith("musicbrainz") for k in raw)
+assert not any(k.startswith("musicbrainz") for k in raw), dict(raw)
 assert not raw.get("album") and not raw.get("date") and not raw.get("lyrics")
 assert result["mbid"] is None and result["release_id"] is None
 assert raw["comment"] == raw["description"]
 assert raw.get("r128_track_gain") and raw.get("replaygain_track_peak")
+# A later automatic discovery-comment update must not resurrect old DB tags.
+track.update(file_path=result["file_path"], beets_id=result["beets_id"])
+track["discovered_at"] = "2019-01-02T03:04:05Z"
+with patch("requests.sessions.Session.send", forbid):
+    again = b.finalize(track, result["file_path"], None, mode="comment")
+raw = OggOpus(again["file_path"])
+assert again["mbid"] is None and again["release_id"] is None
+assert raw["artist"] == ["Right artist"] and raw["title"] == ["Right song"]
+assert not any(any(value for value in values) for key, values in raw.items() if key.startswith("musicbrainz")), dict(raw)
+assert not raw.get("album") and not raw.get("date") and not raw.get("lyrics")
 print("Source restore integration passed")
 '''
     result = subprocess.run([sys.executable, "-c", script, str(opus)], env=os.environ | {"PYTHONPATH": str(Path(__file__).parents[1] / "src")},

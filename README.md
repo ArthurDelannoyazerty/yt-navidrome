@@ -212,7 +212,8 @@ uv run pytest
 node --check src/static/app.js
 node --check src/static/ui-state.js
 node --check src/static/spotify-ui.js
-node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs
+node --check src/static/metadata-ui.js
+node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs tests/metadata_frontend.test.cjs
 ```
 
 CI runs these checks for every pull request. The container intentionally uses one

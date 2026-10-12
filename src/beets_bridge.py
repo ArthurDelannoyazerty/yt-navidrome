@@ -312,6 +312,9 @@ class Bridge:
         item.path = os.fsencode(str(Path(path).resolve()))
         if replace_identity:
             item.album_id = None
+            # Reset cached/legacy writable fields too; a read alone can leave
+            # alias/flexible tag values on a reused beets item.
+            item.clear()
             item.read()
         if source_reset or not replace_identity:
             self.seed(item, selected["source"]["source_title"] if source_reset else track["title"])
@@ -418,9 +421,16 @@ class Bridge:
         if not source_reset:
             optional("Artwork", artwork)
             optional("Lyrics", lambda: self.plugins["lyrics"].add_item_lyrics(item, True))
+        # Beets/MediaFile may emit empty identity fields while writing a reused
+        # item. A source reset has an explicit allowlist, so enforce it after the
+        # last beets write as well, then synchronize the DB from the final file.
+        if source_reset:
+            clear_descriptive_tags(final_path, selected["source"])
         # Plugins may write the file again, so force the raw compatibility tags last.
         self.write_discovery_tags(final_path, track.get("discovered_at"))
         write_loudness_tags(final_path, loudness)
+        if source_reset:
+            item.read()
         item.pipeline_complete = "yes"
         item.store()
         warnings.extend(self.http.failures)
