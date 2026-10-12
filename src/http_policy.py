@@ -67,6 +67,28 @@ class HttpPolicy:
                 )
             con.execute("INSERT INTO quota VALUES (?,1) ON CONFLICT(day) DO UPDATE SET used=used+1", (day,))
 
+    def _musicbrainz_slot(self):
+        """Reserve only a due slot, shared with UI searches and beets processes.
+
+        Reserving a future slot before sleeping lets cancelled UI requests extend
+        the queue indefinitely. Recheck after every wait instead, including any
+        Retry-After imposed while another requester was sleeping.
+        """
+        started = time.monotonic()
+        while True:
+            now = time.time()
+            with self.store.db() as con:
+                con.execute("BEGIN IMMEDIATE")
+                row = con.execute("SELECT next_at FROM api_clock WHERE host='musicbrainz.org'").fetchone()
+                wait = max(0, (row[0] if row else now) - now)
+                if not wait:
+                    con.execute("INSERT INTO api_clock VALUES ('musicbrainz.org',?) "
+                                "ON CONFLICT(host) DO UPDATE SET next_at=excluded.next_at", (now + 1.1,))
+                    return
+            if wait > 5 or time.monotonic() - started > 5:
+                raise self._defer("musicbrainz.org: waiting for shared provider cooldown", now + max(wait, 1.1))
+            time.sleep(wait)
+
     def send(self, original, session, request, **kwargs):
         host = urlsplit(request.url).hostname or "unknown"
         interval = 0.4 if host == "api.acoustid.org" else 1.1
@@ -75,7 +97,11 @@ class HttpPolicy:
         # Restore the original payload for each retry rather than compressing twice.
         body, headers = request.body, request.headers.copy()
         for attempt in range(3):
-            wait = self.store.reserve_api(host, interval)
+            if host == "musicbrainz.org":
+                self._musicbrainz_slot()
+                wait = 0
+            else:
+                wait = self.store.reserve_api(host, interval)
             # Normal API spacing (1.1s/0.4s) can wait inline. Longer shared
             # cooldowns should release the single ingestion worker to other jobs.
             if wait > 5:

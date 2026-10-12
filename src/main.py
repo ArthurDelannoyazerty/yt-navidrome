@@ -21,13 +21,14 @@ from pydantic import BaseModel, Field
 from audio_tags import inspect_tags
 from common import LIBRARY, ROOT, utcnow
 from pipeline import Pipeline
+from metadata_routes import install_metadata_routes
 from providers import parse_source
 from store import SCHEMA_VERSION, Store
 
 STATIC_ROOT = ROOT / "static"
 INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
 _asset_digest = hashlib.sha256()
-for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js"):
+for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js"):
     _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
@@ -122,6 +123,7 @@ def create_app(store=None, start_workers=True):
     app = FastAPI(title="Music Ingestor", lifespan=lifespan)
     app.state.store = store
     app.state.pipeline = pipeline
+    install_metadata_routes(app, store)
     app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 
     @app.middleware("http")

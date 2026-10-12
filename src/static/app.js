@@ -209,6 +209,7 @@ async function loadUsers(preferred) {
 
 function changeUser() {
   window.SpotifyUI?.reset();
+  window.MetadataUI?.reset();
   requestGate.reset();
   state.user = $("user").value;
   state.sources = [];
@@ -533,7 +534,7 @@ function renderTrack(track) {
   if (track.operation_state === "NEEDS_APPROVAL") {
     const select = node("select", null, "approval");
     track.choices.forEach((choice, index) => {
-      const option = node("option", `${choice.similarity}% | ${choice.artist ? `${choice.artist} - ` : ""}${choice.title}${choice.description ? ` | ${choice.description}` : ""}`);
+      const option = node("option", `${choice.kind === "source" ? "Source" : choice.kind === "asis" ? "Current tags" : `${choice.similarity}%`} | ${choice.artist ? `${choice.artist} - ` : ""}${choice.title}${choice.description ? ` | ${choice.description}` : ""}`);
       option.value = String(index);
       select.append(option);
     });
@@ -548,18 +549,24 @@ function renderTrack(track) {
     controls.append(reprocess, redownload);
   }
   if (window.SpotifyUI) controls.append(...window.SpotifyUI.controls(track));
+  if (window.MetadataUI) controls.append(button("Search MusicBrainz", () => window.MetadataUI.open(track)));
   if (track.operation_state === "FAILED") controls.append(button("Retry", () => action(track, "retry")));
 
   const menu = node("details", null, "action-menu");
   menu.append(node("summary", "More"));
   const menuItems = node("div", null, "action-menu-items");
+  const restoreSource = button("Restore source metadata", () => window.MetadataUI?.open(track, "source"));
+  restoreSource.disabled = busy || !window.MetadataUI || !(track.health === "AVAILABLE" || track.operation_state === "NEEDS_APPROVAL");
+  const editMetadata = button("Edit metadata", () => showEditor(track));
+  editMetadata.disabled = busy || track.health !== "AVAILABLE";
+  const technicalDetails = button("Technical details", () => showDetails(track));
+  const repairTags = button("Repair tags / loudness", async () => {
+    if (!confirm("Recalculate loudness and discovery tags on this existing file? Audio and identity are preserved. No download is needed.")) return;
+    await action(track, "repair");
+  });
+  repairTags.disabled = track.health !== "AVAILABLE" || track.operation_state !== "IDLE";
   menuItems.append(
-    button("Edit metadata", () => showEditor(track)),
-    button("Technical details", () => showDetails(track)),
-    button("Repair tags / loudness", async () => {
-      if (!confirm("Recalculate loudness and discovery tags on this existing file? Audio and identity are preserved. No download is needed.")) return;
-      await action(track, "repair");
-    }),
+    restoreSource, editMetadata, technicalDetails, repairTags,
     button("Delete local copy", async () => {
       if (!confirm(`Delete "${track.matched_title || track.title}" for ${state.user}? It can return on the next monitored sync.`)) return;
       await action(track, "delete");
@@ -569,10 +576,9 @@ function renderTrack(track) {
       await action(track, "delete_ignore");
     }, "danger"),
   );
-  for (const child of menuItems.children) child.disabled = busy;
-  menuItems.children[0].disabled = busy || track.health !== "AVAILABLE";
-  menuItems.children[1].disabled = false;
-  menuItems.children[2].disabled = track.health !== "AVAILABLE" || track.operation_state !== "IDLE";
+  // Named controls above retain their own eligibility; only deletion follows
+  // the generic busy rule. Adding a menu item must not shift permission indexes.
+  for (const child of [...menuItems.children].slice(4)) child.disabled = busy;
   menu.append(menuItems);
   controls.append(menu);
   actions.append(controls);
@@ -582,6 +588,8 @@ function renderTrack(track) {
 
 function trackSignature(track) {
   return stable({
+    metadata_tools: Boolean(window.MetadataUI),
+    spotify_tools: Boolean(window.SpotifyUI),
     title: track.title,
     matched_title: track.matched_title,
     mbid: track.mbid,
