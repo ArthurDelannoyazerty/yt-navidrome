@@ -294,9 +294,9 @@ class Bridge:
                 existing.add(self.lib)
             if Path(os.fsdecode(existing.path)).resolve() != Path(path).resolve():
                 raise ValueError("Beets path differs from the current asset; audit before changing tags")
-            if track.get("discovered_at"):
-                existing.comments = discovery_comment(track["discovered_at"])
-            existing.write()
+            # A discovery-only update must not rewrite unrelated tags from the
+            # beets row (including empty legacy identity/album/lyrics fields).
+            existing.comments = discovery_comment(track.get("discovered_at"))
             self.write_discovery_tags(os.fsdecode(existing.path), track.get("discovered_at"))
             existing.store()
             return self.result(existing)
