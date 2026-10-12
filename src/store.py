@@ -1203,6 +1203,129 @@ class Store:
     def track_has_origins(self, track_id: str) -> bool:
         return bool(self.one("SELECT 1 AS ok FROM track_origins WHERE track_id=? LIMIT 1", (track_id,)))
 
+    def manage_origin(self, track_id: str, origin_id: str, user: str, mode: str):
+        """Separate or ignore ONE origin without touching the active audio.
+
+        Playlists refer to origin IDs, so detaching preserves memberships; ignoring
+        deletes only this origin's memberships and prevents monitored re-import.
+        Never move/remove the provenance of the audio currently playing.
+        """
+        if mode not in {"detach", "ignore"}:
+            raise ValueError("Unsupported origin operation")
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            track = con.execute(
+                "SELECT * FROM tracks WHERE id=? AND user_id=?", (track_id, user)
+            ).fetchone()
+            origin = con.execute(
+                "SELECT * FROM track_origins WHERE id=? AND track_id=? AND user_id=?",
+                (origin_id, track_id, user),
+            ).fetchone()
+            if not track or not origin:
+                raise LookupError("Origin not found on this track in the selected library")
+            if track["operation_state"] != "IDLE" or con.execute(
+                "SELECT 1 FROM jobs WHERE kind='track' AND target=? "
+                "AND state IN ('PENDING','RUNNING')", (track_id,),
+            ).fetchone():
+                raise ValueError("Finish the current track operation before changing its origins")
+            count = con.execute(
+                "SELECT COUNT(*) FROM track_origins WHERE track_id=?", (track_id,)
+            ).fetchone()[0]
+            if count < 2:
+                raise ValueError("This is the only origin; use track deletion instead")
+            if track["current_origin_id"] == origin_id or con.execute(
+                "SELECT 1 FROM assets WHERE track_id=? AND state='CURRENT' AND origin_id=?",
+                (track_id, origin_id),
+            ).fetchone():
+                raise ValueError(
+                    "This origin supplies the current audio. Reprocess using the correct "
+                    "other origin first, then remove or detach this one."
+                )
+            sources = [row[0] for row in con.execute(
+                "SELECT DISTINCT source_id FROM memberships WHERE origin_id=?", (origin_id,)
+            )]
+            now = utcnow()
+            new_id = None
+            if mode == "detach":
+                new_id = str(uuid.uuid4())
+                playlist = origin["playlist_discovered_at"]
+                first = origin["first_seen_at"]
+                # A detached origin is an independent untagged recording, not a
+                # second copy of the existing confirmed audio/identity.
+                con.execute(
+                    """INSERT INTO tracks(id,user_id,title,first_seen_at,
+                       playlist_discovered_at,discovered_at,discovery_basis,health,
+                       operation_state,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,'IDLE',?,?)""",
+                    (new_id, user, origin["title"], first, playlist,
+                     playlist or first, "playlist_added" if playlist else "first_seen",
+                     "MISSING" if origin["downloadable"] else "UNAVAILABLE", now, now),
+                )
+                con.execute("UPDATE track_origins SET track_id=? WHERE id=?", (new_id, origin_id))
+                # Historical replaced assets belong to the original recording,
+                # never the new empty logical entry. Retain their source_url.
+                con.execute(
+                    "UPDATE assets SET origin_id=NULL WHERE track_id=? AND origin_id=?",
+                    (track_id, origin_id),
+                )
+            else:
+                # Tombstone ONLY this URL, not the merged recording MBID.
+                # A fresh ignored_tracks group allows Maintenance > Restore.
+                ignored_id = str(uuid.uuid4())
+                con.execute(
+                    "INSERT INTO ignored_tracks(id,user_id,mbid,title,created_at,reason) "
+                    "VALUES (?,?,NULL,?,?,?)",
+                    (ignored_id, user, origin["title"], now,
+                     "Removed incorrect origin from merged recording"),
+                )
+                con.execute(
+                    """INSERT INTO ignored_origins(user_id,provider,media_key,url,
+                       title,ignored_track_id,created_at) VALUES (?,?,?,?,?,?,?)""",
+                    (user, origin["provider"], origin["media_key"], origin["url"],
+                     origin["title"], ignored_id, now),
+                )
+                con.execute("DELETE FROM track_origins WHERE id=?", (origin_id,))
+            # The original track's discovery event might have come from the
+            # removed video. Recalculate only from its remaining origins.
+            first = con.execute(
+                "SELECT MIN(first_seen_at) FROM track_origins WHERE track_id=?", (track_id,)
+            ).fetchone()[0]
+            playlist_origins = con.execute(
+                "SELECT MIN(playlist_discovered_at) FROM track_origins WHERE track_id=?",
+                (track_id,),
+            ).fetchone()[0]
+            playlist_members = con.execute(
+                """SELECT MIN(m.added_at) FROM memberships m
+                   JOIN sources s ON s.id=m.source_id
+                   JOIN track_origins o ON o.id=m.origin_id
+                   WHERE o.track_id=? AND s.is_playlist=1 AND m.added_at IS NOT NULL""",
+                (track_id,),
+            ).fetchone()[0]
+            playlist = _earliest(playlist_origins, playlist_members)
+            discovered = playlist or first
+            changed = discovered != track["discovered_at"]
+            con.execute(
+                """UPDATE tracks SET first_seen_at=?,playlist_discovered_at=?,
+                   discovered_at=?,discovery_basis=?,updated_at=? WHERE id=?""",
+                (first, playlist, discovered,
+                 "playlist_added" if playlist else "first_seen", now, track_id),
+            )
+            # Update the encoded file's discovery tag through the ordinary job
+            # worker, which refreshes its stored fingerprint afterwards.
+            comment_queued = False
+            if changed and track["health"] == "AVAILABLE" and track["current_asset_id"]:
+                comment_queued = self.enqueue(
+                    "track", track_id, user, {"mode": "comment"}, con=con,
+                )
+                if comment_queued:
+                    con.execute(
+                        "UPDATE tracks SET operation_state='QUEUED',operation_kind='COMMENT' WHERE id=?",
+                        (track_id,),
+                    )
+            return {"mode": mode, "track_id": track_id, "origin_id": origin_id,
+                    "new_track_id": new_id, "source_ids": sources,
+                    "discovery_changed": changed, "comment_queued": comment_queued}
+
     def dashboard_tracks(self, user: str, page: int, limit: int, status: str = "ALL", query: str = ""):
         self.require_user(user)
         clauses = ["t.user_id=?"]

@@ -395,6 +395,24 @@ function musicbrainzLink(kind, id) {
   return link;
 }
 
+async function manageTrackOrigin(track, origin, mode) {
+  const user = state.user;
+  if (track.user_id !== user) throw new Error("Library changed; reopen the details dialog.");
+  const description = mode === "detach"
+    ? `Detach the ${origin.provider} origin "${origin.title}" from this recording? Its playlist memberships remain linked to a NEW entry without audio. The existing recording and its audio stay untouched.`
+    : `Remove and ignore only the ${origin.provider} origin "${origin.title}"? It will disappear from local exported playlists and will NOT be imported again on monitored sync until restored in Maintenance. The online YouTube playlist is NOT changed.`;
+  if (!confirm(description)) return;
+  const response = await api(
+    `/api/tracks/${encodeURIComponent(track.id)}/origins/${encodeURIComponent(origin.id)}/${mode}`,
+    {user_id: user},
+  );
+  if (user !== state.user) return;
+  $("detailsDialog").close();
+  notice(response.message, Boolean(response.playlist_refresh_failed?.length));
+  await refreshTracks(false);
+  if (response.playlist_refresh_failed?.length) await loadSources(state.generation, false);
+}
+
 async function showDetails(track) {
   const current = beginRequest("details");
   const details = await api(`/api/tracks/${encodeURIComponent(track.id)}?user_id=${encodeURIComponent(state.user)}`, null, null, current);
@@ -409,7 +427,16 @@ async function showDetails(track) {
   for (const origin of details.origins) {
     const entry = node("div", null, "details-entry");
     entry.append(node("strong", origin.provider), node("div", origin.title), node("small", origin.url));
+    const currentAudio = origin.id === details.current_origin_id || details.assets.some(asset => asset.state === "CURRENT" && asset.origin_id === origin.id);
+    if (currentAudio) entry.append(node("small", "Current audio source — reprocess from another origin before detaching", "hint"));
     if (origin.last_error) entry.append(node("div", origin.last_error, "error-text"));
+    const actions = node("div", null, "source-buttons origin-buttons");
+    const detached = button("Detach origin", () => manageTrackOrigin(details, origin, "detach"));
+    const ignored = button("Remove & ignore origin", () => manageTrackOrigin(details, origin, "ignore"), "danger");
+    const unavailable = details.origins.length < 2 || details.operation_state !== "IDLE" || currentAudio;
+    detached.disabled = ignored.disabled = unavailable;
+    actions.append(detached, ignored);
+    entry.append(actions);
     originList.append(entry);
   }
   origins.append(originList);

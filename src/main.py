@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from audio_tags import inspect_tags
 from common import LIBRARY, ROOT, utcnow
-from pipeline import Pipeline
+from pipeline import Pipeline, write_playlist
 from metadata_routes import install_metadata_routes
 from providers import parse_source
 from store import SCHEMA_VERSION, Store
@@ -250,6 +250,31 @@ def create_app(store=None, start_workers=True):
         q: str = Query("", max_length=200),
     ):
         return store.dashboard_tracks(user_id, page, limit, status, q)
+
+    @app.post("/api/tracks/{track_id}/origins/{origin_id}/{mode}")
+    def manage_origin(track_id: str, origin_id: str, mode: str, data: ActionInput):
+        if mode not in {"detach", "ignore"}:
+            raise ValueError("Only detach and ignore are supported for origins")
+        result = store.manage_origin(track_id, origin_id, data.user_id, mode)
+        failures = []
+        for source_id in result["source_ids"]:
+            try:
+                source = store.owned("sources", source_id, data.user_id)
+                write_playlist(store, source)
+            except Exception as exc:
+                # The DB mutation is already committed. Do not report a failed
+                # mutation and encourage the browser to submit it twice.
+                store.event("ERROR", f"Playlist export refresh failed after origin {mode}: {exc}",
+                            data.user_id, source_id)
+                failures.append(source_id)
+        result["playlist_refresh_failed"] = failures
+        result["message"] = (
+            "Origin detached into a separate, audio-less entry" if mode == "detach"
+            else "Origin removed and ignored; remaining audio kept"
+        )
+        if failures:
+            result["message"] += "; some playlist exports need another sync"
+        return result
 
     @app.get("/api/tracks/{track_id}")
     def track_details(track_id: str, user_id: str):
