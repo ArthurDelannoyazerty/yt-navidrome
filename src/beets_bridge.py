@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from audio_tags import loudness_values, write_loudness_tags
-from source_metadata import clear_descriptive_tags
+from source_metadata import clear_descriptive_tags, clear_release_tags
 from common import LIBRARY, ROOT, STATE, atomic_json, discovery_comment, user_name
 from http_policy import ApiDeferred, HttpPolicy
 from store import Store
@@ -477,10 +477,16 @@ class Bridge:
         # last beets write as well, then synchronize the DB from the final file.
         if source_reset:
             clear_descriptive_tags(final_path, selected["source"])
+        elif release_warning:
+            # A release lookup can fail after the recording was identified.
+            # Do not let beets republish an incompatible edition's raw tags.
+            clear_release_tags(final_path)
         # Plugins may write the file again, so force the raw compatibility tags last.
         self.write_discovery_tags(final_path, track.get("discovered_at"))
         write_loudness_tags(final_path, loudness)
-        if source_reset:
+        if source_reset or release_warning:
+            # Synchronize beets with the actual Opus fields after selective tag
+            # cleanup so a later discovery-comment update cannot resurrect them.
             item.read()
         item.pipeline_complete = "yes"
         item.store()

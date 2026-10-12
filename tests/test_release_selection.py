@@ -192,3 +192,41 @@ print("Recording-only fallback with real beets passed")
         text=True, capture_output=True, timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_release_tag_cleanup_keeps_recording_and_playback_metadata(tmp_path):
+    """A fallback clears stale edition tags without destroying useful tags."""
+    import subprocess
+    from mutagen.oggopus import OggOpus
+    from source_metadata import clear_release_tags
+
+    audio = tmp_path / "release-tags.opus"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+        "sine=frequency=432:duration=1", "-c:a", "libopus", str(audio),
+    ], check=True)
+    tags = OggOpus(audio)
+    tags["musicbrainz_trackid"] = [RECORDING]
+    tags["musicbrainz_albumid"] = [EARLY_RELEASE]
+    tags["musicbrainz_releasegroupid"] = [LATER_RELEASE]
+    tags["artist"] = ["Ganja White Night"]
+    tags["title"] = ["Example"]
+    tags["album"] = ["Wrong compilation"]
+    tags["date"] = ["1990"]
+    tags["lyrics"] = ["A lyric"]
+    tags["r128_track_gain"] = ["-1200"]
+    tags["replaygain_track_peak"] = ["0.3"]
+    tags["comment"] = ["Discovery Date: 2021-01-02--03-04-05 UTC"]
+    tags.save()
+    clear_release_tags(audio)
+    result = OggOpus(audio)
+    assert not any(key in result for key in (
+        "album", "date", "musicbrainz_albumid", "musicbrainz_releasegroupid"
+    ))
+    assert result["musicbrainz_trackid"] == [RECORDING]
+    assert result["artist"] == ["Ganja White Night"]
+    assert result["title"] == ["Example"]
+    assert result["lyrics"] == ["A lyric"]
+    assert result["r128_track_gain"] == ["-1200"]
+    assert result["replaygain_track_peak"] == ["0.3"]
+    assert result["comment"] == ["Discovery Date: 2021-01-02--03-04-05 UTC"]
