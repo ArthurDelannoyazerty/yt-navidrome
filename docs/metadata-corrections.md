@@ -110,6 +110,35 @@ to title mismatch, missing fingerprint linkage, a different edition or another
 cause. Use manual search to correct the known identity rather than repeatedly
 approving the same incorrect automatic candidate.
 
+## MusicBrainz recording versus release failures
+
+A **recording** MBID identifies the recorded performance. A **release** MBID
+identifies a particular edition (album, single or compilation), which may include
+that recording on one of its media. A MusicBrainz release browse result is not
+proof that beets will expose the recording as a usable audio track for that
+edition: beets intentionally excludes some non-audio/video tracks. An old
+implementation chose the earliest official edition without checking the actual
+beets track list. An approval could therefore fail with:
+`The selected release does not contain this recording` even though the audio
+had been downloaded and correctly identified.
+
+Automatic album enrichment now checks that the release really contains the
+selected recording, skips an unusable edition and tries up to **five** official
+editions in date order. If none can be used, it **saves the confirmed recording
+without album/release-date tags**, logs a warning and does not invent release
+metadata. For a manually chosen edition, a mismatch is **not** replaced
+silently: select another edition or the automatic option in Search MusicBrainz.
+The originally downloaded/staged audio remains available for retry when a
+transient provider failure occurs.
+
+MusicBrainz `503`, Cover Art Archive `500` and LRCLIB `503` in Activity are
+separate provider availability failures. Artwork and lyrics are optional;
+MusicBrainz lookup failures should defer and retry according to the provider
+cooldown instead of being treated as an incompatible album. A YouTube bot/403/429
+warning means downloads are temporarily deferred; avoid repeatedly forcing
+retries during its cooldown. These messages do not by themselves imply the
+selected recording MBID is wrong.
+
 ## Compatibility and verification
 
 Two additive tables retain source snapshots and the latest identification report.
