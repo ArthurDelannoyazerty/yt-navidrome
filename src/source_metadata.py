@@ -112,6 +112,29 @@ def clear_descriptive_tags(path: str | Path, source: dict | None = None):
     audio.save()
 
 
+# beets may write empty/obsolete album values back into a reused media file
+# despite resetting its Item fields. Remove release-specific tags after the last
+# write, without dropping the selected recording identity, lyrics or loudness.
+RELEASE_TAGS = {
+    "album", "albumartist", "albumartists", "date", "year", "originaldate",
+    "originalyear", "original_year", "tracknumber", "tracktotal",
+    "discnumber", "disctotal", "discsubtitle", "media", "releasestatus",
+    "releasetype", "releasecountry", "label", "catalognum", "barcode", "asin",
+    "musicbrainz_releasetrackid", "musicbrainz_releasegroupid",
+}
+
+
+def clear_release_tags(path: str | Path, album_override: str | None = None):
+    """Strip unverified edition tags but honor an explicit manual album title."""
+    audio = OggOpus(str(path))
+    for key in list(audio):
+        if key in RELEASE_TAGS or key.startswith("musicbrainz_album"):
+            del audio[key]
+    if album_override and album_override.strip():
+        audio["album"] = [album_override.strip()]
+    audio.save()
+
+
 def correction_revision(track) -> str:
     fields = ("id", "user_id", "current_asset_id", "current_origin_id", "mbid",
               "release_id", "matched_title", "discovered_at", "operation_state", "pending_operation", "choices", "updated_at")
