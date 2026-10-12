@@ -298,7 +298,7 @@ def create_app(store=None, start_workers=True):
     def track_action(track_id: str, data: ActionInput):
         allowed = {
             "retry", "approve", "redownload", "reprocess", "retag",
-            "delete", "delete_ignore", "repair",
+            "delete", "delete_ignore", "delete_ignore_urls", "repair",
         }
         if data.mode not in allowed:
             raise ValueError("Unsupported track action")
@@ -375,6 +375,23 @@ def create_app(store=None, start_workers=True):
     @app.get("/api/ignored")
     def ignored(user_id: str):
         return store.list_ignored(user_id)
+
+    @app.post("/api/ignored/{ignored_id}/allow-recording")
+    def allow_ignored_recording(ignored_id: str, data: ActionInput):
+        result = store.allow_ignored_recording(ignored_id, data.user_id)
+        return {**result, "message": (
+            "MusicBrainz recording is allowed again; "
+            f"{result['urls_still_ignored']} source URL(s) remain ignored. "
+            "Use Retry on the failed music."
+        )}
+
+    @app.delete("/api/ignored/{ignored_id}/origins/{provider}/{media_key}")
+    def restore_ignored_origin(ignored_id: str, provider: str, media_key: str, user_id: str):
+        result = store.restore_ignored_origin(ignored_id, user_id, provider, media_key)
+        return {**result, "message": (
+            "Selected source URL can be imported again; "
+            f"{result['urls_still_ignored']} other URL(s) remain ignored."
+        )}
 
     @app.delete("/api/ignored/{ignored_id}")
     def restore_ignored(ignored_id: str, user_id: str):
