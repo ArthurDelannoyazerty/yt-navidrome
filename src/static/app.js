@@ -598,8 +598,18 @@ function renderTrack(track) {
       if (!confirm(`Delete "${track.matched_title || track.title}" for ${state.user}? It can return on the next monitored sync.`)) return;
       await action(track, "delete");
     }, "danger"),
-    button("Delete and ignore", async () => {
-      if (!confirm(`Delete and ignore "${track.matched_title || track.title}" for ${state.user}? The confirmed recording and known origins will not be imported again until restored.`)) return;
+    ...(track.origins.length === 1 ? [
+      button("Delete & ignore this URL only", async () => {
+        const fileWarning = track.current_asset_id ? " This will also delete this entry's current audio file." : "";
+        if (!confirm(`Delete the single-origin entry "${track.title}" and ignore ONLY its source URL for ${state.user}?${fileWarning} MusicBrainz recordings with the same identity remain allowed. Your online YouTube playlist is unchanged.`)) return;
+        await action(track, "delete_ignore_urls");
+      }, "danger"),
+    ] : []),
+    button(track.mbid ? "Delete & block recording + URLs" : "Delete & ignore source URLs", async () => {
+      const scope = track.mbid
+        ? `This will BLOCK MusicBrainz recording ${track.mbid} for the WHOLE ${state.user} library, even if another YouTube video matches it. Its source URLs will also be ignored.`
+        : `This entry has no confirmed MusicBrainz ID, so only its source URLs will be ignored.`;
+      if (!confirm(`Delete "${track.matched_title || track.title}"? ${scope} Use the URL-only action instead if this is merely the wrong video.`)) return;
       await action(track, "delete_ignore");
     }, "danger"),
   );
@@ -846,13 +856,37 @@ $("healthSummary").addEventListener("click", () => setTab("maintenance"));
 function renderIgnored(entry) {
   const item = node("div", null, "ignored-item");
   const head = node("div", null, "ignored-head");
-  head.append(node("strong", entry.title), button("Restore", async () => {
-    await api(`/api/ignored/${encodeURIComponent(entry.id)}?user_id=${encodeURIComponent(state.user)}`, null, "DELETE");
-    notice("Ignored music restored.");
+  head.append(node("strong", entry.title));
+  if (entry.mbid) head.append(button("Allow recording (keep URLs ignored)", async () => {
+    const user = state.user;
+    if (!confirm(`Allow MusicBrainz recording ${entry.mbid} again for ${user}? This does NOT restore its ${entry.origins.length} ignored source URL(s). Use Retry on any failed approval afterward.`)) return;
+    const result = await api(`/api/ignored/${encodeURIComponent(entry.id)}/allow-recording`, {user_id: user});
+    if (user !== state.user) return;
+    notice(result.message);
+    await loadIgnored(false);
+  }));
+  head.append(button("Restore all (identity + URLs)", async () => {
+    const user = state.user;
+    if (!confirm(`Restore all ignore rules for "${entry.title}"? The blocked MusicBrainz identity (if any) and ALL ${entry.origins.length} source URL(s) can be re-imported on the next monitored sync.`)) return;
+    await api(`/api/ignored/${encodeURIComponent(entry.id)}?user_id=${encodeURIComponent(user)}`, null, "DELETE");
+    if (user !== state.user) return;
+    notice("All ignored recording and source URL rules restored.");
     await loadIgnored(false);
   }));
   item.append(head, node("p", entry.mbid ? `MusicBrainz ${entry.mbid}` : "No confirmed MusicBrainz identity", "hint"));
-  for (const origin of entry.origins) item.append(node("small", `${origin.provider}: ${origin.title}`));
+  for (const origin of entry.origins) {
+    const source = node("div", null, "ignored-origin");
+    source.append(node("small", `${origin.provider}: ${origin.title} — ${origin.url}`));
+    source.append(button("Restore just this URL", async () => {
+      const user = state.user;
+      if (!confirm(`Allow this ${origin.provider} source URL again? ${origin.url} Other ignored URLs and any recording-wide block will remain unchanged.`)) return;
+      const result = await api(`/api/ignored/${encodeURIComponent(entry.id)}/origins/${encodeURIComponent(origin.provider)}/${encodeURIComponent(origin.media_key)}?user_id=${encodeURIComponent(user)}`, null, "DELETE");
+      if (user !== state.user) return;
+      notice(result.message);
+      await loadIgnored(false);
+    }));
+    item.append(source);
+  }
   return item;
 }
 

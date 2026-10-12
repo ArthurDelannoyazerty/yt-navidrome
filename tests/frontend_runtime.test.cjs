@@ -115,3 +115,66 @@ test('origin removal requires confirmation and is scoped to selected user/URL', 
   await assert.rejects(() => vm.runInContext('manageTrackOrigin', b.context)(track, origin, 'ignore'), /Library changed/);
   assert.equal(b.requests.length,1);
 });
+
+test('Maintenance can unblock a MusicBrainz identity without restoring ignored source URLs', async () => {
+  const b = browser(); b.app.state.user = 'admin';
+  const entry = {id:'ignore-group',title:'LORN - Full album',mbid:'420c95c6-eb2c-4d09-b60c-ba12b1cb164c',
+    origins:[{provider:'youtube',title:'Full album',media_key:'X3azfIj_JW8'}]};
+  const item = vm.runInContext('renderIgnored', b.context)(entry);
+  const buttons = item.children[0].children;
+  assert.equal(buttons[1].textContent, 'Allow recording (keep URLs ignored)');
+  assert.equal(buttons[2].textContent, 'Restore all (identity + URLs)');
+  b.context.confirm = () => false;
+  await buttons[1].listeners.click();
+  assert.equal(b.requests.length, 0);
+  b.context.confirm = () => true;
+  const pending = buttons[1].listeners.click();
+  assert.equal(b.requests[0].url, '/api/ignored/ignore-group/allow-recording');
+  assert.deepEqual(JSON.parse(b.requests[0].options.body), {user_id:'admin'});
+  b.requests[0].resolve({message:'Identity allowed; 1 source URL stays ignored'});
+  for (let i = 0; i < 12 && !b.requests[1]; i++) await Promise.resolve();
+  assert.equal(b.requests[1].url, '/api/ignored?user_id=admin');
+  b.requests[1].resolve([]);
+  await pending;
+  assert.match(b.get('notice').textContent, /Identity allowed/);
+});
+
+test('delete controls distinguish source-only ignore from recording-wide block', () => {
+  const b = browser(); b.app.state.user = 'admin';
+  const make = (mbid,asset,origins) => ({
+    id:'song',user_id:'admin',title:'Full album',matched_title:'Music',mbid,
+    current_asset_id:asset,file_path:asset ? '/library/song.opus' : null,
+    origins,playlists:[],discovered_at:'2021-01-01T00:00:00Z',
+    discovery_basis:'first_seen',health:asset?'AVAILABLE':'MISSING',
+    operation_state:'IDLE',choices:[],issue_count:0,
+  });
+  const menu = row => row.children[4].children[0].children.at(-1).children[1];
+  const detached = menu(vm.runInContext('renderTrack', b.context)(make(null,null,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true}])));
+  assert.equal(detached.children.at(-2).textContent,'Delete & ignore this URL only');
+  assert.equal(detached.children.at(-1).textContent,'Delete & ignore source URLs');
+  const available = menu(vm.runInContext('renderTrack', b.context)(make('recording-id',123,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true}])));
+  assert.equal(available.children.at(-1).textContent,'Delete & block recording + URLs');
+  assert.equal(available.children.some(child=>child.textContent==='Delete & ignore this URL only'),true);
+  const combined = menu(vm.runInContext('renderTrack', b.context)(make('recording-id',123,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true},{provider:'youtube',url:'https://youtu.be/def',downloadable:true}])));
+  assert.equal(combined.children.some(child=>child.textContent==='Delete & ignore this URL only'),false);
+});
+
+test('ignored-source restore targets only one URL without changing identity block', async () => {
+  const b = browser(); b.app.state.user = 'admin';
+  const entry = {id:'group', title:'wrong album',mbid:'420c95c6',
+    origins:[{provider:'youtube',media_key:'goodid',title:'correct song',url:'https://youtu.be/goodid'},
+      {provider:'youtube',media_key:'badid',title:'full album',url:'https://youtu.be/badid'}]};
+  const item = vm.runInContext('renderIgnored',b.context)(entry);
+  const restoreGood = item.children[2].children[1];
+  assert.equal(restoreGood.textContent, 'Restore just this URL');
+  assert.match(item.children[2].children[0].textContent, /goodid/);
+  b.context.confirm = () => true;
+  const pending = restoreGood.listeners.click();
+  assert.equal(b.requests[0].url,'/api/ignored/group/origins/youtube/goodid?user_id=admin');
+  assert.equal(b.requests[0].options.method, 'DELETE');
+  b.requests[0].resolve({message:'Selected URL restored, other source remains ignored'});
+  for (let i = 0; i < 12 && !b.requests[1]; i++) await Promise.resolve();
+  b.requests[1].resolve([]);
+  await pending;
+  assert.match(b.get('notice').textContent, /other source remains ignored/);
+});

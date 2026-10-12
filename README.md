@@ -64,10 +64,21 @@ previous confirmed identity is kept in `identity_history`, linked to the origin.
 `Delete local copy` removes the selected user's file, beets item, memberships,
 and logical track. A monitored source can add it again.
 
-`Delete and ignore` additionally creates a tombstone for the confirmed recording
-and every known origin. Known origins are skipped during later synchronization;
-a new origin that resolves to the same ignored MusicBrainz recording is also
-rejected. Ignored music can be restored from Maintenance.
+`Delete & block recording + URLs` creates a **global MusicBrainz recording**
+ignore rule for the selected library user, *plus* URL-specific ignore rules.
+It prevents approval of the same recording even from another video. Do not use
+it when you only want to remove a mistaken full-album upload.
+
+After detaching a wrong upload into a single-origin entry, use
+**Delete & ignore this URL only**. This excludes only the video and prevents
+monitored source synchronization from reimporting it; the correct recording
+MBID is still allowed. If the separated entry has its own audio, that audio is
+also deleted with that entry. In **Maintenance > Ignored music**, **Allow recording
+(keep URLs ignored)** removes an accidental MBID-wide block but preserves all
+origin-specific ignore rules. If an old global block also ignored the
+*correct* video, use **Restore just this URL** beside that specific origin,
+leaving the unwanted full-album URL ignored. **Restore all** re-enables every
+URL and may cause the unwanted video to return at the next source sync.
 
 ## Asset provenance and health
 

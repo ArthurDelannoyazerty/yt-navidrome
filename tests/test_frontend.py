@@ -38,7 +38,9 @@ def test_frontend_exposes_low_friction_navigation_and_actions():
     assert 'button("Reprocess"' in javascript
     assert 'button("Redownload"' in javascript
     assert 'button("Delete local copy"' in javascript
-    assert 'button("Delete and ignore"' in javascript
+    assert 'button("Delete & ignore this URL only"' in javascript
+    assert 'Delete & block recording + URLs' in javascript
+    assert 'Allow recording (keep URLs ignored)' in javascript
     assert 'await api("/api/integrity/run"' in javascript
 
 

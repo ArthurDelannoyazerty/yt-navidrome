@@ -147,7 +147,7 @@
       </div>
     </div>
     <div class="subpanel ignored-panel">
-      <div class="panel-heading compact"><div><h3>Ignored music</h3><p class="hint">“Delete and ignore” prevents the same confirmed recording and known origins from returning.</p></div></div>
+      <div class="panel-heading compact"><div><h3>Ignored music</h3><p class="hint">An ignored MusicBrainz recording blocks all matching uploads, while an ignored source URL blocks only that upload. Use <strong>Allow recording (keep URLs ignored)</strong> to fix an accidental recording-wide block without re-importing the wrong video.</p></div></div>
       <div id="ignored"></div>
     </div>
   </section>
@@ -220,7 +220,10 @@
       <tr><td>Detach origin (Technical details)</td><td>Split one non-active source URL into its own entry, with its playlist memberships but without copying the current audio or MusicBrainz identity.</td></tr>
       <tr><td>Remove &amp; ignore origin (Technical details)</td><td>Remove just one non-active source URL from local playlists and block its reimport. The recording and other origins remain untouched; restore this URL under Maintenance if needed. Does not edit YouTube remotely.</td></tr>
       <tr><td>Delete local copy</td><td>Remove this user's track and memberships. A monitored source may import it again.</td></tr>
-      <tr><td>Delete and ignore / Restore</td><td>Delete and block the recording and known origins. Restore removes the block; the next source sync can import it again.</td></tr>
+      <tr><td>Delete &amp; ignore this URL only</td><td>On a single-origin entry (for example after Detach), delete only that entry and ignore its upload. If it has audio, its audio is deleted too; other videos of the same MusicBrainz recording remain allowed.</td></tr>
+      <tr><td>Delete &amp; block recording + URLs</td><td>Delete the track and block the MusicBrainz recording across the user library, as well as the source URLs. Use this only when you really want to exclude that recording everywhere.</td></tr>
+      <tr><td>Allow recording (keep URLs ignored)</td><td>Maintenance recovery: unblock a MusicBrainz identity while retaining the listed URL exclusions. If the good video's URL was also blocked, choose Restore just this URL on that origin. Then Retry the failed approval.</td></tr>
+      <tr><td>Restore just this URL</td><td>Remove exactly one ignored source URL, leaving other ignored URLs and the recording-wide rule unchanged. Restore all re-enables the whole group.</td></tr>
       <tr><td>Verify library / Repair eligible tags</td><td>Audit current files, tags, hashes and beets paths without changing audio; optionally queue safe tag-only repairs across the whole library.</td></tr>
       <tr><td>Export failed report</td><td>Download a JSON report of all failures for this user, independent of search and pagination.</td></tr>
       <tr><td>Update nightly build / Roll back</td><td>Change the isolated yt-dlp runtime for future downloads. Running downloads and the API keep their current runtime.</td></tr>

@@ -805,7 +805,7 @@ class Store:
             elif mode in {"retag", "restore_source"}:
                 if track["health"] != "AVAILABLE" or not track["file_path"]:
                     raise ValueError("Metadata editing requires an available audio file")
-            elif mode not in {"delete", "delete_ignore", "comment", "ingest", "resume"}:
+            elif mode not in {"delete", "delete_ignore", "delete_ignore_urls", "comment", "ingest", "resume"}:
                 raise ValueError("Unsupported track action")
             if mode == "ingest":
                 origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
@@ -1083,32 +1083,35 @@ class Store:
             self._record_receipt_locked(con, operation_id, plan["source_track"]["user_id"], source_id, target_id, reason, receipt)
         return receipt
 
-    def create_tombstone(self, track_id: str, user: str, reason: str, *, con=None):
+    def create_tombstone(self, track_id: str, user: str, reason: str, *, con=None, include_recording=True):
         """Create recording/origin tombstones in the caller's transaction."""
         if con is None:
             with self.db() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                return self.create_tombstone(track_id, user, reason, con=connection)
+                return self.create_tombstone(track_id, user, reason, con=connection, include_recording=include_recording)
         track = con.execute("SELECT * FROM tracks WHERE id=? AND user_id=?", (track_id, user)).fetchone()
         if not track:
             raise LookupError("Track not found for this user")
         origins = list(con.execute("SELECT * FROM track_origins WHERE track_id=?", (track_id,)))
         ignored = None
-        if track["mbid"]:
+        if include_recording and track["mbid"]:
             ignored = con.execute("SELECT * FROM ignored_tracks WHERE user_id=? AND mbid=?", (user, track["mbid"])).fetchone()
-        if not ignored and origins:
+        if include_recording and not ignored and origins:
             placeholders = ",".join("?" for _ in origins)
             ignored = con.execute(
                 f"""SELECT it.* FROM ignored_tracks it JOIN ignored_origins io ON io.ignored_track_id=it.id
                     WHERE it.user_id=? AND io.provider || ':' || io.media_key IN ({placeholders}) LIMIT 1""",
                 (user, *(f"{origin['provider']}:{origin['media_key']}" for origin in origins)),
             ).fetchone()
-        ignored_id = ignored["id"] if ignored else track_id
+        # A URL-only tombstone must never acquire a recording MBID, even if
+        # the deleted track had been misidentified as a legitimate recording.
+        ignored_id = ignored["id"] if ignored else (track_id if include_recording else str(uuid.uuid4()))
         con.execute(
             """INSERT INTO ignored_tracks(id,user_id,mbid,title,created_at,reason) VALUES (?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET mbid=COALESCE(ignored_tracks.mbid,excluded.mbid),
                title=excluded.title,reason=excluded.reason""",
-            (ignored_id, user, track["mbid"], track["matched_title"] or track["title"], utcnow(), reason),
+            (ignored_id, user, track["mbid"] if include_recording else None,
+             track["matched_title"] or track["title"], utcnow(), reason),
         )
         for origin in origins:
             con.execute(
@@ -1149,6 +1152,69 @@ class Store:
         for row in rows:
             row["origins"] = grouped.get(row["id"], [])
         return rows
+
+    def allow_ignored_recording(self, ignored_id: str, user: str):
+        """Allow an MBID again but retain every URL-specific ignore in its group.
+
+        This repairs accidental global blocks without re-enabling an unwanted
+        video at the next monitored playlist sync. User-scoped and atomic.
+        """
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            entry = con.execute(
+                "SELECT id,mbid FROM ignored_tracks WHERE id=? AND user_id=?",
+                (ignored_id, user),
+            ).fetchone()
+            if not entry:
+                raise LookupError("Ignored music entry not found for this user")
+            if not entry["mbid"]:
+                raise ValueError("This entry already ignores only source URLs")
+            count = con.execute(
+                "SELECT COUNT(*) FROM ignored_origins WHERE ignored_track_id=?",
+                (ignored_id,),
+            ).fetchone()[0]
+            if count:
+                con.execute(
+                    "UPDATE ignored_tracks SET mbid=NULL,reason=? WHERE id=?",
+                    ("Recording unblocked; linked source URLs remain ignored", ignored_id),
+                )
+            else:
+                con.execute("DELETE FROM ignored_tracks WHERE id=?", (ignored_id,))
+            return {"allowed_mbid": entry["mbid"], "urls_still_ignored": count}
+
+    def restore_ignored_origin(self, ignored_id: str, user: str, provider: str, media_key: str):
+        """Restore one video URL without changing other URL or MBID ignore rules."""
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            entry = con.execute(
+                "SELECT id,mbid FROM ignored_tracks WHERE id=? AND user_id=?",
+                (ignored_id, user),
+            ).fetchone()
+            if not entry:
+                raise LookupError("Ignored music entry not found for this user")
+            removed = con.execute(
+                "DELETE FROM ignored_origins WHERE ignored_track_id=? AND user_id=? "
+                "AND provider=? AND media_key=?",
+                (ignored_id, user, provider, media_key),
+            ).rowcount
+            if not removed:
+                raise LookupError("Ignored origin URL not found for this user")
+            remaining = con.execute(
+                "SELECT COUNT(*) FROM ignored_origins WHERE ignored_track_id=?",
+                (ignored_id,),
+            ).fetchone()[0]
+            if not remaining and not entry["mbid"]:
+                con.execute("DELETE FROM ignored_tracks WHERE id=?", (ignored_id,))
+            return {"mbid_still_blocked": bool(entry["mbid"]), "urls_still_ignored": remaining}
+
+    def ignored_recording(self, user: str, mbid: str | None):
+        """Read the current MBID-only ignore status, independently of URLs."""
+        if not mbid:
+            return None
+        return self.one(
+            "SELECT id,mbid FROM ignored_tracks WHERE user_id=? AND mbid=?",
+            (user, mbid),
+        )
 
     def restore_ignored(self, ignored_id: str, user: str):
         with self.db() as con:
@@ -1193,8 +1259,22 @@ class Store:
             sources = [value[0] for value in con.execute(
                 "SELECT DISTINCT m.source_id FROM memberships m JOIN track_origins o ON o.id=m.origin_id WHERE o.track_id=?", (track_id,),
             )]
-            if action == "delete_ignore":
-                self.create_tombstone(track_id, user, "Deleted and ignored from the web UI", con=con)
+            if action in {"delete_ignore", "delete_ignore_urls"}:
+                if action == "delete_ignore_urls":
+                    origin_count = con.execute(
+                        "SELECT COUNT(*) FROM track_origins WHERE track_id=?", (track_id,),
+                    ).fetchone()[0]
+                    if origin_count != 1:
+                        raise ValueError(
+                            "Ignore URL only requires exactly one origin. "
+                            "Use Technical details to manage a specific origin of a merged track."
+                        )
+                self.create_tombstone(
+                    track_id, user,
+                    "Deleted source URL(s) only" if action == "delete_ignore_urls"
+                    else "Deleted and ignored from the web UI",
+                    con=con, include_recording=action == "delete_ignore",
+                )
             receipt = {"kind": "DELETED", "source_id": track_id, "target_id": None,
                        "track": dict(row), "paths": sorted(paths), "sources": sources}
             self._record_receipt_locked(con, operation_id, user, track_id, None, action, receipt)
