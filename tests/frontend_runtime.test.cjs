@@ -74,3 +74,44 @@ test('operation dialog remains usable if polling removed its row from the page m
   assert.equal(b.context.sent[0].user_id, 'admin');
   assert.equal(b.context.sent[1], 'redownload');
 });
+
+test('origins show isolated detach/ignore controls with a current-audio guard', async () => {
+  const b = browser(); b.app.state.user = 'admin';
+  const pending = b.app.showDetails({id: 'merged'});
+  b.requests[0].resolve({id:'merged',user_id:'admin',title:'LORN - Perfekt Dark',
+    operation_state:'IDLE',current_origin_id:'good',origins:[
+      {id:'good',provider:'youtube',title:'Song',url:'https://youtu.be/MSb_31SUEXE'},
+      {id:'bad',provider:'youtube',title:'Full album',url:'https://youtu.be/X3azfIj_JW8'}],
+    assets:[{origin_id:'good',state:'CURRENT',path:'/library/song.opus'}],identity_history:[],file_tags:{}});
+  await pending;
+  const originEntries = b.get('detailsBody').children[0].children[2].children[1].children;
+  const current = originEntries[0].children.at(-1).children;
+  const incorrect = originEntries[1].children.at(-1).children;
+  assert.equal(current[0].textContent,'Detach origin');
+  assert.equal(current[0].disabled,true);
+  assert.equal(current[1].disabled,true);
+  assert.equal(incorrect[0].disabled,false);
+  assert.equal(incorrect[1].disabled,false);
+  assert.equal(incorrect[1].textContent,'Remove & ignore origin');
+});
+
+test('origin removal requires confirmation and is scoped to selected user/URL', async () => {
+  const b = browser(); b.app.state.user = 'admin';
+  const track = {id:'merged',user_id:'admin'};
+  const origin = {id:'bad',provider:'youtube',title:'Full album'};
+  vm.runInContext('refreshTracks = async () => {};', b.context);
+  b.context.confirm = () => false;
+  await vm.runInContext('manageTrackOrigin', b.context)(track, origin, 'ignore');
+  assert.equal(b.requests.length,0);
+  b.context.confirm = () => true;
+  const pending = vm.runInContext('manageTrackOrigin', b.context)(track, origin, 'ignore');
+  assert.equal(b.requests.length,1);
+  assert.match(b.requests[0].url,/\/api\/tracks\/merged\/origins\/bad\/ignore$/);
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin'});
+  b.requests[0].resolve({message:'Origin removed and ignored',playlist_refresh_failed:[]});
+  await pending;
+  assert.equal(b.get('notice').textContent,'Origin removed and ignored');
+  b.app.state.user = 'guest';
+  await assert.rejects(() => vm.runInContext('manageTrackOrigin', b.context)(track, origin, 'ignore'), /Library changed/);
+  assert.equal(b.requests.length,1);
+});
