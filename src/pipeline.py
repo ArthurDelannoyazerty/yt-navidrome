@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from audio_tags import inspect_tags
+from source_metadata import capture_source, snapshot, source_choice, save_identification_report
 from common import (
     LIBRARY, ROOT, STATE, atomic_copy, atomic_json, atomic_text,
     discovery_comment, next_nightly, safe_name, sha256_file, utcnow,
@@ -388,8 +389,13 @@ class Pipeline:
         self.report(job)("INFO", f"Downloaded candidate from {origin['provider']} for {operation}")
         return candidate, receipt
 
-    async def _identification_choices(self, job, track, directory, candidate):
-        identified = await self.bridge(job, track, directory, "identify", path=str(candidate))
+    async def _identification_choices(self, job, track, directory, candidate, origin=None):
+        origin = origin or self.store.one(
+            "SELECT * FROM track_origins WHERE track_id=? ORDER BY id LIMIT 1", (track["id"],)
+        )
+        # The selected audio origin is the seed, never an unrelated canonical title.
+        seed = {**track, "title": origin["title"]} if origin else track
+        identified = await self.bridge(job, seed, directory, "identify", path=str(candidate))
         choices = list(identified["choices"])
         if track.get("mbid"):
             if not any(choice.get("mbid") == track["mbid"] for choice in choices):
@@ -403,8 +409,10 @@ class Pipeline:
         choices.append({
             "title": track.get("matched_title") or track["title"], "artist": "", "album": "",
             "mbid": track.get("mbid"), "similarity": 0.0,
-            "description": "Keep the currently stored/source metadata", "kind": "asis", "asis": True,
+            "description": "Keep current applied metadata (not a source reset)", "kind": "asis", "asis": True,
         })
+        if origin:
+            choices.append(source_choice(snapshot(self.store, origin)))
         return identified, choices
 
     def _select_automatic(self, action: str, track: dict, identified: dict):
@@ -427,6 +435,8 @@ class Pipeline:
     async def _apply_candidate(self, job, source_track, origin, selected, candidate,
                                receipt, action, operation_id, directory,
                                overrides=None, persisted_plan=None):
+        if selected and selected.get("kind") == "source":
+            action = "restore_source"
         plan_path = directory / "identity-plan.json"
         if persisted_plan is not None:
             plan = persisted_plan
@@ -529,6 +539,10 @@ class Pipeline:
         mode = payload.get("mode", "ingest")
         operation = payload.get("operation", str(job["id"]))
         directory = STATE / "staging" / job["target"]
+        if mode in {"spotify_link", "spotify_audio"}:
+            from spotify_library import process_link
+            await process_link(self, job, directory)
+            return
         completed = self.store.operation_receipt(operation)
         if completed:
             await self.finish_operation_receipt(job, completed, directory)
@@ -559,6 +573,14 @@ class Pipeline:
             self.store.complete_operation(track["id"], health="AVAILABLE")
             shutil.rmtree(directory, ignore_errors=True)
             return
+        if payload.get("selection_id"):
+            selection_file = directory / "reviewed-selection.json"
+            previous_selection = json.loads(selection_file.read_text()) if selection_file.exists() else {}
+            if previous_selection.get("id") != payload["selection_id"]:
+                if (directory / "apply-request.json").exists():
+                    raise ValueError("A previous metadata application needs recovery before a new selection")
+                (directory / "identity-plan.json").unlink(missing_ok=True)
+                atomic_json(selection_file, {"id": payload["selection_id"]})
         recovery = await self.recover_apply_state(job, track, directory, operation)
         if recovery:
             if recovery["completed"]:
@@ -568,10 +590,12 @@ class Pipeline:
                                         recovery["receipt"], plan.get("action") or action, operation, directory,
                                         recovery.get("overrides", {}), persisted_plan=plan)
             return
-        if mode == "retag":
+        if mode in {"retag", "restore_source"}:
             asset = self.store.current_asset(track["id"])
             if not asset or not Path(asset["path"]).is_file():
                 raise ValueError("No current audio file exists to retag")
+            if payload.get("reviewed_correction") and not await self.usable_asset(track, asset):
+                raise ValueError("Current audio changed or is outside this library; verify it before correcting metadata")
             candidate = directory / f"temp_{track['id']}.opus"
             if not candidate.is_file():
                 await asyncio.to_thread(shutil.copy2, asset["path"], candidate)
@@ -580,16 +604,18 @@ class Pipeline:
                 raise ValueError("The current audio has no origin")
             receipt = {"downloader_name": asset.get("downloader_name"), "downloader_version": asset.get("downloader_version"), "source_url": origin["url"]}
             atomic_json(directory / "download-complete.json", receipt)
-            selected = {"asis": True, "mbid": track.get("mbid")}
+            selected = payload.get("selected") if mode == "restore_source" else {"asis": True, "mbid": track.get("mbid")}
             overrides = payload.get("overrides", {})
             if overrides.get("mbid"):
                 selected = await self.metadata_for_recording(job, track, directory, overrides["mbid"])
-            await self._apply_candidate(job, track, origin, selected, candidate, receipt, "retag", operation, directory, overrides)
+            await self._apply_candidate(job, track, origin, selected, candidate, receipt, mode, operation, directory, overrides)
             return
         origin = self.store.owned("track_origins", payload["origin_id"], track["user_id"])
         if origin["track_id"] != track["id"]:
             raise ValueError("Selected origin no longer belongs to this track")
         candidate, receipt = await self._download_candidate(job, track, origin, directory, action)
+        if not (directory / "apply-request.json").exists():
+            await asyncio.to_thread(capture_source, self.store, origin, candidate)
         selected = payload.get("selected") if mode == "resume" else None
         candidate_digest = await asyncio.to_thread(sha256_file, candidate)
         review_again = mode == "resume" and (
@@ -603,7 +629,8 @@ class Pipeline:
                 (directory / name).unlink(missing_ok=True)
             self.report(job)("WARNING", "Approval no longer matches the staged audio. Fresh review is required.")
         if selected is None:
-            identified, choices = await self._identification_choices(job, track, directory, candidate)
+            identified, choices = await self._identification_choices(job, track, directory, candidate, origin)
+            save_identification_report(self.store, origin, track, identified, candidate_digest)
             selected = None if review_again else self._select_automatic(action, track, identified)
             if selected is None:
                 pending = {"action": action, "origin_id": origin["id"], "operation": operation,
@@ -611,6 +638,8 @@ class Pipeline:
                 self.store.pause_for_approval(track["id"], choices, pending, str(candidate))
                 self.report(job)("INFO", f"Metadata needs approval (beets: {identified['recommendation']})")
                 return
+        if selected and selected.get("manual"):
+            selected = await self.metadata_for_recording(job, track, directory, selected["mbid"])
         await self._apply_candidate(job, track, origin, selected, candidate, receipt, action,
                                     operation, directory, payload.get("overrides", {}))
 
@@ -637,6 +666,15 @@ class Pipeline:
         for track in tracks:
             asset = self.store.current_asset(track["id"])
             if not asset:
+                # Catalog-only sources are awaiting an audio link, not lost files.
+                if self.store.one(
+                    "SELECT 1 FROM track_origins WHERE track_id=? AND downloadable=0",
+                    (track["id"],),
+                ) and not self.store.one(
+                    "SELECT 1 FROM track_origins WHERE track_id=? AND downloadable=1",
+                    (track["id"],),
+                ):
+                    continue
                 if track["health"] == "UNAVAILABLE" and track["operation_state"] in {"QUEUED", "RUNNING", "DEFERRED", "NEEDS_APPROVAL"}:
                     continue
                 issues.append({"issue_key": f"track:{track['id']}:no-current-asset", "track_id": track["id"],

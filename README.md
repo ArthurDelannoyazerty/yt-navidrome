@@ -154,9 +154,9 @@ The committed `uv.lock` is used by both CI and Docker with `uv sync --frozen`.
 | `TZ` | `Europe/Paris` | updater timezone |
 
 The API resolver uses `playlistItems.snippet.publishedAt`, never video upload time,
-for playlist addition history. Spotify and other providers are not enabled yet;
-the origin model allows future metadata-only providers to coexist with separate
-downloadable origins.
+for playlist addition history. Spotify tracks, albums and owned/collaborative playlists are supported as
+metadata-only sources, with per-library OAuth connection and explicit links to
+separate audio origins. See [Spotify setup and workflow](docs/spotify.md).
 
 ## SQLite schema versioning
 
@@ -211,7 +211,9 @@ uv run python -m compileall -q src tools tests
 uv run pytest
 node --check src/static/app.js
 node --check src/static/ui-state.js
-node --test tests/frontend_runtime.test.cjs
+node --check src/static/spotify-ui.js
+node --check src/static/metadata-ui.js
+node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs tests/metadata_frontend.test.cjs
 ```
 
 CI runs these checks for every pull request. The container intentionally uses one
@@ -266,3 +268,33 @@ instance lock first, back up SQLite, and apply v1 changes and version atomically
 CI retains the exact source snapshot, Python JUnit results and browser-state test
 output as validation artifacts. The Python integration suite exercises real pinned
 beets and ffmpeg offline; it does not prove live external providers are available.
+
+## Spotify sources
+
+See [Spotify setup and workflow](docs/spotify.md). Configure `SPOTIFY_CLIENT_ID`
+and `SPOTIFY_REDIRECT_URI`, then connect the selected library from Sources.
+Paste Spotify track/playlist/album URLs or browse and select your playlists.
+Spotify imports metadata and exact playlist addition times, not audio streams.
+
+Review matching library recordings in bulk, or use **Link audio** to choose an
+existing confirmed track or a separate YouTube video. Unlinked entries have a
+**Spotify: needs audio link** filter; they are not marked as integrity failures.
+Automatic unreviewed Spotify-to-YouTube searching is intentionally not performed.
+Tokens remain in protected server-side files; no client secret is needed.
+
+## Correcting misidentified music
+
+Use **Search MusicBrainz** on a music row to search by song title and/or artist,
+preview a recording and release, and apply it without copying IDs or downloading
+available audio again. Search waits 500 ms after typing; all MusicBrainz traffic
+shares the application's 1.1-second server-side limiter.
+
+**More > Restore source metadata** is different from keeping current applied
+tags: it clears a bad MusicBrainz identity and restores the values retained from
+the original source. New downloads archive their pre-beets descriptive tags;
+older imports explicitly fall back to the retained provider title, without
+inventing missing album/date metadata. Both choices are distinct during approval.
+
+See [Metadata correction and recognition diagnostics](docs/metadata-corrections.md)
+for source provenance, safe replacement/splitting, API limits, and why a recording
+present on the MusicBrainz website may not be an automatic fingerprint candidate.

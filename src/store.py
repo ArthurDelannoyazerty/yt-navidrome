@@ -15,6 +15,7 @@ from typing import Any
 
 from audio_tags import REPAIRABLE_ISSUES
 from common import STATE, utcnow, user_name
+from source_metadata import SCHEMA as METADATA_SCHEMA, prepare_correction
 
 SCHEMA_VERSION = 2
 
@@ -233,7 +234,7 @@ CREATE TABLE IF NOT EXISTS quota (
 """
 
 DROP_ORDER = [
-    "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
+    "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
     "assets", "memberships", "track_origins", "tracks", "operation_receipts",
     "jobs", "sources",
     "events", "settings", "api_clock", "quota", "users",
@@ -329,7 +330,7 @@ class Store:
                 con.commit()
                 version = 2
 
-            con.executescript(SCHEMA)
+            con.executescript(SCHEMA + METADATA_SCHEMA)
             con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             con.executemany(
                 "INSERT OR IGNORE INTO users VALUES (?)",
@@ -764,8 +765,13 @@ class Store:
                 raise LookupError("Track not found for this user")
             if con.execute("SELECT 1 FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')", (track_id,)).fetchone():
                 raise ValueError("This track already has an active job")
+            if track["operation_kind"] == "SPOTIFY_LINK" and track["operation_state"] in {"QUEUED", "RUNNING", "DEFERRED"}:
+                raise ValueError("Wait for the Spotify link to finish updating this track")
             payload = dict(payload)
             mode = payload.get("mode", "retry")
+            if mode in {"restore_source", "select_recording"}:
+                payload = prepare_correction(con, track, payload)
+                mode = payload["mode"]
             if mode == "retry":
                 if track["operation_state"] != "FAILED":
                     raise ValueError("Only a failed operation can be retried")
@@ -796,10 +802,10 @@ class Store:
                     raise ValueError("Tag/loudness repair requires an available audio file")
                 if track["operation_state"] != "IDLE":
                     raise ValueError("Finish or retry the existing operation before repairing tags")
-            elif mode == "retag":
+            elif mode in {"retag", "restore_source"}:
                 if track["health"] != "AVAILABLE" or not track["file_path"]:
                     raise ValueError("Metadata editing requires an available audio file")
-            elif mode not in {"delete", "delete_ignore", "comment", "ingest"}:
+            elif mode not in {"delete", "delete_ignore", "comment", "ingest", "resume"}:
                 raise ValueError("Unsupported track action")
             if mode == "ingest":
                 origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
@@ -935,7 +941,9 @@ class Store:
                 working.update({"first_seen_at": first_seen, "playlist_discovered_at": playlist_seen,
                                 "discovered_at": playlist_seen or first_seen,
                                 "discovery_basis": "playlist_added" if playlist_seen else "first_seen"})
-            elif mbid and track["mbid"] and mbid != track["mbid"] and count > 1:
+            elif track["mbid"] and mbid != track["mbid"] and count > 1 and (
+                mbid or selected.get("kind") == "source"
+            ):
                 route = "split"
                 first_seen = origin["first_seen_at"]
                 playlist_seen = origin["playlist_discovered_at"]
@@ -1065,7 +1073,8 @@ class Store:
                  result.get("beets_id"), result.get("matched_title"), result.get("mbid"), result.get("release_id"),
                  origin_id, asset_id, now, target_id),
             )
-            con.execute("UPDATE track_origins SET availability='AVAILABLE',last_download_at=?,last_error=NULL WHERE id=?", (now, origin_id))
+            if reason not in {"retag", "restore_source"}:
+                con.execute("UPDATE track_origins SET availability='AVAILABLE',last_download_at=?,last_error=NULL WHERE id=?", (now, origin_id))
             self._insert_history_locked(con, plan, result, reason)
             orphan = source_id != target_id and not con.execute("SELECT 1 FROM track_origins WHERE track_id=?", (source_id,)).fetchone()
             receipt = {"kind": "ACTIVATED", "source_id": source_id, "target_id": target_id,
@@ -1214,6 +1223,7 @@ class Store:
             "DEFERRED": "t.operation_state='DEFERRED'", "NEEDS_APPROVAL": "t.operation_state='NEEDS_APPROVAL'",
             "FAILED": "t.operation_state='FAILED'", "ATTENTION": "(t.health='MISSING' OR t.operation_state='FAILED')",
             "UNMATCHED": "(t.mbid IS NULL OR t.mbid='')",
+            "NEEDS_AUDIO": "t.current_asset_id IS NULL AND EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.provider='spotify') AND NOT EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.downloadable=1)",
             "INTEGRITY": "EXISTS(SELECT 1 FROM integrity_issues i WHERE i.track_id=t.id AND i.resolved_at IS NULL)",
         }
         if status != "ALL":
