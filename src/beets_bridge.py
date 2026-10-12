@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from audio_tags import loudness_values, write_loudness_tags
+from source_metadata import clear_descriptive_tags
 from common import LIBRARY, ROOT, STATE, atomic_json, discovery_comment, user_name
 from http_policy import ApiDeferred, HttpPolicy
 from store import Store
@@ -57,12 +58,12 @@ class Bridge:
 
     @staticmethod
     def seed(item, title):
+        artist, delimiter, song = title.partition(" - ")
         if not item.title:
-            artist, delimiter, song = title.partition(" - ")
             item.title = song if delimiter else title
-            if delimiter and not item.artist:
-                item.artist = artist
-                item.artists = [artist]
+        if delimiter and not item.artist and item.title in {song, title}:
+            item.artist = artist
+            item.artists = [artist]
 
     def find_existing(self, track):
         from beets.dbcore.query import MatchQuery
@@ -123,6 +124,15 @@ class Bridge:
 
         item = Item.from_path(str(path))
         self.seed(item, title)
+        # Never let an embedded, previously assigned MBID short-circuit a fresh
+        # candidate search. Fingerprinting and title/artist search start anew.
+        ignored_mbid = item.mb_trackid or None
+        item.mb_trackid = ""
+        item.mb_albumid = ""
+        item.acoustid_id = ""
+        item.acoustid_fingerprint = ""
+        seed = {"title": item.title, "artist": item.artist, "length_seconds": item.length,
+                "ignored_embedded_mbid": ignored_mbid}
         task = SingletonImportTask(None, item)
         session = SimpleNamespace(config=config["import"])
         plugins.send("import_task_start", session=session, task=task)
@@ -155,6 +165,10 @@ class Bridge:
             "choices": choices,
             "automatic": recommendation == Recommendation.strong,
             "recommendation": recommendation.name,
+            "diagnostics": {"search_seed": seed,
+                            "fingerprint_generated": bool(item.get("acoustid_fingerprint")),
+                            "acoustid_id_present": bool(item.get("acoustid_id")),
+                            "candidate_count": len(choices)},
         }
 
     def raise_if_deferred(self):
@@ -280,18 +294,32 @@ class Bridge:
                 existing.add(self.lib)
             if Path(os.fsdecode(existing.path)).resolve() != Path(path).resolve():
                 raise ValueError("Beets path differs from the current asset; audit before changing tags")
-            if track.get("discovered_at"):
-                existing.comments = discovery_comment(track["discovered_at"])
-            existing.write()
+            # A discovery-only update must not rewrite unrelated tags from the
+            # beets row (including empty legacy identity/album/lyrics fields).
+            existing.comments = discovery_comment(track.get("discovered_at"))
             self.write_discovery_tags(os.fsdecode(existing.path), track.get("discovered_at"))
             existing.store()
             return self.result(existing)
 
+        source_reset = bool(selected and selected.get("kind") == "source")
+        replace_identity = bool(selected and not selected.get("asis"))
+        if replace_identity:
+            # Clear stale art, lyrics, artists and IDs on the candidate, not the
+            # still-playing active file. Reload the beets row to avoid old tags
+            # leaking back into the replacement.
+            clear_descriptive_tags(path, selected.get("source") if source_reset else None)
         item = existing or Item.from_path(str(path))
         item.path = os.fsencode(str(Path(path).resolve()))
-        self.seed(item, track["title"])
+        if replace_identity:
+            item.album_id = None
+            # Reset cached/legacy writable fields too; a read alone can leave
+            # alias/flexible tag values on a reused beets item.
+            item.clear()
+            item.read()
+        if source_reset or not replace_identity:
+            self.seed(item, selected["source"]["source_title"] if source_reset else track["title"])
         album_info = None
-        if selected and not selected.get("asis"):
+        if replace_identity and not source_reset:
             for field in (
                 "album", "albumartist", "mb_albumid", "mb_releasegroupid",
                 "mb_releasetrackid",
@@ -390,17 +418,25 @@ class Bridge:
                     False,
                 )
 
-        optional("Artwork", artwork)
-        optional("Lyrics", lambda: self.plugins["lyrics"].add_item_lyrics(item, True))
+        if not source_reset:
+            optional("Artwork", artwork)
+            optional("Lyrics", lambda: self.plugins["lyrics"].add_item_lyrics(item, True))
+        # Beets/MediaFile may emit empty identity fields while writing a reused
+        # item. A source reset has an explicit allowlist, so enforce it after the
+        # last beets write as well, then synchronize the DB from the final file.
+        if source_reset:
+            clear_descriptive_tags(final_path, selected["source"])
         # Plugins may write the file again, so force the raw compatibility tags last.
         self.write_discovery_tags(final_path, track.get("discovered_at"))
         write_loudness_tags(final_path, loudness)
+        if source_reset:
+            item.read()
         item.pipeline_complete = "yes"
         item.store()
         warnings.extend(self.http.failures)
         if not item.year:
             warnings.append("Release date is unknown; no discovery/upload date was substituted")
-        if not item.lyrics:
+        if not item.lyrics and not source_reset:
             warnings.append("No lyrics were available from the configured lyrics source")
         if not item.get("r128_track_gain") and item.get("r128_track_gain") != 0:
             warnings.append("No R128 track gain was stored; inspect ReplayGain logs")
@@ -411,7 +447,7 @@ class Bridge:
         return {
             "file_path": os.fsdecode(item.path),
             "beets_id": item.id,
-            "matched_title": f"{item.artist} - {item.title}",
+            "matched_title": f"{item.artist} - {item.title}" if item.artist else item.title,
             "mbid": item.mb_trackid or None,
             "release_id": item.mb_albumid or None,
         }
@@ -456,7 +492,8 @@ def main(request):
             raise ValueError(
                 "Specify a recording ID when assigning a release to an unmatched track"
             )
-        selected = bridge.metadata_for_recording(recording_id)
+        if not selected or selected.get("asis") or selected.get("mbid") != recording_id:
+            selected = bridge.metadata_for_recording(recording_id)
     return bridge.finalize(
         track,
         path,

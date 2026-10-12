@@ -15,7 +15,7 @@ function element(tag = 'div') {
     get childElementCount() { return this.children.length; },
   };
 }
-function browser(spotify = false) {
+function browser(spotify = false, metadata = false) {
   const nodes = new Map();
   const requests = [];
   const document = {
@@ -27,14 +27,14 @@ function browser(spotify = false) {
     querySelectorAll: () => [], addEventListener() {}, body: element(),
   };
   const context = vm.createContext({
-    document, console, Map, Set, Date, JSON, Number, String, Boolean,
+    document, console, Map, Set, Date, JSON, Number, String, Boolean, AbortController, URLSearchParams,
     IngestorUI: {RequestGate, resultsLabel},
     localStorage: {setItem() {}, getItem() { return 'admin'; }},
     window: {getSelection: () => null, addEventListener() {}},
     confirm: () => true, setTimeout, clearTimeout, setInterval() {},
     fetch: (url, options) => new Promise(resolve => {
-      requests.push({url, options, resolve: data => resolve({
-        ok: true, status: 200, json: async () => data,
+      requests.push({url, options, resolve: (data, status = 200) => resolve({
+        ok: status >= 200 && status < 300, status, json: async () => data,
       })});
     }),
   });
@@ -44,7 +44,8 @@ function browser(spotify = false) {
   vm.runInContext(source.slice(0, source.lastIndexOf('(async () => {')) +
     '\nglobalThis.app = {state, loadEvents, loadIntegrity, loadIgnored, loadSources, refreshTracks, showDetails};', context);
   if (spotify) vm.runInContext(fs.readFileSync(require.resolve('../src/static/spotify-ui.js'), 'utf8'), context);
-  return {context, nodes, requests, app: context.app, spotify: context.window.SpotifyUI, get: id => document.getElementById(id)};
+  if (metadata) vm.runInContext(fs.readFileSync(require.resolve('../src/static/metadata-ui.js'), 'utf8'), context);
+  return {metadata: context.window.MetadataUI, context, nodes, requests, app: context.app, spotify: context.window.SpotifyUI, get: id => document.getElementById(id)};
 }
 
 
