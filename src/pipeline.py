@@ -358,12 +358,11 @@ class Pipeline:
         self.store.delete_track(track_id, track["user_id"])
         shutil.rmtree(directory, ignore_errors=True)
 
-    async def process_delete(self, job, track, ignore: bool, operation: str):
+    async def process_delete(self, job, track, action: str, operation: str):
         directory = STATE / "staging" / track["id"]
-        self.store.delete_track_with_receipt(track["id"], track["user_id"], operation,
-                                             "delete_ignore" if ignore else "delete")
+        self.store.delete_track_with_receipt(track["id"], track["user_id"], operation, action)
         await self.finish_operation_receipt(job, self.store.operation_receipt(operation), directory)
-        suffix = " and ignored" if ignore else ""
+        suffix = " and ignored" if action != "delete" else ""
         display = track.get("matched_title") or track["title"]
         self.report(job)("INFO", f"Deleted{suffix}: {display}")
 
@@ -449,6 +448,12 @@ class Pipeline:
             plan = self.store.identity_plan(source_track["id"], origin["id"], selected, action)
             plan["action"] = action
             atomic_json(plan_path, {"operation": operation_id, "plan": plan})
+        # An earlier rejected attempt may have persisted identity-plan.json.
+        # Re-read the DB on EVERY attempt: selective unblocking must take effect
+        # on Retry, and a newly blocked identity must not slip through a stale plan.
+        plan["ignored"] = self.store.ignored_recording(
+            source_track["user_id"], plan.get("selected_mbid"),
+        )
         if plan["ignored"]:
             if action == "ingest":
                 self.store.ignore_identified_origin(origin["id"], plan["selected_mbid"],
@@ -549,8 +554,8 @@ class Pipeline:
             return
         track = self.store.owned("tracks", job["target"], job["user_id"])
         action = payload.get("action") or payload.get("pending_action") or mode
-        if mode in {"delete", "delete_ignore"}:
-            await self.process_delete(job, track, mode == "delete_ignore", operation)
+        if mode in {"delete", "delete_ignore", "delete_ignore_urls"}:
+            await self.process_delete(job, track, mode, operation)
             return
         self.store.set_operation(track["id"], "RUNNING", action)
         directory.mkdir(parents=True, exist_ok=True)
