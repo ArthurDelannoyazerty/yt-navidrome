@@ -136,6 +136,11 @@ def test_initial_ingest_creates_current_asset_and_completes(db, track, environme
         return candidate, receipt
 
     async def bridge(job, current, directory, mode, **kwargs):
+        if mode == "temporary":
+            temporary = environment[1] / "admin" / "Waiting for approval" / f"{track['id']}.opus"
+            temporary.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_bytes(Path(kwargs["path"]).read_bytes())
+            return {"file_path": str(temporary), "beets_id": 1}
         if mode == "identify":
             return {
                 "automatic": True,
@@ -163,6 +168,14 @@ def test_initial_ingest_creates_current_asset_and_completes(db, track, environme
     db.enqueue("track", track["id"], "admin", {"mode": "ingest", "origin_id": origin["id"]})
     job = db.claim()
     asyncio.run(pipeline.process_track(job))
+    waiting = db.one("SELECT * FROM tracks")
+    assert waiting["operation_state"] == "NEEDS_APPROVAL"
+    assert Path(waiting["file_path"]).is_file()
+    assert waiting["temporary_candidate_sha256"]
+    db.update("jobs", job["id"], state="DONE")
+    db.queue_track(track["id"], "admin", {"mode": "approve", "index": 0})
+    asyncio.run(pipeline.process_track(db.claim()))
+    assert not Path(waiting["file_path"]).exists()
     updated = db.one("SELECT * FROM tracks")
     assert updated["health"] == "AVAILABLE"
     assert updated["operation_state"] == "IDLE"
@@ -340,6 +353,11 @@ def test_metadata_deferral_reuses_downloaded_candidate(db, track, environment, m
         return candidate, receipt
 
     async def bridge(job, current, directory, mode, **kwargs):
+        if mode == "temporary":
+            temporary = environment[1] / "admin" / "Waiting for approval" / f"{track['id']}.opus"
+            temporary.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_bytes(Path(kwargs["path"]).read_bytes())
+            return {"file_path": str(temporary), "beets_id": 1}
         if mode == "identify":
             identifies.append(1)
             if len(identifies) == 1:
@@ -387,4 +405,6 @@ def test_metadata_deferral_reuses_downloaded_candidate(db, track, environment, m
     assert len(identifies) == 2
     updated = db.one("SELECT * FROM tracks WHERE id=?", (track["id"],))
     assert updated["health"] == "AVAILABLE"
-    assert final.read_bytes() == b"candidate"
+    assert updated["operation_state"] == "NEEDS_APPROVAL"
+    assert Path(updated["file_path"]).read_bytes() == b"candidate"
+    assert not final.exists()

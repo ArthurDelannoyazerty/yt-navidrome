@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 
 from audio_tags import loudness_values, write_loudness_tags
 from source_metadata import clear_descriptive_tags, clear_release_tags
-from common import LIBRARY, ROOT, STATE, atomic_json, discovery_comment, user_name
+from common import LIBRARY, ROOT, STATE, atomic_copy, atomic_json, discovery_comment, user_name
 from http_policy import ApiDeferred, HttpPolicy
 from store import Store
 
@@ -115,6 +116,46 @@ class Bridge:
                 "beets_id": item.id if item else None,
             }
         return result
+
+    def publish_temporary(self, track, path, source):
+        """Publish a listenable copy using only local tags and loudness analysis.
+
+        Keep the pristine candidate for fingerprinting and approval revalidation.
+        A stable per-track path makes interrupted publication safe to retry.
+        """
+        from beets.library import Item
+        from mutagen.oggopus import OggOpus
+
+        staged = Path(path).with_name("waiting-for-approval.opus")
+        shutil.copy2(path, staged)
+        clear_descriptive_tags(staged, source)
+        audio = OggOpus(staged)
+        audio["album"] = ["Waiting for approval"]
+        audio["albumartist"] = ["Various Artists"]
+        audio["compilation"] = ["1"]
+        # Source release dates/positions describe a different album.
+        for key in ("date", "originaldate", "tracknumber", "tracktotal", "discnumber", "disctotal"):
+            audio.pop(key, None)
+        audio.save()
+        loudness = self.measure_loudness(Item.from_path(str(staged)))
+        self.write_discovery_tags(staged, track.get("discovered_at"))
+        write_loudness_tags(staged, loudness)
+        destination = (self.directory / "Waiting for approval" / f"{track['id']}.opus").resolve()
+        if not destination.is_relative_to(self.directory):
+            raise ValueError("Temporary destination is outside this library")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        atomic_copy(staged, destination)
+        item = self.find_existing(track)
+        if item:
+            item.path = os.fsencode(destination)
+            item.read()
+        else:
+            item = Item.from_path(str(destination))
+            item.add(self.lib)
+        item.pipeline_id = track["id"]
+        item.pipeline_complete = "no"
+        item.store()
+        return self.result(item)
 
     def identify(self, path, title):
         from beets import config, plugins
@@ -540,6 +581,8 @@ def main(request):
         return {"found": False}
     if mode == "identify":
         return bridge.identify(path, track["title"])
+    if mode == "temporary":
+        return bridge.publish_temporary(track, path, request["source"])
 
     selected = request.get("selected")
     overrides = request.get("overrides", {})

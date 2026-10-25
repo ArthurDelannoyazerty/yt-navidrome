@@ -269,7 +269,7 @@ def create_app(store=None, start_workers=True):
                 failures.append(source_id)
         result["playlist_refresh_failed"] = failures
         result["message"] = (
-            "Origin detached into a separate, audio-less entry" if mode == "detach"
+            "Track separated; its audio is queued for download and review" if mode == "detach"
             else "Origin removed and ignored; remaining audio kept"
         )
         if failures:

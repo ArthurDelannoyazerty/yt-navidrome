@@ -182,7 +182,13 @@ def test_manual_approval_resolves_selected_mbid_server_side(db, track, environme
     atomic_json(directory / "identity-plan.json", {"operation": "op", "plan": {"stale": True}})
     db.pause_for_approval(track["id"], [{"title": "Bad choice"}], pending, str(candidate))
     db.queue_track(track["id"], "admin", correction(db.owned("tracks", track["id"], "admin"), "select_recording", mbid=OTHER))
-    pipeline = Pipeline(db); resolved = []
+    pipeline = Pipeline(db)
+
+    async def already_published(job, current, *args):
+        return current
+
+    monkeypatch.setattr(pipeline, "ensure_temporary_audio", already_published)
+    resolved = []
 
     async def metadata(job, track, directory, mbid):
         resolved.append(mbid); return {"mbid": mbid, "tags": {"title": "Verified"}}

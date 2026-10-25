@@ -14,6 +14,9 @@ from test_origin_unmerge import merged
 def _finish_detach(db, environment):
     track, good, bad, good_source, bad_source, audio, good_entry, bad_entry = merged(db, environment)
     result = db.manage_origin(track['id'], bad['id'], 'admin', 'detach')
+    # Finish the automatically queued import before exercising deletion.
+    db.execute('UPDATE jobs SET state="DONE" WHERE target=?', (result['new_track_id'],))
+    db.update('tracks', result['new_track_id'], operation_state='IDLE', operation_kind=None)
     # A discovery-comment refresh can be queued on the original track.
     db.execute('UPDATE jobs SET state="DONE" WHERE target=?', (track['id'],))
     db.update('tracks', track['id'], operation_state='IDLE', operation_kind=None)

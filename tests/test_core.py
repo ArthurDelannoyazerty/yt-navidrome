@@ -399,7 +399,7 @@ def test_schema_v1_upgrade_preserves_staged_approval(environment):
 
     migrated = Store(path)
     migrated.init()
-    assert migrated.one("PRAGMA user_version")["user_version"] == 2
+    assert migrated.one("PRAGMA user_version")["user_version"] == 3
     columns = {row["name"] for row in migrated.rows("PRAGMA table_info(jobs)")}
     assert {"not_before", "defer_count"} <= columns
     restored = migrated.one("SELECT * FROM tracks WHERE id=?", (track["id"],))

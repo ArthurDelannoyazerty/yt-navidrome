@@ -11,10 +11,11 @@
   <script src="/static/metadata-ui.js?v=__STATIC_VERSION__" defer></script>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 <header class="app-header">
   <div>
     <h1>Music Ingestor</h1>
-    <p>Provider-aware, user-separated music library management.</p>
+    <span class="brand-caption">Your Navidrome import desk</span>
   </div>
   <label class="user-picker">Library user<select id="user" aria-label="Library user"><option value="">Loading…</option></select></label>
 </header>
@@ -29,75 +30,77 @@
 
 <div id="notice" role="status" aria-live="polite" hidden></div>
 
-<main>
+<main id="main">
   <section class="panel" data-panel="music">
     <div class="panel-heading">
-      <div><h2>Music</h2><p class="hint">One logical recording can belong to several playlists and have several origins.</p></div>
+      <div><span class="eyebrow">LIBRARY</span><h2>Your music</h2></div>
       <div class="row">
-        <button id="retryAll" type="button" disabled>Retry all failed</button>
-         <button id="approveAll" class="secondary" type="button" disabled>Approve all</button>
-        <button id="verifyFromMusic" class="secondary">Verify library</button>
+        <details class="action-menu library-menu"><summary>Library actions</summary><div class="action-menu-items">
+          <button id="approveAll" class="secondary" type="button" disabled>Approve all</button>
+          <button id="retryAll" class="secondary" type="button" disabled>Retry all failed</button>
+          <button id="verifyFromMusic" class="secondary" type="button">Verify library</button>
+        </div></details>
+        <button id="addMusic" type="button">+ Import music</button>
       </div>
     </div>
-
-    <h3 id="libraryScope" class="scope-label">Library totals</h3>
-    <p class="hint scope-hint">Whole selected library, independent of search. Health and operation counts overlap.</p>
-    <div id="stats" class="stats"></div>
-    <button id="healthSummary" type="button" class="health-summary secondary">Library health: loading…</button>
-
+    <h3 id="libraryScope" class="sr-only">Library totals</h3>
+    <div id="stats" class="stats" role="group" aria-label="Quick filters for this library"></div>
     <div class="track-toolbar">
-      <label class="control-field">Status
+      <label class="control-field status-field">Show
         <select id="filter">
           <option value="ALL">All music</option>
-          <option value="AVAILABLE">Available</option>
+          <optgroup label="Common filters">
+          <option value="NEEDS_APPROVAL">Waiting for approval</option>
+          <option value="AVAILABLE">Playable</option>
           <option value="WORKING">Working</option>
+          <option value="ATTENTION">Needs attention</option>
+          </optgroup>
+          <optgroup label="More filters">
           <option value="QUEUED">Queued</option>
           <option value="RUNNING">Processing</option>
-          <option value="ATTENTION">Needs attention</option>
           <option value="UNMATCHED">Unmatched identity</option>
           <option value="INTEGRITY">Integrity issues</option>
           <option value="DEFERRED">Deferred retry</option>
-          <option value="NEEDS_APPROVAL">Needs approval</option>
           <option value="FAILED">Last operation failed</option>
           <option value="MISSING">Missing audio</option>
           <option value="NEEDS_AUDIO">Spotify: needs audio link</option>
           <option value="UNAVAILABLE">No audio yet</option>
+          </optgroup>
         </select>
       </label>
-      <label class="control-field">Search
-        <input id="search" type="search" placeholder="Artist or title" autocomplete="off">
+      <label class="control-field search-field">Search music
+        <input id="search" type="search" placeholder="Search by artist, song or source title" autocomplete="off">
       </label>
-      <div class="pagination" aria-label="Track pages">
+      <nav class="pagination" aria-label="Track pages, top">
         <button id="prev" class="secondary">Previous</button>
         <span id="page"></span>
         <button id="next" class="secondary">Next</button>
-      </div>
+      </nav>
     </div>
 
     <p id="resultsSummary" class="results-summary" role="status" aria-live="polite">Loading matching tracks...</p>
     <div class="table-scroll">
       <table>
-        <thead><tr><th>Music</th><th>Playlists</th><th>Discovery</th><th>Health</th><th>Actions</th></tr></thead>
+        <thead><tr><th scope="col">Track</th><th scope="col">Playlists</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
         <tbody id="tracks"></tbody>
       </table>
     </div>
+    <nav class="pagination pagination-bottom" aria-label="Track pages, bottom">
+      <button id="prevBottom" type="button" class="secondary">Previous</button>
+      <span id="pageBottom"></span>
+      <button id="nextBottom" type="button" class="secondary">Next</button>
+    </nav>
   </section>
 
   <section class="panel" data-panel="sources" hidden>
-    <div class="panel-heading"><div><h2>Sources</h2><p class="hint">Add tracks or monitored playlists. Playlist names never become album tags.</p></div><button id="syncAll" class="secondary">Sync monitored sources</button></div>
-    <div class="subpanel spotify-panel">
+    <div class="panel-heading"><div><h2>Sources</h2><p class="hint">Import a link once, or keep a playlist in sync.</p></div><button id="syncAll" class="secondary">Sync monitored sources</button></div>
+    <details class="subpanel spotify-panel"><summary>Spotify connection</summary>
       <div class="panel-heading compact"><div><h3>Spotify sources</h3><p id="spotifyStatus" class="hint">Loading Spotify connection...</p></div>
         <div class="row"><button id="spotifyConnect" type="button" class="secondary" disabled>Connect Spotify</button><button id="spotifyDisconnect" type="button" class="secondary" disabled>Disconnect</button></div>
       </div>
-      <p>Import Spotify tracks, albums or playlists. Spotify provides metadata, not downloadable audio. Reuse library recordings or explicitly supply a YouTube video for unlinked entries.</p>
+      <p class="hint">Spotify imports need a link to audio from your library or YouTube.</p>
       <div class="row"><button id="spotifyBrowse" type="button" class="secondary" disabled>Browse my playlists</button><button id="spotifyReviewMatches" type="button">Review library matches</button></div>
-      <details class="spotify-setup"><summary>Connection setup and Spotify access limits</summary>
-        <p>Create an app in the Spotify Developer Dashboard. Set <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code> in your server environment, then restart. A client secret is not required.</p>
-        <p>Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code></p>
-        <p>Use HTTPS, or HTTP with an explicit loopback IP for local development. Spotify does not accept localhost. Development-mode apps require an eligible Premium app owner and allowlisted users. Playlist contents are available only for playlists you own or collaborate on.</p>
-        <p>This is read-only access. Music Ingestor does not modify your Spotify library. Each library user connects separately; keep this administration interface behind authentication.</p>
-      </details>
-    </div>
+    </details>
     <div class="columns">
       <div class="subpanel">
         <h3>Add music</h3>
@@ -106,9 +109,8 @@
           <textarea id="urls" placeholder="YouTube video/playlist or Spotify track/playlist/album URLs" required></textarea>
           <div class="row spread"><label class="check"><input id="monitor" type="checkbox" checked> Monitor playlists periodically</label><button type="submit">Import</button></div>
         </form>
-        <hr>
-        <h3>Library users</h3>
-        <form id="userForm" class="row"><input id="newUser" aria-label="New user" placeholder="New user: letters, numbers, _ or -" maxlength="64" required><button class="secondary">Add user</button></form>
+        <details class="user-setup"><summary>Add a library user</summary>
+        <form id="userForm" class="row"><input id="newUser" aria-label="New user" placeholder="New user: letters, numbers, _ or -" maxlength="64" required><button class="secondary">Add user</button></form></details>
       </div>
       <div class="subpanel">
         <h3>Configured sources</h3>
@@ -126,6 +128,7 @@
   </section>
 
   <section class="panel" data-panel="maintenance" hidden>
+    <button id="healthSummary" type="button" class="health-summary secondary">Library health: loading…</button>
     <div class="columns">
       <div class="subpanel">
         <div class="panel-heading compact"><h3>Library integrity</h3><button id="verify" class="secondary">Verify now</button></div>
@@ -152,101 +155,91 @@
     </div>
   </section>
   <section class="panel help-panel" data-panel="help" hidden>
-    <div class="subpanel spotify-help">
-      <h3>Spotify: metadata first, audio separately</h3>
-      <div class="spotify-flow" role="group" aria-label="Spotify workflow">
-        <div><strong>1. Connect</strong><p>Read-only Spotify account per library user.</p></div>
-        <span aria-hidden="true">&#8594;</span><div><strong>2. Sync</strong><p>Track names, playlist positions and exact addition dates.</p></div>
-        <span aria-hidden="true">&#8594;</span><div><strong>3. Review links</strong><p>Reuse confirmed library audio, or select a YouTube video.</p></div>
-        <span aria-hidden="true">&#8594;</span><div><strong>4. Export</strong><p>Linked recordings appear in the generated local playlists.</p></div>
-      </div>
-      <p><strong>Needs audio link</strong> is an expected catalog-only state, not a failed download or missing file. Spotify itself is never passed to the downloader.</p>
-      <p><strong>Review library matches</strong> previews exact artist/title suggestions. <strong>Link unique matches</strong> applies your confirmation across all preview pages. Names cannot prove recording identity; ambiguous editions remain for individual review.</p>
-      <p><strong>Link audio</strong> searches your available confirmed recordings or accepts one YouTube video. YouTube imports use the existing identification, approval and loudness pipeline. Different artist/title results require explicit review. <strong>Cancel waiting link</strong> cancels only the metadata link, not an independent audio import.</p>
-      <p><strong>Browse my playlists</strong> allows multi-selection (up to 100 per import). Paste full open.spotify.com links or spotify:track/playlist/album URIs in Add music. Episodes, local Spotify files and short links are not supported.</p>
-      <p>Missing addition times remain unknown; album release dates never become discovery dates. Failed/partial snapshots retain previous memberships. Removing a Spotify source retains your audio.</p>
-    </div>
-
-    <div class="panel-heading"><div><h2>How Music Ingestor works</h2><p class="hint">From a source URL to a playable, user-separated library. No audio is re-encoded by tag repair.</p></div></div>
-    <h3>The workflow</h3>
-    <ol class="workflow" aria-label="Music ingestion workflow">
-      <li><span class="step-number">1</span><strong>Discover</strong><p>A video URL imports one video, even with a playlist parameter. Use a <code>/playlist?list=...</code> URL to import a playlist.</p></li>
-      <li><span class="step-number">2</span><strong>Download to staging</strong><p>yt-dlp creates a candidate. Quota limits, retries and a shared YouTube circuit breaker protect the providers.</p></li>
-      <li><span class="step-number">3</span><strong>Identify &amp; review</strong><p>AcoustID and MusicBrainz supply candidates. Beets' native strong matches can proceed; ambiguous or changed identities need approval.</p></li>
-      <li><span class="step-number">4</span><strong>Enrich &amp; measure</strong><p>Beets applies release metadata, artwork and lyrics. Fresh loudness and true-peak measurements become playback tags.</p></li>
-      <li><span class="step-number">5</span><strong>Activate &amp; export</strong><p>The asset is committed and playlists are rewritten. Navidrome picks up file changes on its next scan.</p></li>
+    <div class="panel-heading"><div><span class="eyebrow">QUICK GUIDE</span><h2>Import now. Organize when you’re ready.</h2></div></div>
+    <ol class="quick-start" aria-label="Music ingestion workflow">
+      <li><strong>1. Add a source</strong><p>Open Sources and paste a YouTube video or playlist. Monitor a playlist to import new additions.</p></li>
+      <li><strong>2. Listen in Navidrome</strong><p>Downloaded songs appear in <b>Waiting for approval</b> and their playlists after Navidrome scans your library.</p></li>
+      <li><strong>3. Review the metadata</strong><p>Choose a suggested match and Approve, search MusicBrainz, or keep the original source tags. The approved file replaces the temporary copy.</p></li>
     </ol>
-    <div class="help-callout"><strong>One recording, many origins.</strong> The same video in several playlists is downloaded once per library user. Different uploads identified as the same recording share a logical track. If a full-album video was incorrectly merged with a song, open <strong>More → Technical details → Origins</strong> to <strong>Detach origin</strong> into a separate music row or <strong>Remove &amp; ignore origin</strong> to keep it out of local playlists and future monitored imports. Neither action changes your YouTube playlist online. You cannot detach the origin supplying the current audio: first reprocess the track using the correct origin. Other users' libraries stay separate.</div>
+    <h3>From import to approval</h3>
+    <p class="hint">Follow the arrows to see what happens next. Labels on arrows show the action that moves a track.</p>
+    <figure class="state-diagram">
+      <svg viewBox="0 0 920 520" role="img" aria-labelledby="stateTitle stateDescription">
+        <title id="stateTitle">Track operation states and transitions</title>
+        <desc id="stateDescription">Queued moves to Processing when the worker starts. Processing moves to Waiting for approval when review is needed, or Ready when metadata application succeeds. Approve moves Waiting to Queued. A temporary provider error moves Processing to Deferred, then back to Processing automatically. Other errors move Processing to Failed; Retry returns it to Queued. Reprocess or Redownload moves Ready to Queued.</desc>
+        <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z"/></marker></defs>
+        <g class="diagram-edges" fill="none" marker-end="url(#arrow)">
+          <path d="M430 108 V190"/><path d="M335 224 H230"/>
+          <path d="M135 190 V74 H335"/><path d="M525 224 H635"/>
+          <path d="M730 258 V300 H495 V258"/>
+          <path d="M525 245 H580 V394 H635"/>
+          <path d="M825 394 H875 V74 H525"/>
+          <path d="M430 258 V410"/>
+          <path d="M335 444 H280 V116 H365 V108"/>
+        </g>
+        <g class="diagram-labels">
+          <text x="480" y="150">worker starts</text><text x="282" y="208">needs review</text>
+          <text x="235" y="62">Approve</text><text x="580" y="208">temporary error</text>
+          <text x="615" y="290">automatic retry</text><text x="621" y="340">error</text>
+          <text x="795" y="62">Retry</text><text x="484" y="350">success</text>
+          <text x="218" y="360">Reprocess /</text><text x="218" y="377">Redownload</text>
+        </g>
+        <g class="diagram-node"><rect x="335" y="40" width="190" height="68" rx="8"/><text x="430" y="69">Queued</text><text class="diagram-caption" x="430" y="90">Waiting for a worker</text></g>
+        <g class="diagram-node"><rect x="335" y="190" width="190" height="68" rx="8"/><text x="430" y="219">Processing</text><text class="diagram-caption" x="430" y="240">Download, identify or apply</text></g>
+        <g class="diagram-node diagram-waiting"><rect x="40" y="190" width="190" height="68" rx="8"/><text x="135" y="219">Waiting for approval</text><text class="diagram-caption" x="135" y="240">New audio is playable</text></g>
+        <g class="diagram-node"><rect x="635" y="190" width="190" height="68" rx="8"/><text x="730" y="219">Deferred</text><text class="diagram-caption" x="730" y="240">Retry scheduled</text></g>
+        <g class="diagram-node diagram-failed"><rect x="635" y="360" width="190" height="68" rx="8"/><text x="730" y="389">Failed</text><text class="diagram-caption" x="730" y="410">Read error, then Retry</text></g>
+        <g class="diagram-node diagram-ready"><rect x="335" y="410" width="190" height="68" rx="8"/><text x="430" y="439">Ready</text><text class="diagram-caption" x="430" y="460">No active job · IDLE</text></g>
+      </svg>
+      <figcaption>Deferred or Failed can happen during download, identification or metadata application. A failed replacement keeps the previous audio.</figcaption>
+    </figure>
+    <details class="help-detail"><summary>What do the statuses mean?</summary>
+      <p><strong>Two independent states:</strong> audio tells you whether a file is playable; the operation tells you what the app is doing.</p>
+      <dl class="help-definitions">
+        <dt>Playable / AVAILABLE</dt><dd>A local file is available, including temporary audio.</dd>
+        <dt>Missing / MISSING</dt><dd>A file expected in your library is missing. Use Redownload.</dd>
+        <dt>No audio / UNAVAILABLE</dt><dd>No file has been downloaded. Spotify-only entries need Link audio.</dd>
+        <dt>Queued / QUEUED</dt><dd>The worker will start when earlier jobs finish.</dd>
+        <dt>Processing / RUNNING</dt><dd>A download or metadata operation is running.</dd>
+        <dt>Waiting / NEEDS_APPROVAL</dt><dd>Review the suggested metadata, search for another match, or use source tags.</dd>
+        <dt>Deferred / DEFERRED</dt><dd>A provider is temporarily unavailable. Wait for the displayed retry time.</dd>
+        <dt>Failed / FAILED</dt><dd>Open the error, fix the cause if needed, then Retry.</dd>
+        <dt>Ready / IDLE</dt><dd>No operation is running. Temporary audio remains marked until its metadata is approved.</dd>
+      </dl>
+    </details>
+    <details class="help-detail"><summary>Fix a wrong match or separate different songs</summary>
+      <p>Use <strong>Review metadata</strong> to search MusicBrainz by artist and title, or choose <strong>Original source metadata</strong> to undo a wrong match.</p>
+      <p>If different uploads were merged, open <strong>Sources &amp; details → Separate track</strong> on the wrong URL. Its playlist memberships follow the new entry, its audio is queued, and the rejected match is excluded from future suggestions.</p>
+      <p>The source of the current audio is protected. First Reprocess using the correct URL, then separate the other one. <strong>Remove &amp; ignore origin</strong> instead excludes only that URL from future imports.</p>
+    </details>
+    <details class="help-detail"><summary>Button reference and bulk actions</summary>
+      <dl class="help-definitions">
+        <dt>Reprocess</dt><dd>Download and identify again. Changed identities require approval.</dd>
+        <dt>Redownload</dt><dd>Replace audio while retaining the confirmed identity. A mismatched recording is refused.</dd>
+        <dt>Approve all</dt><dd>Accept the first suggestion for every waiting track in the selected library, across all pages. Review weak matches individually.</dd>
+        <dt>Retry all failed</dt><dd>Retry failed operations across this library. Other states are unchanged.</dd>
+        <dt>Delete local copy</dt><dd>Remove the track. A monitored playlist can import it again.</dd>
+        <dt>Delete &amp; ignore URL</dt><dd>Remove the entry and prevent that upload from returning.</dd>
+        <dt>Block recording + URLs</dt><dd>Block every upload of that MusicBrainz recording for this library user. Undo in Maintenance.</dd>
+        <dt>Verify / Repair tags</dt><dd>Check files and metadata, then repair eligible tags without downloading audio again.</dd>
+      </dl>
+    </details>
+    <details class="help-detail"><summary>Spotify imports and connection setup</summary>
+      <p>Spotify supplies track names and playlists. Connect your account in Sources, then use <strong>Link audio</strong> to choose an existing recording or import a YouTube video. Spotify does not supply downloadable audio.</p>
+      <details class="spotify-setup"><summary>Connection setup and Spotify access limits</summary>
+        <p>Create an app in the Spotify Developer Dashboard. Set <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code> in your server environment, then restart. A client secret is not required.</p>
+        <p>Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code></p>
+        <p>Use HTTPS, or HTTP with an explicit loopback IP for local development. Spotify does not accept localhost. Development-mode apps require an eligible Premium app owner and allowlisted users. Playlist contents are available only for playlists you own or collaborate on.</p>
+        <p>This is read-only access. Music Ingestor does not modify your Spotify library. Each library user connects separately; keep this administration interface behind authentication.</p>
+      </details>
 
-    <h3>Two independent states</h3>
-    <p>A song can be <strong>Available</strong> while its latest redownload is <strong>Failed</strong>. Health and operation counters overlap; they must not be added together. The counters describe the entire selected library, while the results line describes the current search and filter.</p>
-    <div class="columns state-columns">
-      <section class="subpanel"><h4>Audio health</h4>
-        <div class="state-path"><span class="badge UNAVAILABLE">UNAVAILABLE</span><span aria-hidden="true">&rarr;</span><span class="badge AVAILABLE">AVAILABLE</span></div>
-        <p>Successful ingestion creates the current audio asset.</p>
-        <div class="state-path"><span class="badge AVAILABLE">AVAILABLE</span><span aria-hidden="true">&rarr;</span><span class="badge MISSING">MISSING</span></div>
-        <p>An audit finds a missing or unsafe current file.</p>
-        <div class="state-path"><span class="badge MISSING">MISSING</span><span aria-hidden="true">&rarr;</span><span class="badge AVAILABLE">AVAILABLE</span></div>
-        <p>Redownload restores audio. Tag repair cannot recreate a missing file.</p>
-      </section>
-      <section class="subpanel"><h4>Operation state machine</h4>
-        <div class="state-path"><span class="badge QUEUED">QUEUED</span><span aria-hidden="true">&rarr;</span><span class="badge RUNNING">RUNNING</span><span aria-hidden="true">&rarr;</span><span class="badge IDLE">IDLE</span></div>
-        <div class="state-branches">
-          <div><span class="badge NEEDS_APPROVAL">NEEDS APPROVAL</span><p>Review a candidate &rarr; Approve &rarr; Queued. Approval is bound to the actual staged audio.</p></div>
-          <div><span class="badge DEFERRED">DEFERRED</span><p>Temporary provider failure &rarr; wait until the shown retry time &rarr; Running automatically. Existing staged audio is reused.</p></div>
-          <div><span class="badge FAILED">FAILED</span><p>Terminal error &rarr; inspect the reason &rarr; Retry or Retry all failed &rarr; Queued.</p></div>
-        </div>
-        <p class="hint">Each branch starts at Running. Delete removes the logical track; Delete and ignore also blocks its recording and origins. Interrupted cleanup remains in the durable queue.</p>
-      </section>
-    </div>
-
-    <h3>Managing thousands of songs</h3>
-    <p>Use the clickable global counters and the <strong>Unmatched identity</strong>, <strong>Integrity issues</strong>, or <strong>Needs approval</strong> filters to focus review. Export failures for an offline report. Retry all failed queues only failed operations, keeps provider pacing, and never touches approval or deferred work.</p>
-    <p>For existing files, run <strong>Verify library</strong>, inspect the paginated issues, then use <strong>Repair eligible tags</strong>. Repair recalculates loudness and restores discovery tags without downloading, moving files or changing musical identity. Unexplained hash changes, unreadable files and unsafe paths are excluded from batch repair. Check those separately rather than treating corruption as a normal tag change.</p>
-    <div class="help-callout warning-callout"><strong>Approval is a decision, not a repair.</strong> Approve all accepts the top candidate for every waiting song in this library, including weak matches and identity changes. Review ambiguous songs individually when correct identification matters. Nothing automatically loosens beets' matching thresholds.</div>
-
-    <h3>Button reference</h3>
-    <div class="table-scroll"><table class="help-table"><thead><tr><th>Button</th><th>Effect and scope</th></tr></thead><tbody>
-      <tr><td>Import / Monitor playlists</td><td>Add sources to the selected library. Monitored sources are synchronized on schedule; playlist memberships can change without deleting retained music.</td></tr>
-      <tr><td>Sync / retry / Sync monitored sources</td><td>Refresh source metadata and memberships. Active or deferred syncs are not queued twice.</td></tr>
-      <tr><td>Remove source</td><td>Remove the source and its exported playlist; retain music files.</td></tr>
-      <tr><td>Retry / Retry all failed</td><td>Repeat the failed operation using durable receipts and staging where possible. The bulk button covers every failed track for this user, regardless of page or search.</td></tr>
-      <tr><td>Approve / Approve all</td><td>Accept a reviewed candidate, or the top candidate for all waiting tracks. A changed staged file requires fresh review.</td></tr>
-      <tr><td>Redownload</td><td>Fetch new audio from the selected origin. A confirmed recording must strongly match; otherwise the existing file is retained.</td></tr>
-      <tr><td>Reprocess</td><td>Download, identify and enrich again. A change to a confirmed identity requires approval and is recorded in history.</td></tr>
-      <tr><td>Edit metadata</td><td>Set explicit artist, title, album or MusicBrainz identifiers. An explicit identity correction can merge or split origins. Leave a field blank to preserve it.</td></tr>
-      <tr><td>Technical details</td><td>Read actual COMMENT, DESCRIPTION and loudness tags, plus origins, asset provenance and identity history.</td></tr>
-      <tr><td>Repair tags / loudness</td><td>Repair one idle, available file. No download, no identity change, no audio re-encoding. Refresh the player's library after it finishes.</td></tr>
-      <tr><td>Detach origin (Technical details)</td><td>Split one non-active source URL into its own entry, with its playlist memberships but without copying the current audio or MusicBrainz identity.</td></tr>
-      <tr><td>Remove &amp; ignore origin (Technical details)</td><td>Remove just one non-active source URL from local playlists and block its reimport. The recording and other origins remain untouched; restore this URL under Maintenance if needed. Does not edit YouTube remotely.</td></tr>
-      <tr><td>Delete local copy</td><td>Remove this user's track and memberships. A monitored source may import it again.</td></tr>
-      <tr><td>Delete &amp; ignore this URL only</td><td>On a single-origin entry (for example after Detach), delete only that entry and ignore its upload. If it has audio, its audio is deleted too; other videos of the same MusicBrainz recording remain allowed.</td></tr>
-      <tr><td>Delete &amp; block recording + URLs</td><td>Delete the track and block the MusicBrainz recording across the user library, as well as the source URLs. Use this only when you really want to exclude that recording everywhere.</td></tr>
-      <tr><td>Allow recording (keep URLs ignored)</td><td>Maintenance recovery: unblock a MusicBrainz identity while retaining the listed URL exclusions. If the good video's URL was also blocked, choose Restore just this URL on that origin. Then Retry the failed approval.</td></tr>
-      <tr><td>Restore just this URL</td><td>Remove exactly one ignored source URL, leaving other ignored URLs and the recording-wide rule unchanged. Restore all re-enables the whole group.</td></tr>
-      <tr><td>Verify library / Repair eligible tags</td><td>Audit current files, tags, hashes and beets paths without changing audio; optionally queue safe tag-only repairs across the whole library.</td></tr>
-      <tr><td>Export failed report</td><td>Download a JSON report of all failures for this user, independent of search and pagination.</td></tr>
-      <tr><td>Update nightly build / Roll back</td><td>Change the isolated yt-dlp runtime for future downloads. Running downloads and the API keep their current runtime.</td></tr>
-      <tr><td>Clear view</td><td>Clear displayed Activity messages only; server events are retained.</td></tr>
-    </tbody></table></div>
-
-    <h3>Discovery dates in Navidrome and Feishin</h3>
-    <p>The <strong>Discovery</strong> column is the source history, not the release date or Navidrome's import date. Both <code>COMMENT</code> and <code>DESCRIPTION</code> contain the exact UTC timestamp. Technical details reads these values from disk, so you can distinguish a missing tag from a client that does not display it.</p>
-    <p>Navidrome imports the comment field, but available columns depend on the client and version. Current Feishin development sources call the comment column <strong>Note</strong>; older releases and some views may not offer it. A raw-tag inspector is useful when a client has no visible comment column. This application cannot add columns to another application's UI.</p>
-
-    <h3>Loudness without modifying the audio</h3>
-    <p>ReplayGain is playback metadata, not compression or permanent normalization. In Navidrome's personal options, select <strong>ReplayGain Mode &rarr; Use Track Gain</strong> and start with <strong>PreAmp 0 dB</strong> (labels vary by version). Scan the library after repairs, then reload or requeue the song so the player receives updated gain and peak values.</p>
-    <p>Opus R128 gain uses the standard <strong>&minus;23 LUFS</strong> reference. Navidrome adds 5 dB for its ReplayGain playback reference. The ingestor also writes a measured true peak because Navidrome's web player skips gain adjustment when a peak is missing. No conflicting conventional gain tag is added, and no album gain is invented from a single song. Use Track Gain, not Album Gain, for this pipeline.</p>
-    <p>Clipping protection may reduce the boost for a very dynamic song. That is preferable to distorting the audio; perfect equal perceived loudness cannot be guaranteed without compression. Silent or invalid measurements fail rather than silently publishing misleading gain tags.</p>
-    <details><summary>Why beets has <code>auto: false</code></summary><p>The adapter explicitly runs artwork, lyrics and loudness steps after identity selection. Disabling beets' automatic import hooks prevents duplicate processing; it does not disable these features. Artwork and lyrics are best-effort external lookups. Loudness analysis is required. Additional plugins are not enabled without a clear need because they add provider traffic and failure modes.</p></details>
-    <p class="hint">Implementation references: <a href="https://docs.beets.io/en/stable/plugins/replaygain.html" target="_blank" rel="noopener noreferrer">beets ReplayGain</a>, <a href="https://github.com/navidrome/navidrome/blob/master/ui/src/utils/calculateReplayGain.js" target="_blank" rel="noopener noreferrer">Navidrome gain and peak handling</a>, <a href="https://github.com/navidrome/navidrome/blob/master/model/metadata/map_mediafile.go" target="_blank" rel="noopener noreferrer">Navidrome R128 conversion</a>, <a href="https://github.com/jeffvli/feishin/blob/development/src/renderer/components/item-list/item-table-list/default-columns.ts" target="_blank" rel="noopener noreferrer">Feishin column definitions</a>. Checked October 2026; your installed versions may differ.</p>
-  </section>
-
-  <section class="panel" data-panel="help" hidden>
-    <h3>Correct a wrong recognition</h3>
-    <p><strong>Search MusicBrainz</strong> searches recordings by title and/or artist independently of the automatic shortlist. Switch to Artists and choose Show recordings to browse an artist, then Select recording and Apply selected recording. A confirmation is required; you do not need to copy an ID.</p>
-    <p><strong>Restore source metadata</strong> is different from Keep current applied metadata. It removes a bad MusicBrainz identity and restores the retained source tags. Old imports without a raw-tag archive fall back explicitly to their retained provider title; missing album/date data is not guessed. You can also choose Use original source metadata while approving a candidate.</p>
-    <p>The correction dialog shows the latest recorded identification inputs and shortlist. Old imports have no retrospectively reconstructed report. Reprocess downloads fresh source audio and records new evidence. Direct corrections use the existing audio or pending candidate.</p>
+    </details>
+    <details class="help-detail"><summary>Playback, discovery dates and administration</summary>
+      <p>Navidrome sees changes on its next library scan. Temporary songs use the album <strong>Waiting for approval</strong>; approval moves them to their chosen album and updates exported playlists.</p>
+      <p>Discovery dates come from playlist additions or the first time a track was seen. They are saved in COMMENT and DESCRIPTION, separately from release dates.</p>
+      <p>Enable track ReplayGain in your player to use the measured loudness tags. Tag repair does not re-encode audio.</p>
+      <p>Each library user has separate files and playlists. These folders are not authentication: keep this administration app behind an authenticated reverse proxy.</p>
+    </details>
   </section>
 </main>
 
@@ -305,7 +298,7 @@
     <form id="spotifyAudioForm"><label>Single YouTube video URL<input id="spotifyAudioUrl" type="url" required maxlength="2048" placeholder="https://www.youtube.com/watch?v=..."></label><button type="submit">Import audio and link</button></form>
   </details>
 </dialog>
-<footer>Local administration interface. User folders are not authentication; keep this application behind your authenticated reverse proxy.</footer>
+
 <dialog id="metadataDialog" class="metadata-dialog" aria-labelledby="metadataHeading">
   <div class="panel-heading compact"><h2 id="metadataHeading">Correct music metadata</h2><button id="metadataClose" type="button" class="secondary">Close</button></div>
   <p id="metadataCurrent" class="dialog-track"></p><p id="metadataOrigin" class="hint"></p>
@@ -321,7 +314,7 @@
       </div>
       <div class="row"><button type="submit">Search now</button><button id="mbUseSource" type="button" class="secondary">Use source title</button></div>
     </form>
-    <p class="hint">Search starts 500 ms after typing stops. MusicBrainz requests share a server-wide limit of one request every 1.1 seconds with the ingestion worker. Search relevance is not audio-match confidence.</p>
+
     <p id="mbStatus" role="status" aria-live="polite"></p>
     <div id="mbResults" class="mb-results"></div>
     <div class="pagination"><button id="mbPrev" type="button" class="secondary" disabled>Previous</button><span id="mbPage"></span><button id="mbNext" type="button" class="secondary" disabled>Next</button></div>

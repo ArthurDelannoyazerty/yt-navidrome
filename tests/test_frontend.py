@@ -20,13 +20,12 @@ def test_frontend_dom_contract_and_toolbar_layout():
     assert "Stored server logs are retained" in html
     assert "onclick=" not in html
 
-    # Search and filter share one equal-width grid definition and control height.
-    assert (
-        "grid-template-columns:minmax(220px,1fr) minmax(220px,1fr) auto"
-        in css
-    )
-    assert ".track-toolbar .control-field input,.track-toolbar .control-field select{height:42px" in css
-    assert "margin-bottom:0" in css
+    # Both paging landmarks are available and labelled independently.
+    for target in ("prevBottom", "nextBottom", "pageBottom"):
+        assert f'id="{target}"' in html
+    assert 'aria-label="Track pages, top"' in html
+    assert 'aria-label="Track pages, bottom"' in html
+    assert 'scope="col"' in html
 
 
 def test_frontend_exposes_low_friction_navigation_and_actions():
@@ -54,13 +53,13 @@ def test_keyed_dom_replacement_keeps_a_live_insert_cursor():
 def test_music_table_keeps_origin_urls_visible():
     javascript = (ROOT / "src/static/app.js").read_text()
     css = (ROOT / "src/static/style.css").read_text()
-    assert 'const originList = node("div", null, "origin-links");' in javascript
+    assert 'const originList = node("details", null, "origin-links");' in javascript
     assert 'node("a", origin.url, "origin-url")' in javascript
     assert 'link.target = "_blank";' in javascript
     assert 'link.rel = "noopener noreferrer";' in javascript
     # Origin links are rendered in renderTrack before the approval/action controls.
-    assert javascript.index('const originList = node("div", null, "origin-links");') < javascript.index('if (track.operation_state === "NEEDS_APPROVAL")')
-    assert ".origin-links{" in css and ".origin-url{" in css
+    assert javascript.index('const originList = node("details", null, "origin-links");') < javascript.index('if (track.operation_state === "NEEDS_APPROVAL")')
+    assert ".origin-links {" in css and ".origin-url {" in css
 
 
 
@@ -70,10 +69,8 @@ def test_frontend_exposes_deferred_retry_state():
     css = (ROOT / "src/static/style.css").read_text()
     assert '<option value="DEFERRED">Deferred retry</option>' in html
     assert '["QUEUED", "RUNNING", "DEFERRED"]' in javascript
-    assert '["Deferred", stats.deferred, "DEFERRED"]' in javascript
-    assert '["Processing", stats.running, "RUNNING"]' in javascript
     assert "Retry after" in javascript
-    assert ".NEEDS_APPROVAL,.UNAVAILABLE,.DEFERRED" in css
+    assert ".NEEDS_APPROVAL, .UNAVAILABLE, .DEFERRED" in css
 
 
 
@@ -98,6 +95,6 @@ def test_help_and_bulk_maintenance_have_accessible_dom_targets():
     assert 'aria-label="Music ingestion workflow"' in html
     assert "Two independent states" in html
     assert "Button reference" in html
-    assert "Why beets has" in html
-    assert "No conflicting conventional gain tag" in html
+    assert 'aria-labelledby="stateTitle stateDescription"' in html
+    assert "Waiting for approval" in html
     assert html.index('/static/ui-state.js?v=') < html.index('/static/app.js?v=')
