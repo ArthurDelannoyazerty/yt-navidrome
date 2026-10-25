@@ -395,6 +395,15 @@ class Pipeline:
         # The selected audio origin is the seed, never an unrelated canonical title.
         seed = {**track, "title": origin["title"]} if origin else track
         identified = await self.bridge(job, seed, directory, "identify", path=str(candidate))
+        rejected = {row["mbid"] for row in self.store.rows(
+            "SELECT mbid FROM origin_identity_rejections WHERE origin_id=?", (origin["id"],)
+        )} if origin else set()
+        rejected_top = bool(identified["choices"] and identified["choices"][0].get("mbid") in rejected)
+        identified = {**identified, "choices": [choice for choice in identified["choices"] if choice.get("mbid") not in rejected]}
+        if rejected_top:
+            # Separating an upload is an explicit rejection of its old match.
+            # Never promote the next candidate to an automatic strong match.
+            identified["automatic"] = False
         choices = list(identified["choices"])
         if track.get("mbid"):
             if not any(choice.get("mbid") == track["mbid"] for choice in choices):
@@ -405,16 +414,19 @@ class Pipeline:
                     raise
                 except Exception as exc:
                     self.report(job)("WARNING", f"Could not load current identity metadata: {exc}")
-        choices.append({
-            "title": track.get("matched_title") or track["title"], "artist": "", "album": "",
-            "mbid": track.get("mbid"), "similarity": 0.0,
-            "description": "Keep current applied metadata (not a source reset)", "kind": "asis", "asis": True,
-        })
+        if track.get("current_asset_id") and not track.get("temporary_candidate_sha256"):
+            choices.append({
+                "title": track.get("matched_title") or track["title"], "artist": "", "album": "",
+                "mbid": track.get("mbid"), "similarity": 0.0,
+                "description": "Keep current applied metadata (not a source reset)", "kind": "asis", "asis": True,
+            })
         if origin:
             choices.append(source_choice(snapshot(self.store, origin)))
         return identified, choices
 
     def _select_automatic(self, action: str, track: dict, identified: dict):
+        if action == "ingest" or track.get("temporary_candidate_sha256"):
+            return None
         choices = identified["choices"]
         top = choices[0] if choices else None
         if action == "redownload" and track.get("mbid"):
@@ -431,9 +443,39 @@ class Pipeline:
             return top
         return None
 
+    async def ensure_temporary_audio(self, job, track, origin, candidate, receipt, directory):
+        if track.get("current_asset_id") and not track.get("temporary_candidate_sha256"):
+            return track
+        if track.get("mbid"):
+            return track
+        digest = await asyncio.to_thread(sha256_file, candidate)
+        asset = self.store.current_asset(track["id"])
+        if (track.get("temporary_candidate_sha256") != digest
+                or track.get("current_origin_id") != origin["id"]
+                or not await self.usable_asset(track, asset)):
+            result = await self.bridge(job, track, directory, "temporary", path=str(candidate),
+                                       source=snapshot(self.store, origin))
+            final = Path(result["file_path"]).resolve()
+            root = (LIBRARY / track["user_id"]).resolve()
+            if not final.is_relative_to(root) or not final.is_file():
+                raise ValueError("Invalid temporary audio destination")
+            stat = final.stat()
+            self.store.commit_temporary_audio(track["id"], origin["id"], result, {
+                **receipt, "path": str(final), "sha256": await asyncio.to_thread(sha256_file, final),
+                "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+            }, digest)
+        # Always retry exports, including after a crash following the DB commit.
+        await self.rewrite_track_playlists(track["id"])
+        return self.store.owned("tracks", track["id"], track["user_id"])
+
     async def _apply_candidate(self, job, source_track, origin, selected, candidate,
                                receipt, action, operation_id, directory,
                                overrides=None, persisted_plan=None):
+        # Old approval lists offered "keep current/source tags" before there
+        # was a temporary beets item. Do not accidentally approve its placeholder
+        # album when resuming such a list after an upgrade.
+        if selected and selected.get("asis") and source_track.get("temporary_candidate_sha256"):
+            selected = source_choice(snapshot(self.store, origin))
         if selected and selected.get("kind") == "source":
             action = "restore_source"
         plan_path = directory / "identity-plan.json"
@@ -455,7 +497,7 @@ class Pipeline:
             source_track["user_id"], plan.get("selected_mbid"),
         )
         if plan["ignored"]:
-            if action == "ingest":
+            if action == "ingest" and not source_track.get("current_asset_id"):
                 self.store.ignore_identified_origin(origin["id"], plan["selected_mbid"],
                                                      selected.get("title") or source_track["title"], operation_id)
                 shutil.rmtree(directory, ignore_errors=True)
@@ -553,6 +595,16 @@ class Pipeline:
             await self.finish_operation_receipt(job, completed, directory)
             return
         track = self.store.owned("tracks", job["target"], job["user_id"])
+        if mode == "publish_waiting":
+            pending = json.loads(track["pending_operation"] or "{}")
+            origin = self.store.owned("track_origins", pending["origin_id"], track["user_id"])
+            candidate = Path(track["temp_path"])
+            receipt_file = directory / "download-complete.json"
+            receipt = json.loads(receipt_file.read_text()) if receipt_file.exists() else {"source_url": origin["url"]}
+            await asyncio.to_thread(capture_source, self.store, origin, candidate)
+            await self.ensure_temporary_audio(job, track, origin, candidate, receipt, directory)
+            self.store.pause_for_approval(track["id"], json.loads(track["choices"]), pending, str(candidate))
+            return
         action = payload.get("action") or payload.get("pending_action") or mode
         if mode in {"delete", "delete_ignore", "delete_ignore_urls"}:
             await self.process_delete(job, track, mode, operation)
@@ -621,6 +673,7 @@ class Pipeline:
         candidate, receipt = await self._download_candidate(job, track, origin, directory, action)
         if not (directory / "apply-request.json").exists():
             await asyncio.to_thread(capture_source, self.store, origin, candidate)
+        track = await self.ensure_temporary_audio(job, track, origin, candidate, receipt, directory)
         selected = payload.get("selected") if mode == "resume" else None
         candidate_digest = await asyncio.to_thread(sha256_file, candidate)
         review_again = mode == "resume" and (

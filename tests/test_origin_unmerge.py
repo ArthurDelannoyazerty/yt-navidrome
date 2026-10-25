@@ -161,3 +161,47 @@ def test_ignore_is_transactional_on_tombstone_insert_failure(db, environment):
         db.manage_origin(track['id'], bad['id'], 'admin', 'ignore')
     assert len(db.origins_for_track(track['id'])) == 2
     assert db.one('SELECT COUNT(*) AS n FROM memberships')['n'] == 2
+
+
+def test_separation_queues_audio_and_does_not_suggest_rejected_identity(db, environment, monkeypatch):
+    track, good, bad, good_source, bad_source, audio, good_entry, bad_entry = merged(db, environment)
+    result = db.manage_origin(track['id'], bad['id'], 'admin', 'detach')
+    separated = db.owned('tracks', result['new_track_id'], 'admin')
+    assert separated['operation_state'] == 'QUEUED'
+    assert db.one("SELECT 1 FROM jobs WHERE target=? AND state='PENDING'", (separated['id'],))
+    assert db.one('SELECT mbid FROM origin_identity_rejections WHERE origin_id=?', (bad['id'],))['mbid'] == track['mbid']
+    db.apply_snapshot(bad_source, Snapshot('Bad source', [bad_entry]))
+    assert db.owned('track_origins', bad['id'], 'admin')['track_id'] == separated['id']
+    pipeline = Pipeline(db)
+
+    async def identify(*args, **kwargs):
+        return {'automatic': True, 'recommendation': 'strong', 'choices': [
+            {'mbid': track['mbid'], 'title': 'Wrong match'},
+            {'mbid': '22222222-2222-4222-8222-222222222222', 'title': 'Another match'},
+        ]}
+
+    monkeypatch.setattr(pipeline, 'bridge', identify)
+    identified, choices = asyncio.run(pipeline._identification_choices(
+        {'user_id': 'admin', 'target': separated['id']}, separated, environment[0], audio, bad,
+    ))
+    assert not identified['automatic']
+    assert all(choice.get('mbid') != track['mbid'] for choice in choices)
+    assert db.one('SELECT COUNT(*) AS n FROM memberships')['n'] == 2
+    assert db.current_asset(track['id'])['origin_id'] == good['id']
+    assert not db.rows('PRAGMA foreign_key_check')
+    assert db.one('PRAGMA integrity_check')['integrity_check'] == 'ok'
+
+
+def test_separation_rolls_back_if_queueing_fails(db, environment, monkeypatch):
+    track, good, bad, *rest = merged(db, environment)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('queue unavailable')
+
+    monkeypatch.setattr(db, 'enqueue', fail)
+    with pytest.raises(RuntimeError, match='queue unavailable'):
+        db.manage_origin(track['id'], bad['id'], 'admin', 'detach')
+    assert db.owned('track_origins', bad['id'], 'admin')['track_id'] == track['id']
+    assert not db.rows('SELECT * FROM origin_identity_rejections')
+    assert db.one('SELECT COUNT(*) AS n FROM tracks')['n'] == 1
+    assert not db.rows('PRAGMA foreign_key_check')

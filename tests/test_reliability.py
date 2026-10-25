@@ -118,6 +118,12 @@ def test_missing_canonical_asset_uses_new_candidate(db, track, environment, monk
 @pytest.mark.parametrize("binding", ["missing", "changed", "redownloaded", "same"])
 def test_approval_is_bound_to_candidate_bytes(db, track, environment, monkeypatch, binding):
     pipeline = Pipeline(db)
+
+    async def already_published(job, current, *args):
+        return current
+
+    monkeypatch.setattr(pipeline, "ensure_temporary_audio", already_published)
+
     origin = db.origins_for_track(track["id"])[0]
     directory = environment[0] / "staging" / track["id"]
     directory.mkdir(parents=True)
@@ -248,11 +254,11 @@ def test_migration_ddl_and_version_roll_back_together(db, monkeypatch, after_fir
     assert "not_before" not in {row["name"] for row in db.rows("PRAGMA table_info(jobs)")}
     monkeypatch.setattr(db, "_migrate_v1", original)
     db.init()
-    assert db.one("PRAGMA user_version")["user_version"] == 2
+    assert db.one("PRAGMA user_version")["user_version"] == 3
 
 
 def test_migration_recovers_an_old_partial_alter(db):
     make_v1(db, partial=True)
     db.init()
     assert {"defer_count", "not_before"} <= {row["name"] for row in db.rows("PRAGMA table_info(jobs)")}
-    assert db.one("PRAGMA user_version")["user_version"] == 2
+    assert db.one("PRAGMA user_version")["user_version"] == 3

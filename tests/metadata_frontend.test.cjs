@@ -129,12 +129,12 @@ test('adding correction controls preserves per-action eligibility', () => {
   let buttons = make('UNAVAILABLE', 'NEEDS_APPROVAL');
   assert.equal(buttons.get('Restore source metadata').disabled, false);
   assert.equal(buttons.get('Edit metadata').disabled, true);
-  assert.equal(buttons.get('Technical details').disabled, false);
+  assert.equal(buttons.get('Sources & details').disabled, false);
   assert.equal(buttons.get('Repair tags / loudness').disabled, true);
   buttons = make('AVAILABLE', 'RUNNING');
   assert.equal(buttons.get('Restore source metadata').disabled, true);
   assert.equal(buttons.get('Edit metadata').disabled, true);
-  assert.equal(buttons.get('Technical details').disabled, false);
+  assert.equal(buttons.get('Sources & details').disabled, false);
   assert.equal(buttons.get('Delete local copy').disabled, true);
   buttons = make('AVAILABLE', 'IDLE');
   assert.equal(buttons.get('Repair tags / loudness').disabled, false);

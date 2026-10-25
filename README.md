@@ -4,6 +4,26 @@ Self-hosted, provider-aware music ingestion for a user-separated Navidrome libra
 FastAPI, SQLite, beets 2.14.1, and an isolated yt-dlp runtime are used throughout.
 The administration interface must remain behind an authenticated reverse proxy.
 
+## Listen before approving metadata
+
+Every new audio download is published immediately to
+`<library>/<user>/Waiting for approval/<track-id>.opus`, with **Waiting for approval**
+as the album and **Various Artists** as the album artist. Source artist/title,
+discovery tags and measured loudness are retained. Navidrome can play it and its
+exported YouTube playlists after the next scan, even while MusicBrainz is offline.
+Spotify-only entries still require an explicit audio link; Spotify supplies no audio.
+
+New imports require metadata approval, including strong automatic matches. Use
+**Approve**, **Review metadata**, or the original source tags. Approval replaces
+the temporary copy, updates the playlist paths, and removes the temporary file.
+The original staged download stays unchanged for identification and approval
+revalidation. Existing approved audio remains active during reprocessing.
+
+On startup, candidates awaiting approval from older versions are queued for
+publication without redownloading or replacing their choices. No live library
+files are reclassified during the schema upgrade. Temporary publication and
+playlist export can be retried after an interruption.
+
 ## Core model
 
 The application separates four concepts:
@@ -104,17 +124,18 @@ not silently delete or repair music.
 The single-page interface is split into five tabs:
 
 - **Music** — search, status filter, pagination, health, Reprocess/Redownload, and a
-  compact More menu for metadata, details, deletion, and ignore;
+  compact More menu for sources, reprocessing, deletion, and ignore;
 - **Sources** — URL ingestion and monitored playlists;
 - **Activity** — persistent server events plus a `Clear view` button that only
   clears the browser display;
 - **Maintenance** — paginated integrity issues, optional batch tag/loudness repair,
   failed-operation export, ignored music, and downloader updates;
-- **Help** — illustrated workflow, separate health/operation state diagrams,
-  button reference, playback settings, and large-library guidance.
+- **Help** — a three-step introduction, an operation state diagram with action-labelled
+  transitions, and expandable guidance for corrections, playback and administration.
 
 Search is server-side and matches source titles and identified artist/title.
-Pagination is applied after filtering/search and uses 50 rows per page.
+Pagination is applied after filtering/search and uses 50 rows per page. Previous/Next
+controls appear above and below the results; mobile layouts use stacked track rows.
 
 ## Start with Docker Compose
 
@@ -171,14 +192,18 @@ separate audio origins. See [Spotify setup and workflow](docs/spotify.md).
 
 ## SQLite schema versioning
 
-The database uses `PRAGMA user_version`. Fresh installations create schema v2.
+The database uses `PRAGMA user_version`. Fresh installations create schema v3.
 An unversioned database containing data is refused rather than silently changed.
 
-Schema v1 upgrades automatically to v2 in place. Before the migration changes the
+Schema v1 upgrades automatically through v2 to v3 in place. Before the migration changes the
 durable job queue, it creates a consistent backup under `state/backups/`. The v2
 migration adds deferred-job scheduling and also repairs approval candidates that
 the old monitored-source resync bug may have changed back to `QUEUED`, provided
 their staged audio still exists.
+
+The v2 → v3 migration backs up SQLite before adding a temporary-candidate digest.
+The new origin identity rejection table remembers matches rejected by separating
+an origin. Existing tracks, assets, memberships and confirmed identities are retained.
 
 Future schema upgrades follow the same pattern:
 
@@ -234,12 +259,14 @@ Uvicorn worker because the durable SQLite job worker is single-instance.
 
 A confirmed recording can have several YouTube origins, but a full-album upload
 might have been incorrectly approved as the same song. In **Music → More →
-Technical details → Origins**, choose the *specific incorrect URL*:
+Sources & details → Origins**, choose the *specific incorrect URL*:
 
-- **Detach origin** creates a separate logical track without claiming that it
-  already has the existing recording's audio or MusicBrainz identity. Its playlist
-  membership stays attached to the new row. You may then review/reprocess or
-  delete that independent entry.
+- **Separate track** creates a separate logical track without copying the existing
+  recording's audio or MusicBrainz identity. Its playlist memberships follow the
+  new row, and its own audio is queued for download into **Waiting for approval**.
+  The rejected identity is excluded from subsequent automatic suggestions, so a
+  sync or reprocess cannot silently undo the separation. An explicit MusicBrainz
+  search can still select that identity if the separation was a mistake.
 - **Remove & ignore origin** removes only that URL from locally generated
   playlists, retains the good track/audio/remaining origins, and records an
   origin-only ignore rule so monitored sync does not re-add it. It is reversible

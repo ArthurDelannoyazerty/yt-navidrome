@@ -182,6 +182,7 @@ function setTab(name) {
   state.tab = name;
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("active", tab.dataset.tab === name);
+    tab.setAttribute("aria-current", tab.dataset.tab === name ? "page" : "false");
   }
   for (const panel of document.querySelectorAll("[data-panel]")) {
     panel.hidden = panel.dataset.panel !== name;
@@ -399,7 +400,7 @@ async function manageTrackOrigin(track, origin, mode) {
   const user = state.user;
   if (track.user_id !== user) throw new Error("Library changed; reopen the details dialog.");
   const description = mode === "detach"
-    ? `Detach the ${origin.provider} origin "${origin.title}" from this recording? Its playlist memberships remain linked to a NEW entry without audio. The existing recording and its audio stay untouched.`
+    ? `Separate "${origin.title}" into its own track? Its playlists follow it, and its audio will be downloaded for review. The existing audio is kept.`
     : `Remove and ignore only the ${origin.provider} origin "${origin.title}"? It will disappear from local exported playlists and will NOT be imported again on monitored sync until restored in Maintenance. The online YouTube playlist is NOT changed.`;
   if (!confirm(description)) return;
   const response = await api(
@@ -431,7 +432,7 @@ async function showDetails(track) {
     if (currentAudio) entry.append(node("small", "Current audio source — reprocess from another origin before detaching", "hint"));
     if (origin.last_error) entry.append(node("div", origin.last_error, "error-text"));
     const actions = node("div", null, "source-buttons origin-buttons");
-    const detached = button("Detach origin", () => manageTrackOrigin(details, origin, "detach"));
+    const detached = button("Separate track", () => manageTrackOrigin(details, origin, "detach"));
     const ignored = button("Remove & ignore origin", () => manageTrackOrigin(details, origin, "ignore"), "danger");
     const unavailable = details.origins.length < 2 || details.operation_state !== "IDLE" || currentAudio;
     detached.disabled = ignored.disabled = unavailable;
@@ -503,16 +504,13 @@ function renderTrack(track) {
   const row = node("tr");
   const music = node("td");
   const playlists = node("td");
-  const discovery = node("td");
   const health = node("td");
   const actions = node("td");
 
   music.append(node("div", track.matched_title || track.title, "metadata"));
   if (track.matched_title && track.matched_title !== track.title) music.append(node("div", track.title, "source-title"));
-  if (track.mbid) music.append(musicbrainzLink("recording", track.mbid));
-  if (track.release_id) music.append(node("br"), musicbrainzLink("release", track.release_id));
-
-  const originList = node("div", null, "origin-links");
+  const originList = node("details", null, "origin-links");
+  originList.append(node("summary", `${track.origins.length} source${track.origins.length === 1 ? "" : "s"}`));
   for (const origin of track.origins) {
     const line = node("div", null, "origin-line");
     line.append(node("span", `${origin.provider}: `, "origin-provider"));
@@ -538,11 +536,16 @@ function renderTrack(track) {
     }
   } else playlists.textContent = "No playlist";
 
-  discovery.append(node("div", time(track.discovered_at)), node("small", track.discovery_basis));
-  health.append(badge(track.health));
-  if (!track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable)) health.append(node("div", "Spotify metadata: needs audio link", "hint"));
-  if (track.operation_state !== "IDLE") health.append(badge(track.operation_state));
-  if (track.operation_kind) health.append(node("div", track.operation_kind, "hint"));
+  const labels = {AVAILABLE: "Playable", MISSING: "Missing audio", UNAVAILABLE: "No audio yet",
+    QUEUED: "Queued", RUNNING: "Processing", NEEDS_APPROVAL: "Waiting for approval",
+    DEFERRED: "Retry scheduled", FAILED: "Failed", IDLE: "Ready"};
+  const status = track.operation_state === "IDLE" ? track.health : track.operation_state;
+  const stateBadge = badge(status);
+  stateBadge.textContent = labels[status] || status;
+  health.append(stateBadge);
+  if (track.temporary_candidate_sha256) health.append(node("small", "Playable · temporary album", "availability"));
+  else if (track.health === "AVAILABLE" && status !== "AVAILABLE") health.append(node("small", "Current audio is playable", "availability"));
+  if (!track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable)) stateBadge.textContent = "Needs audio link";
   if (track.operation_state === "DEFERRED" && track.retry_at) {
     health.append(node("div", `Retry after ${new Date(track.retry_at * 1000).toLocaleString()}`, "hint"));
   }
@@ -560,6 +563,7 @@ function renderTrack(track) {
   const busy = ["QUEUED", "RUNNING", "DEFERRED"].includes(track.operation_state);
   if (track.operation_state === "NEEDS_APPROVAL") {
     const select = node("select", null, "approval");
+    select.setAttribute("aria-label", `Metadata suggestion for ${track.matched_title || track.title}`);
     track.choices.forEach((choice, index) => {
       const option = node("option", `${choice.kind === "source" ? "Source" : choice.kind === "asis" ? "Current tags" : `${choice.similarity}%`} | ${choice.artist ? `${choice.artist} - ` : ""}${choice.title}${choice.description ? ` | ${choice.description}` : ""}`);
       option.value = String(index);
@@ -567,16 +571,14 @@ function renderTrack(track) {
     });
     select.value = state.approvals.get(track.id) ?? "0";
     select.addEventListener("change", () => state.approvals.set(track.id, select.value));
-    controls.append(select, button("Approve", () => action(track, "approve", {index: Number(select.value)})));
-  } else {
-    const reprocess = button("Reprocess", () => openOperation(track, "reprocess"));
-    const redownload = button("Redownload", () => openOperation(track, "redownload"));
-    reprocess.disabled = busy || !["AVAILABLE", "MISSING"].includes(track.health) || !track.origins.some(origin => origin.downloadable);
-    redownload.disabled = busy || !["AVAILABLE", "MISSING"].includes(track.health) || !track.origins.some(origin => origin.downloadable);
-    controls.append(reprocess, redownload);
+    controls.append(select, button("Approve", () => action(track, "approve", {index: Number(select.value)}), "primary"));
   }
   if (window.SpotifyUI) controls.append(...window.SpotifyUI.controls(track));
-  if (window.MetadataUI) controls.append(button("Search MusicBrainz", () => window.MetadataUI.open(track)));
+  if (window.MetadataUI) {
+    const review = button("Review metadata", () => window.MetadataUI.open(track));
+    review.disabled = busy;
+    controls.append(review);
+  }
   if (track.operation_state === "FAILED") controls.append(button("Retry", () => action(track, "retry")));
 
   const menu = node("details", null, "action-menu");
@@ -586,7 +588,7 @@ function renderTrack(track) {
   restoreSource.disabled = busy || !window.MetadataUI || !(track.health === "AVAILABLE" || track.operation_state === "NEEDS_APPROVAL");
   const editMetadata = button("Edit metadata", () => showEditor(track));
   editMetadata.disabled = busy || track.health !== "AVAILABLE";
-  const technicalDetails = button("Technical details", () => showDetails(track));
+  const technicalDetails = button("Sources & details", () => showDetails(track));
   const repairTags = button("Repair tags / loudness", async () => {
     if (!confirm("Recalculate loudness and discovery tags on this existing file? Audio and identity are preserved. No download is needed.")) return;
     await action(track, "repair");
@@ -613,13 +615,19 @@ function renderTrack(track) {
       await action(track, "delete_ignore");
     }, "danger"),
   );
-  // Named controls above retain their own eligibility; only deletion follows
-  // the generic busy rule. Adding a menu item must not shift permission indexes.
+  // Set deletion eligibility before appending independently gated operations.
   for (const child of [...menuItems.children].slice(4)) child.disabled = busy;
+  const reprocess = button("Reprocess", () => openOperation(track, "reprocess"));
+  const redownload = button("Redownload", () => openOperation(track, "redownload"));
+  for (const operation of [reprocess, redownload]) {
+    operation.disabled = busy || !["AVAILABLE", "MISSING"].includes(track.health) || !track.origins.some(origin => origin.downloadable);
+  }
+  menuItems.append(reprocess, redownload);
   menu.append(menuItems);
   controls.append(menu);
   actions.append(controls);
-  row.append(music, playlists, discovery, health, actions);
+  for (const [cell, label] of [[music, "Track"], [playlists, "Playlists"], [health, "Status"], [actions, "Actions"]]) cell.dataset.label = label;
+  row.append(music, playlists, health, actions);
   return row;
 }
 
@@ -636,6 +644,7 @@ function trackSignature(track) {
     discovered_at: track.discovered_at,
     discovery_basis: track.discovery_basis,
     health: track.health,
+    temporary_candidate_sha256: track.temporary_candidate_sha256,
     operation_state: track.operation_state,
     operation_kind: track.operation_kind,
     operation_error: track.operation_error,
@@ -656,10 +665,8 @@ function updateStats(stats) {
   retryAll.disabled = !stats.failed || state.batchPending;
   retryAll.textContent = stats.failed ? `Retry all failed (${stats.failed})` : "Retry all failed";
   const values = [
-    ["Total", stats.total, "ALL"], ["Available", stats.available, "AVAILABLE"],
-    ["Queued", stats.queued, "QUEUED"], ["Processing", stats.running, "RUNNING"],
-    ["Deferred", stats.deferred, "DEFERRED"], ["Approval", stats.approval, "NEEDS_APPROVAL"],
-    ["Failed", stats.failed, "FAILED"], ["Attention", stats.attention, "ATTENTION"],
+    ["All music", stats.total, "ALL"], ["Waiting for approval", stats.approval, "NEEDS_APPROVAL"],
+    ["In progress", stats.working + stats.deferred, "WORKING"], ["Needs attention", stats.attention, "ATTENTION"],
   ];
   for (const [label, count, filter] of values) {
     let element = $("stats").querySelector(`[data-filter="${filter}"]`);
@@ -691,9 +698,11 @@ async function refreshTracks(background = true) {
     state.page = state.maxPage;
     return refreshTracks(background);
   }
-  $("page").textContent = `${data.page} / ${state.maxPage} (${data.total})`;
-  $("prev").disabled = state.page <= 1;
-  $("next").disabled = state.page >= state.maxPage;
+  for (const suffix of ["", "Bottom"]) {
+    $("page" + suffix).textContent = `Page ${data.page} of ${state.maxPage}`;
+    $("prev" + suffix).disabled = state.page <= 1;
+    $("next" + suffix).disabled = state.page >= state.maxPage;
+  }
   updateStats(data.stats);
   $("resultsSummary").textContent = IngestorUI.resultsLabel(data.page, data.limit, data.total, data.stats.total);
   const ids = new Set(data.tracks.map(track => track.id));
@@ -707,7 +716,7 @@ async function refreshTracks(background = true) {
     empty: () => {
       const row = node("tr");
       const cell = node("td", "No music in this view.", "empty");
-      cell.colSpan = 5;
+      cell.colSpan = 4;
       row.append(cell);
       return row;
     },
@@ -945,14 +954,19 @@ $("filter").addEventListener("change", () => {
   state.generation += 1;
   guard(() => refreshTracks(false))();
 });
-$("prev").addEventListener("click", guard(async () => {
-  if (state.page > 1) state.page -= 1;
-  await refreshTracks(false);
-}));
-$("next").addEventListener("click", guard(async () => {
-  if (state.page < state.maxPage) state.page += 1;
-  await refreshTracks(false);
-}));
+for (const suffix of ["", "Bottom"]) {
+  for (const [direction, delta] of [["prev", -1], ["next", 1]]) {
+    $(direction + suffix).addEventListener("click", guard(async () => {
+      state.page = Math.max(1, Math.min(state.maxPage, state.page + delta));
+      await refreshTracks(false);
+      if (suffix) $("resultsSummary").scrollIntoView?.({block: "start"});
+    }));
+  }
+}
+$("addMusic").addEventListener("click", () => {
+  setTab("sources");
+  $("urls").focus();
+});
 
 $("syncAll").addEventListener("click", guard(async () => {
   const user = state.user;

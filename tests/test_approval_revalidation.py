@@ -25,6 +25,12 @@ def test_changed_audio_discards_obsolete_identity_plan(db, track, environment, m
     db.queue_track(track["id"], "admin", {"mode": "approve", "index": 0})
     pipeline = Pipeline(db)
 
+    async def already_published(job, current, *args):
+        return current
+
+    monkeypatch.setattr(pipeline, "ensure_temporary_audio", already_published)
+
+
     async def identify(*args):
         return {"automatic": True, "recommendation": "strong"}, [choice]
 

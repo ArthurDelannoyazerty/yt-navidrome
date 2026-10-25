@@ -17,7 +17,7 @@ from audio_tags import REPAIRABLE_ISSUES
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, prepare_correction
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS tracks (
  release_id TEXT,
  current_origin_id TEXT,
  current_asset_id INTEGER,
+ temporary_candidate_sha256 TEXT,
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL
 );
@@ -90,6 +91,13 @@ CREATE TABLE IF NOT EXISTS track_origins (
  UNIQUE(user_id, provider, media_key)
 );
 CREATE INDEX IF NOT EXISTS origin_track ON track_origins(track_id);
+
+CREATE TABLE IF NOT EXISTS origin_identity_rejections (
+ origin_id TEXT NOT NULL REFERENCES track_origins(id) ON DELETE CASCADE,
+ mbid TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ PRIMARY KEY(origin_id, mbid)
+);
 
 CREATE TABLE IF NOT EXISTS memberships (
  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -234,7 +242,7 @@ CREATE TABLE IF NOT EXISTS quota (
 """
 
 DROP_ORDER = [
-    "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
+    "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
     "assets", "memberships", "track_origins", "tracks", "operation_receipts",
     "jobs", "sources",
     "events", "settings", "api_clock", "quota", "users",
@@ -308,7 +316,7 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, 1, SCHEMA_VERSION):
+            if version not in (0, 1, 2, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
@@ -329,6 +337,14 @@ class Store:
                 self._migrate_v1(con)
                 con.commit()
                 version = 2
+
+            if version == 2:
+                self.backup_database("schema-v2")
+                con.execute("BEGIN IMMEDIATE")
+                if "temporary_candidate_sha256" not in {row["name"] for row in con.execute("PRAGMA table_info(tracks)")}:
+                    con.execute("ALTER TABLE tracks ADD COLUMN temporary_candidate_sha256 TEXT")
+                con.execute("PRAGMA user_version=3")
+                con.commit()
 
             con.executescript(SCHEMA + METADATA_SCHEMA)
             con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -591,6 +607,12 @@ class Store:
         self.execute("UPDATE jobs SET state='PENDING' WHERE state='RUNNING'")
         self.execute("UPDATE tracks SET operation_state='QUEUED',updated_at=? WHERE operation_state='RUNNING'", (utcnow(),))
         self.execute("UPDATE sources SET status='PENDING' WHERE status='SYNCING'")
+        # Publish candidates left waiting by older versions without changing
+        # their reviewed bytes, choices, operation ID or approval token.
+        for track in self.rows("SELECT * FROM tracks WHERE operation_state='NEEDS_APPROVAL' AND current_asset_id IS NULL"):
+            pending = json.loads(track["pending_operation"] or "{}")
+            if pending.get("origin_id") and track["temp_path"] and Path(track["temp_path"]).is_file():
+                self.enqueue("track", track["id"], track["user_id"], {"mode": "publish_waiting"})
 
     def add_source(self, ref, user, monitored=False, label=None):
         self.require_user(user)
@@ -902,6 +924,41 @@ class Store:
             operation_error=None, updated_at=utcnow(),
         )
 
+    def commit_temporary_audio(self, track_id, origin_id, result, asset, candidate_digest):
+        """Activate unreviewed audio without completing its metadata operation."""
+        now = utcnow()
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            track = con.execute("SELECT * FROM tracks WHERE id=?", (track_id,)).fetchone()
+            if not track or (track["current_asset_id"] and not track["temporary_candidate_sha256"]):
+                raise ValueError("Temporary audio cannot replace approved audio")
+            if not con.execute("SELECT 1 FROM track_origins WHERE id=? AND track_id=?", (origin_id, track_id)).fetchone():
+                raise ValueError("Temporary audio origin no longer belongs to this track")
+            current = con.execute("SELECT * FROM assets WHERE track_id=? AND state='CURRENT'", (track_id,)).fetchone()
+            if current:
+                # The deterministic temporary path is updated atomically, so
+                # retries update one asset rather than accumulating fake history.
+                asset_id = current["id"]
+                con.execute(
+                    """UPDATE assets SET sha256=?,size_bytes=?,mtime_ns=?,origin_id=?,source_url=?,
+                       downloader_name=?,downloader_version=? WHERE id=?""",
+                    (asset["sha256"], asset["size_bytes"], asset["mtime_ns"], origin_id, asset.get("source_url"),
+                     asset.get("downloader_name"), asset.get("downloader_version"), asset_id),
+                )
+            else:
+                asset_id = con.execute(
+                    """INSERT INTO assets(track_id,origin_id,path,state,created_at,activated_at,sha256,
+                       size_bytes,mtime_ns,downloader_name,downloader_version,source_url)
+                       VALUES (?,?,?,'CURRENT',?,?,?,?,?,?,?,?)""",
+                    (track_id, origin_id, asset["path"], now, now, asset["sha256"], asset["size_bytes"],
+                     asset["mtime_ns"], asset.get("downloader_name"), asset.get("downloader_version"), asset.get("source_url")),
+                ).lastrowid
+            con.execute(
+                """UPDATE tracks SET file_path=?,beets_id=?,current_asset_id=?,current_origin_id=?,
+                   temporary_candidate_sha256=?,health='AVAILABLE',updated_at=? WHERE id=?""",
+                (asset["path"], result.get("beets_id"), asset_id, origin_id, candidate_digest, now, track_id),
+            )
+
     def complete_operation(self, track_id: str, *, health: str | None = None):
         values: dict[str, Any] = {
             "operation_state": "IDLE", "operation_error": None, "operation_kind": None,
@@ -1000,7 +1057,7 @@ class Store:
         if current_moved:
             con.execute(
                 """UPDATE tracks SET file_path=NULL,current_asset_id=NULL,current_origin_id=NULL,
-                   health='UNAVAILABLE',beets_id=NULL,updated_at=? WHERE id=?""", (now, source_id),
+                   health='UNAVAILABLE',beets_id=NULL,temporary_candidate_sha256=NULL,updated_at=? WHERE id=?""", (now, source_id),
             )
             remaining = con.execute(
                 """SELECT id FROM track_origins WHERE track_id=? AND id<>? AND downloadable=1
@@ -1068,7 +1125,7 @@ class Store:
                 """UPDATE tracks SET title=?,file_path=?,beets_id=?,matched_title=?,mbid=?,release_id=?,
                    current_origin_id=?,current_asset_id=?,health='AVAILABLE',operation_state='IDLE',
                    operation_kind=NULL,operation_error=NULL,temp_path=NULL,choices='[]',selected=NULL,
-                   pending_operation=NULL,updated_at=? WHERE id=?""",
+                   pending_operation=NULL,temporary_candidate_sha256=NULL,updated_at=? WHERE id=?""",
                 (plan["working_track"].get("title") or result.get("matched_title") or "Unknown", asset["path"],
                  result.get("beets_id"), result.get("matched_title"), result.get("mbid"), result.get("release_id"),
                  origin_id, asset_id, now, target_id),
@@ -1342,6 +1399,12 @@ class Store:
                      "MISSING" if origin["downloadable"] else "UNAVAILABLE", now, now),
                 )
                 con.execute("UPDATE track_origins SET track_id=? WHERE id=?", (new_id, origin_id))
+                if track["mbid"]:
+                    con.execute("INSERT OR IGNORE INTO origin_identity_rejections VALUES (?,?,?)",
+                                (origin_id, track["mbid"], now))
+                if origin["downloadable"]:
+                    self.enqueue("track", new_id, user, {"mode": "ingest", "origin_id": origin_id}, con=con)
+                    con.execute("UPDATE tracks SET operation_state='QUEUED',operation_kind='INGEST' WHERE id=?", (new_id,))
                 # Historical replaced assets belong to the original recording,
                 # never the new empty logical entry. Retain their source_url.
                 con.execute(
@@ -1421,7 +1484,7 @@ class Store:
             params.extend((pattern, pattern, pattern))
         filters = {
             "AVAILABLE": "t.health='AVAILABLE'", "MISSING": "t.health='MISSING'",
-            "UNAVAILABLE": "t.health='UNAVAILABLE'", "WORKING": "t.operation_state IN ('QUEUED','RUNNING')",
+            "UNAVAILABLE": "t.health='UNAVAILABLE'", "WORKING": "t.operation_state IN ('QUEUED','RUNNING','DEFERRED')",
             "QUEUED": "t.operation_state='QUEUED'", "RUNNING": "t.operation_state='RUNNING'",
             "DEFERRED": "t.operation_state='DEFERRED'", "NEEDS_APPROVAL": "t.operation_state='NEEDS_APPROVAL'",
             "FAILED": "t.operation_state='FAILED'", "ATTENTION": "(t.health='MISSING' OR t.operation_state='FAILED')",

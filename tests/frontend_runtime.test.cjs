@@ -51,7 +51,7 @@ test('older page response cannot replace the newer page', async () => {
   const a = b.app.refreshTracks(); b.app.state.page = 2; const z = b.app.refreshTracks();
   b.requests[1].resolve({page: 2, limit: 50, total: 120, stats: {total: 2557}, tracks: []}); await z;
   b.requests[0].resolve({page: 1, limit: 50, total: 120, stats: {total: 2557}, tracks: []}); await a;
-  assert.match(b.get('page').textContent, /^2 \/ 3/);
+  assert.match(b.get('page').textContent, /^Page 2 of 3/);
   assert.match(b.get('resultsSummary').textContent, /51\u2013100/);
 });
 test('Retry all uses FAILED bulk endpoint and is not limited by UI page or search', async () => {
@@ -87,7 +87,7 @@ test('origins show isolated detach/ignore controls with a current-audio guard', 
   const originEntries = b.get('detailsBody').children[0].children[2].children[1].children;
   const current = originEntries[0].children.at(-1).children;
   const incorrect = originEntries[1].children.at(-1).children;
-  assert.equal(current[0].textContent,'Detach origin');
+  assert.equal(current[0].textContent,'Separate track');
   assert.equal(current[0].disabled,true);
   assert.equal(current[1].disabled,true);
   assert.equal(incorrect[0].disabled,false);
@@ -148,12 +148,12 @@ test('delete controls distinguish source-only ignore from recording-wide block',
     discovery_basis:'first_seen',health:asset?'AVAILABLE':'MISSING',
     operation_state:'IDLE',choices:[],issue_count:0,
   });
-  const menu = row => row.children[4].children[0].children.at(-1).children[1];
+  const menu = row => row.children[3].children[0].children.at(-1).children[1];
   const detached = menu(vm.runInContext('renderTrack', b.context)(make(null,null,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true}])));
-  assert.equal(detached.children.at(-2).textContent,'Delete & ignore this URL only');
-  assert.equal(detached.children.at(-1).textContent,'Delete & ignore source URLs');
+  assert.ok(detached.children.some(c => c.textContent === 'Delete & ignore this URL only'));
+  assert.ok(detached.children.some(c => c.textContent === 'Delete & ignore source URLs'));
   const available = menu(vm.runInContext('renderTrack', b.context)(make('recording-id',123,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true}])));
-  assert.equal(available.children.at(-1).textContent,'Delete & block recording + URLs');
+  assert.ok(available.children.some(c => c.textContent === 'Delete & block recording + URLs'));
   assert.equal(available.children.some(child=>child.textContent==='Delete & ignore this URL only'),true);
   const combined = menu(vm.runInContext('renderTrack', b.context)(make('recording-id',123,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true},{provider:'youtube',url:'https://youtu.be/def',downloadable:true}])));
   assert.equal(combined.children.some(child=>child.textContent==='Delete & ignore this URL only'),false);
@@ -177,4 +177,27 @@ test('ignored-source restore targets only one URL without changing identity bloc
   b.requests[1].resolve([]);
   await pending;
   assert.match(b.get('notice').textContent, /other source remains ignored/);
+});
+
+test('bottom pagination shares filters, page state and disabled boundaries', async () => {
+  const b = browser(); b.app.state.user = 'admin'; b.app.state.maxPage = 3;
+  b.get('filter').value = 'NEEDS_APPROVAL'; b.get('search').value = 'Lorn';
+  vm.runInContext('updateStats = () => {}; updateKeyedChildren = () => {};', b.context);
+  const next = b.get('nextBottom').listeners.click();
+  assert.match(b.requests[0].url, /page=2&limit=50&status=NEEDS_APPROVAL&q=Lorn/);
+  b.requests[0].resolve({page: 2, limit: 50, total: 120, stats: {total: 120}, tracks: []});
+  await next;
+  assert.equal(b.get('pageBottom').textContent, b.get('page').textContent);
+  assert.equal(b.get('prevBottom').disabled, false);
+  const last = b.get('nextBottom').listeners.click();
+  b.requests[1].resolve({page: 3, limit: 50, total: 120, stats: {total: 120}, tracks: []});
+  await last;
+  assert.equal(b.get('nextBottom').disabled, true);
+  assert.equal(b.get('next').disabled, true);
+  b.app.state.page = 2;
+  const previous = b.get('prevBottom').listeners.click();
+  b.requests[2].resolve({page: 1, limit: 50, total: 120, stats: {total: 120}, tracks: []});
+  await previous;
+  assert.equal(b.get('prevBottom').disabled, true);
+  assert.equal(b.get('prev').disabled, true);
 });
