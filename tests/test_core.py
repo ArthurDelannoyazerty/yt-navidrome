@@ -399,7 +399,7 @@ def test_schema_v1_upgrade_preserves_staged_approval(environment):
 
     migrated = Store(path)
     migrated.init()
-    assert migrated.one("PRAGMA user_version")["user_version"] == 3
+    assert migrated.one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION
     columns = {row["name"] for row in migrated.rows("PRAGMA table_info(jobs)")}
     assert {"not_before", "defer_count"} <= columns
     restored = migrated.one("SELECT * FROM tracks WHERE id=?", (track["id"],))
@@ -410,3 +410,26 @@ def test_schema_v1_upgrade_preserves_staged_approval(environment):
         (track["id"],),
     )["state"] == "CANCELLED"
     assert list((environment[0] / "backups").glob("ingestor-schema-v1-*.sqlite"))
+
+
+def test_channel_survives_sync_and_is_returned_in_dashboard(db):
+    from dataclasses import replace
+    source = db.add_source(parse_source("https://youtube.com/playlist?list=PLchannel"), "admin")
+    entry = Entry("abcdefghijk", "https://youtu.be/abcdefghijk", "Video title",
+                  "2020-01-01T00:00:00Z", "entry", 0, channel="Artist channel")
+    db.apply_snapshot(source, Snapshot("Playlist", [entry]))
+    origin = db.dashboard_tracks("admin", 1, 50)["tracks"][0]["origins"][0]
+    assert (origin["title"], origin["channel"]) == ("Video title", "Artist channel")
+    db.apply_snapshot(source, Snapshot("Playlist", [replace(entry, channel="Renamed channel")]))
+    db.apply_snapshot(source, Snapshot("Playlist", [replace(entry, channel=None)]))
+    assert db.one("SELECT channel FROM track_origins")["channel"] == "Renamed channel"
+
+
+def test_v3_channel_migration_preserves_existing_tracks(db, track):
+    db.execute("ALTER TABLE track_origins DROP COLUMN channel")
+    db.execute("PRAGMA user_version=3")
+    db.init()
+    assert db.one("SELECT channel FROM track_origins")["channel"] is None
+    assert db.one("SELECT id FROM tracks")["id"] == track["id"]
+    db.init()
+    assert db.one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION
