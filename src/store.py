@@ -17,7 +17,7 @@ from audio_tags import REPAIRABLE_ISSUES
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, prepare_correction
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS track_origins (
  media_key TEXT NOT NULL,
  url TEXT NOT NULL,
  title TEXT NOT NULL,
+ channel TEXT,
  downloadable INTEGER NOT NULL DEFAULT 1,
  availability TEXT NOT NULL DEFAULT 'UNKNOWN',
  first_seen_at TEXT NOT NULL,
@@ -316,7 +317,7 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, 1, 2, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
@@ -344,6 +345,14 @@ class Store:
                 if "temporary_candidate_sha256" not in {row["name"] for row in con.execute("PRAGMA table_info(tracks)")}:
                     con.execute("ALTER TABLE tracks ADD COLUMN temporary_candidate_sha256 TEXT")
                 con.execute("PRAGMA user_version=3")
+                con.commit()
+
+            if version in (1, 2, 3):
+                self.backup_database("schema-v3")
+                con.execute("BEGIN IMMEDIATE")
+                if "channel" not in {row["name"] for row in con.execute("PRAGMA table_info(track_origins)")}:
+                    con.execute("ALTER TABLE track_origins ADD COLUMN channel TEXT")
+                con.execute("PRAGMA user_version=4")
                 con.commit()
 
             con.executescript(SCHEMA + METADATA_SCHEMA)
@@ -706,11 +715,11 @@ class Store:
                     )
                     con.execute(
                         """INSERT INTO track_origins(
-                           id,track_id,user_id,provider,media_key,url,title,downloadable,
+                           id,track_id,user_id,provider,media_key,url,title,channel,downloadable,
                            availability,first_seen_at,playlist_discovered_at,last_seen_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (origin_id, track_id, source["user_id"], source["provider"], entry.key,
-                         entry.url, entry.title, int(entry.downloadable), "UNKNOWN", first_seen, playlist_added, now),
+                         entry.url, entry.title, entry.channel, int(entry.downloadable), "UNKNOWN", first_seen, playlist_added, now),
                     )
                     if entry.downloadable:
                         self.enqueue("track", track_id, source["user_id"], {"mode": "ingest", "origin_id": origin_id}, con=con)
@@ -721,9 +730,9 @@ class Store:
                     first_seen = _earliest(origin["first_seen_at"], entry.added_at if entry.basis == "first_seen" else now)
                     origin_playlist = _earliest(origin["playlist_discovered_at"], playlist_added)
                     con.execute(
-                        """UPDATE track_origins SET url=?,title=?,downloadable=?,
+                        """UPDATE track_origins SET url=?,title=?,channel=COALESCE(NULLIF(?,''),channel),downloadable=?,
                            first_seen_at=?,playlist_discovered_at=?,last_seen_at=? WHERE id=?""",
-                        (entry.url, entry.title, int(entry.downloadable), first_seen, origin_playlist, now, origin_id),
+                        (entry.url, entry.title, entry.channel, int(entry.downloadable), first_seen, origin_playlist, now, origin_id),
                     )
                     # Refresh must not steal approval, deferred or failed operations.
                     if entry.downloadable and origin["health"] in {"UNAVAILABLE", "MISSING"} and origin["operation_state"] == "IDLE":

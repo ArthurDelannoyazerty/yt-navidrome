@@ -28,6 +28,7 @@ class Entry:
     position: int
     basis: str = "playlist_added"
     downloadable: bool = True
+    channel: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,10 +85,11 @@ class YouTube:
             data = get("videos", part="snippet", id=identity)
             if not data.get("items"):
                 raise ApiDeferred("Video is missing, private, or unavailable to the API")
-            title = data["items"][0]["snippet"]["title"]
+            snippet = data["items"][0]["snippet"]
+            title = snippet["title"]
             observed = utcnow()
             return Snapshot(title, [Entry(identity, source["url"], title, observed,
-                                          identity, 0, "first_seen", True)])
+                                          identity, 0, "first_seen", True, snippet.get("channelTitle"))])
 
         metadata = get("playlists", part="snippet", id=identity)
         if not metadata.get("items"):
@@ -118,6 +120,7 @@ class YouTube:
                     int(snippet["position"]),
                     "playlist_added",
                     True,
+                    snippet.get("videoOwnerChannelTitle"),
                 ))
             token = page.get("nextPageToken")
             if not token:

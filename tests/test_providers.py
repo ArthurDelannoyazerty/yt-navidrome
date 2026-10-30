@@ -121,3 +121,17 @@ def test_repeated_page_token_rejected():
     ])
     with pytest.raises(ApiDeferred, match="repeated"):
         YouTube().resolve(source(), api)
+
+
+def test_video_channel():
+    api = API([{"items": [{"snippet": {"title": "Song", "channelTitle": "Artist channel"}}]}])
+    snapshot = YouTube().resolve({"source_key": "video:abcdefghijk", "is_playlist": False,
+                                  "url": "https://youtu.be/abcdefghijk"}, api)
+    assert snapshot.entries[0].channel == "Artist channel"
+
+
+def test_playlist_uses_video_owner_channel():
+    video = item()
+    video["snippet"].update(channelTitle="Playlist curator", videoOwnerChannelTitle="Artist channel")
+    api = API([{"items": [{"snippet": {"title": "Playlist"}}]}, {"items": [video]}])
+    assert YouTube().resolve(source(), api).entries[0].channel == "Artist channel"

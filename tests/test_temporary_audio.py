@@ -1,3 +1,4 @@
+from store import SCHEMA_VERSION
 """Listen-before-approval uses real Opus/beets files, without provider traffic."""
 import asyncio
 import json
@@ -244,7 +245,7 @@ def test_schema_v2_migration_backs_up_and_preserves_tracks(db, track):
     db.execute('DROP TABLE origin_identity_rejections')
     db.execute('PRAGMA user_version=2')
     db.init()
-    assert db.one('PRAGMA user_version')['user_version'] == 3
+    assert db.one('PRAGMA user_version')['user_version'] == SCHEMA_VERSION
     assert db.owned('tracks', track['id'], 'admin')['temporary_candidate_sha256'] is None
     backups = list((db.path.parent / 'backups').glob('ingestor-schema-v2-*.sqlite'))
     assert len(backups) == 1

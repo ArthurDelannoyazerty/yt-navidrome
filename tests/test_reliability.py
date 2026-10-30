@@ -1,3 +1,4 @@
+from store import SCHEMA_VERSION
 """Failure-injection regressions for durable operations, without remote traffic."""
 import asyncio
 import json
@@ -254,11 +255,11 @@ def test_migration_ddl_and_version_roll_back_together(db, monkeypatch, after_fir
     assert "not_before" not in {row["name"] for row in db.rows("PRAGMA table_info(jobs)")}
     monkeypatch.setattr(db, "_migrate_v1", original)
     db.init()
-    assert db.one("PRAGMA user_version")["user_version"] == 3
+    assert db.one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION
 
 
 def test_migration_recovers_an_old_partial_alter(db):
     make_v1(db, partial=True)
     db.init()
     assert {"defer_count", "not_before"} <= {row["name"] for row in db.rows("PRAGMA table_info(jobs)")}
-    assert db.one("PRAGMA user_version")["user_version"] == 3
+    assert db.one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION

@@ -201,3 +201,23 @@ test('bottom pagination shares filters, page state and disabled boundaries', asy
   assert.equal(b.get('prevBottom').disabled, true);
   assert.equal(b.get('prev').disabled, true);
 });
+
+test('YouTube titles and channels stay visible next to matched metadata', () => {
+  const b = browser();
+  const row = vm.runInContext('renderTrack', b.context)({
+    id:'song', title:'Original title', matched_title:'Matched song',
+    origins:[
+      {provider:'youtube',title:'<Video title>',channel:'Artist & channel'},
+      {provider:'youtube',title:'Another upload'},
+      {provider:'spotify',title:'Spotify song'},
+    ],
+    playlists:[],health:'UNAVAILABLE',operation_state:'NEEDS_APPROVAL',choices:[],
+  });
+  const music = row.children[0];
+  const sources = music.children.filter(c => c.className === 'source-title' && c.children.length);
+  assert.equal(sources.length, 2);
+  assert.equal(sources[0].children[0].textContent, 'YouTube title: <Video title>');
+  assert.equal(sources[0].children[1].textContent, 'YouTube channel: Artist & channel');
+  assert.match(sources[1].children[1].textContent, /Unknown/);
+  assert.equal(music.children[0].textContent, 'Matched song');
+});

@@ -1,3 +1,4 @@
+from store import SCHEMA_VERSION
 import json
 import uuid
 
@@ -75,7 +76,7 @@ def test_frontend_assets_are_content_versioned_and_cache_safe(db):
 def test_system_exposes_youtube_circuit_state(db):
     with TestClient(create_app(db, start_workers=False)) as client:
         data = client.get("/api/system").json()
-        assert data["schema"] == 3
+        assert data["schema"] == SCHEMA_VERSION
         assert data["youtube_circuit"]["open"] is False
         assert data["youtube_circuit"]["failures"] == 0
 
