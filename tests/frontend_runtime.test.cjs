@@ -202,22 +202,29 @@ test('bottom pagination shares filters, page state and disabled boundaries', asy
   assert.equal(b.get('prev').disabled, true);
 });
 
-test('YouTube titles and channels stay visible next to matched metadata', () => {
+test('YouTube channel prefixes the title without adding rows or changing sources', () => {
   const b = browser();
-  const row = vm.runInContext('renderTrack', b.context)({
-    id:'song', title:'Original title', matched_title:'Matched song',
+  const render = vm.runInContext('renderTrack', b.context);
+  const track = {
+    id:'song', title:'The Toxic Avenger - Résidence Beauséjour',
+    matched_title:'The Toxic Avenger - Résidence beauséjour', current_origin_id:'current',
     origins:[
-      {provider:'youtube',title:'<Video title>',channel:'Artist & channel'},
-      {provider:'youtube',title:'Another upload'},
-      {provider:'spotify',title:'Spotify song'},
+      {id:'other',provider:'youtube',title:'Another upload',channel:'Other channel'},
+      {id:'current',provider:'youtube',title:'Video title',channel:'Enchanté Records',url:'https://youtu.be/abcdefghijk'},
     ],
-    playlists:[],health:'UNAVAILABLE',operation_state:'NEEDS_APPROVAL',choices:[],
-  });
-  const music = row.children[0];
-  const sources = music.children.filter(c => c.className === 'source-title' && c.children.length);
-  assert.equal(sources.length, 2);
-  assert.equal(sources[0].children[0].textContent, 'YouTube title: <Video title>');
-  assert.equal(sources[0].children[1].textContent, 'YouTube channel: Artist & channel');
-  assert.match(sources[1].children[1].textContent, /Unknown/);
-  assert.equal(music.children[0].textContent, 'Matched song');
+    playlists:[],health:'AVAILABLE',operation_state:'IDLE',choices:[],
+  };
+  const music = render(track).children[0];
+  assert.equal(music.children[0].textContent, 'Enchanté Records | The Toxic Avenger - Résidence beauséjour');
+  assert.equal(music.children[1].textContent, track.title);
+  assert.equal(music.children.length, 3);
+  const sources = music.children[2];
+  assert.equal(sources.tagName, 'details');
+  assert.equal(sources.children[0].textContent, '2 sources');
+  assert.equal(sources.children[2].children[1].href, 'https://youtu.be/abcdefghijk');
+  const missingChannel = render({...track, origins:[{provider:'youtube'}]}).children[0];
+  assert.equal(missingChannel.children[0].textContent, track.matched_title);
+  const unmatched = render({...track, matched_title:null, current_origin_id:null}).children[0];
+  assert.equal(unmatched.children[0].textContent, `Other channel | ${track.title}`);
+  assert.equal(unmatched.children.length, 2);
 });

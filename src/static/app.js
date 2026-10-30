@@ -507,16 +507,12 @@ function renderTrack(track) {
   const health = node("td");
   const actions = node("td");
 
-  music.append(node("div", track.matched_title || track.title, "metadata"));
+  const title = track.matched_title || track.title;
+  const youtubeOrigin = track.origins.find(origin => origin.provider === "youtube" && origin.id === track.current_origin_id)
+    || track.origins.find(origin => origin.provider === "youtube");
+  const channel = youtubeOrigin?.channel?.trim();
+  music.append(node("div", channel ? `${channel} | ${title}` : title, "metadata"));
   if (track.matched_title && track.matched_title !== track.title) music.append(node("div", track.title, "source-title"));
-  for (const origin of track.origins.filter(origin => origin.provider === "youtube")) {
-    const source = node("div", null, "source-title");
-    source.append(
-      node("div", `YouTube title: ${origin.title || track.title}`),
-      node("div", `YouTube channel: ${origin.channel || "Unknown (sync source to refresh)"}`),
-    );
-    music.append(source);
-  }
   const originList = node("details", null, "origin-links");
   originList.append(node("summary", `${track.origins.length} source${track.origins.length === 1 ? "" : "s"}`));
   for (const origin of track.origins) {
