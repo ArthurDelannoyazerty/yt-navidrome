@@ -16,6 +16,7 @@ from collections import OrderedDict
 import requests
 
 from http_policy import ApiDeferred, HttpPolicy
+from metadata_hints import clean_search_text, normalized_words
 
 API_ROOT = "https://musicbrainz.org/ws/2/"
 PAGE_SIZE = 20
@@ -65,6 +66,26 @@ def artist_credit(values) -> str:
     )[:1000]
 
 
+
+def aliases(values) -> list[dict]:
+    return [{"name": str(v.get("name") or "")[:200], "sort_name": str(v.get("sort-name") or "")[:200],
+             "locale": v.get("locale"), "primary": bool(v.get("primary")), "type": v.get("type")}
+            for v in (values or [])[:30] if isinstance(v, dict) and v.get("name")]
+
+
+def artist_details(values) -> list[dict]:
+    results = []
+    for value in values or []:
+        if not isinstance(value, dict):
+            continue
+        artist = value.get("artist") or {}
+        if identity := valid_id(artist.get("id")):
+            results.append({"id": identity, "name": str(artist.get("name") or value.get("name") or "")[:200],
+                            "credited_name": str(value.get("name") or artist.get("name") or "")[:200],
+                            "sort_name": str(artist.get("sort-name") or "")[:200],
+                            "aliases": aliases(artist.get("aliases"))})
+    return results
+
 def normalize(data: dict, entity: str, page: int) -> dict:
     plural = "recordings" if entity == "recording" else "artists"
     raw = data.get(plural)
@@ -78,7 +99,8 @@ def normalize(data: dict, entity: str, page: int) -> dict:
                 "disambiguation": str(value.get("disambiguation") or "")[:1000]}
         if entity == "artist":
             item.update(name=str(value.get("name") or "Unknown artist")[:1000],
-                        country=value.get("country"), type=value.get("type"))
+                        country=value.get("country"), type=value.get("type"),
+                        sort_name=str(value.get("sort-name") or "")[:200], aliases=aliases(value.get("aliases")))
         else:
             releases = []
             for release in (value.get("releases") or [])[:20]:
@@ -87,7 +109,7 @@ def normalize(data: dict, entity: str, page: int) -> dict:
                                      "date": release.get("date"), "country": release.get("country"),
                                      "status": release.get("status")})
             item.update(title=str(value.get("title") or "Unknown title")[:1000],
-                        artist=artist_credit(value.get("artist-credit")),
+                        artist=artist_credit(value.get("artist-credit")), artists=artist_details(value.get("artist-credit")),
                         length_ms=value.get("length"), first_release_date=value.get("first-release-date"),
                         releases=releases)
         items.append(item)
@@ -118,11 +140,29 @@ class MusicBrainzSearch:
             finally:
                 response.close()
 
-    async def search(self, entity="recording", title="", artist="", artist_id=None, page=1):
-        if type(page) is not int or not 1 <= page <= 100:
-            raise ValueError("Search page must be between 1 and 100")
-        query = query_for(entity, title.strip(), artist.strip(), artist_id)
-        key = (entity, query, page)
+    def request_artist(self, artist_id: str) -> dict:
+        """Resolve IDs server-side before storing an explicitly confirmed alias."""
+        policy = HttpPolicy(self.store)
+        with requests.Session() as session:
+            prepared = session.prepare_request(requests.Request(
+                "GET", API_ROOT + "artist/" + artist_id, params={"fmt": "json", "inc": "aliases"},
+                headers={"User-Agent": os.getenv("HTTP_USER_AGENT") or USER_AGENT, "Accept": "application/json"},
+            ))
+            response = policy.send(requests.sessions.Session.send, session, prepared,
+                                   timeout=(5, 15), allow_redirects=False)
+            try:
+                if response.status_code == 404:
+                    raise ValueError("MusicBrainz artist was not found")
+                if response.status_code != 200:
+                    raise ApiDeferred(f"MusicBrainz artist lookup returned HTTP {response.status_code}", retry_at=time.time() + 60)
+                value = response.json()
+                if valid_id(value.get("id")) != artist_id or not value.get("name"):
+                    raise ValueError("MusicBrainz returned an invalid artist")
+                return {"id": artist_id, "name": str(value["name"])[:200], "aliases": aliases(value.get("aliases"))}
+            finally:
+                response.close()
+
+    async def _cached(self, key, request):
         cached = self.cache.get(key)
         if cached and cached[0] > time.monotonic():
             self.cache.move_to_end(key)
@@ -133,7 +173,7 @@ class MusicBrainzSearch:
 
             async def fetch():
                 try:
-                    result = await asyncio.to_thread(self.request, entity, query, page)
+                    result = await asyncio.to_thread(request)
                     self.cache[key] = (time.monotonic() + 120, result)
                     self.cache.move_to_end(key)
                     while len(self.cache) > 128:
@@ -143,8 +183,48 @@ class MusicBrainzSearch:
                     self.pending.pop(key, None)
 
             task = asyncio.create_task(fetch())
-            # A cancelled HTTP client must not cancel the shared network attempt.
-            # Retrieve failures even if every waiter disconnected.
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             self.pending[key] = task
         return copy.deepcopy(await asyncio.shield(self.pending[key]))
+
+    async def artist(self, artist_id):
+        identity = valid_id(artist_id)
+        if not identity:
+            raise ValueError("Invalid MusicBrainz artist ID")
+        return await self._cached(("artist_lookup", identity, 0), lambda: self.request_artist(identity))
+
+    async def search(self, entity="recording", title="", artist="", artist_id=None, page=1):
+        if type(page) is not int or not 1 <= page <= 100:
+            raise ValueError("Search page must be between 1 and 100")
+        # Validate raw inputs before normalization so a long request cannot evade limits.
+        query_for(entity, title.strip(), artist.strip(), artist_id)
+        title, artist = normalized_words(title), normalized_words(artist)
+        variants = [("exact", title, artist)]
+        cleaned = clean_search_text(title)
+        if entity == "recording" and cleaned and cleaned != title:
+            variants.append(("cleaned", cleaned, artist))
+        if entity == "recording" and cleaned and artist and not artist_id:
+            variants.append(("title_only", cleaned, ""))
+        tried, seen = [], set()
+        for strategy, actual_title, actual_artist in variants:
+            query = query_for(entity, actual_title, actual_artist, artist_id)
+            if query in seen:
+                continue
+            seen.add(query)
+            # Always determine fallback from the first page. Pagination therefore
+            # cannot silently drop an artist just because a later page is empty.
+            key = (entity, query, 1)
+            result = await self._cached(key, lambda q=query: self.request(entity, q, 1))
+            tried.append(strategy)
+            if result.get("items") or result.get("total", 0) > 0:
+                break
+        if page != 1:
+            result = await self._cached((entity, query, page), lambda: self.request(entity, query, page))
+        result["query_used"] = {"title": actual_title, "artist": actual_artist, "artist_id": artist_id}
+        result["query_strategy"] = strategy
+        result["fallbacks_tried"] = tried
+        result["query_note"] = ("No results with the artist constraint; showing title-only results. Verify the artist."
+                                if strategy == "title_only" else
+                                "Video-only decorations were removed from the search, not from your metadata."
+                                if strategy == "cleaned" else "")
+        return result

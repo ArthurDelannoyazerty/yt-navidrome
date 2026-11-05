@@ -721,7 +721,7 @@ function renderTrack(track) {
   health.append(stateBadge);
   if (track.temporary_candidate_sha256) health.append(node("small", "Playable · temporary album", "availability"));
   else if (track.health === "AVAILABLE" && status !== "AVAILABLE") health.append(node("small", "Current audio is playable", "availability"));
-  if (!track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable)) stateBadge.textContent = "Needs audio link";
+  if (!track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable && originDownloadsEnabled(o))) stateBadge.textContent = "Needs audio link";
   if (track.operation_state === "DEFERRED" && track.retry_at) {
     health.append(node("div", `Retry after ${new Date(track.retry_at * 1000).toLocaleString()}`, "hint"));
   }
