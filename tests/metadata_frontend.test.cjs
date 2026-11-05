@@ -146,3 +146,165 @@ test('row signature changes when correction script becomes available', () => {
   b.context.window.MetadataUI = undefined;
   assert.notEqual(vm.runInContext('trackSignature(fixture)', b.context), ready);
 });
+
+
+function reviewContext(id='first', extra={}) {
+  return {track_id:id,user_id:'admin',revision:'r'.repeat(64),current_title:'Current '+id,
+    current_mbid:MBID,state:'NEEDS_APPROVAL',health:'AVAILABLE',can_correct:true,origin_count:1,
+    choices:[{index:3,kind:'recording',mbid:MBID,artist:'末廣健一郎',title:'誓いの旋律',match_score:85.7,
+      evidence:{local_duration_seconds:190,candidate_duration_seconds:192,duration_delta_seconds:2,artist_ids:[]}}],
+    approval_token:'token-'+id,current_tags:{artist:['Wrong artist'],title:['Wrong song'],album:['Current album']},
+    current_duration_seconds:190,candidate_duration_seconds:192,
+    source:{source_title:'Kenichiro Suehiro - 誓いの旋律',tags:{artist:['Kenichiro Suehiro'],title:['誓いの旋律']},basis:'provider_title_only'},
+    source_url:'https://youtu.be/abcdefghijk',latest_identification:null,...extra};
+}
+function storageFor(b) {
+  const storage=new Map();
+  b.context.localStorage={getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value)};
+  return storage;
+}
+async function requested(b,index) {
+  for(let i=0;i<40&&!b.requests[index];i++) await Promise.resolve();
+  assert.ok(b.requests[index], 'Expected request '+index);
+  return b.requests[index];
+}
+async function queue(b,ids=['first','second']) {
+  b.get('filter').value='NEEDS_APPROVAL';b.get('search').value='日本語';b.get('reviewSort').value='artist';
+  const pending=b.metadata.startQueue();
+  const request=b.requests.at(-1);
+  assert.match(request.url,/api\/review\/queue/);
+  assert.match(request.url,/status=NEEDS_APPROVAL/);
+  assert.match(request.url,/sort=artist/);
+  request.resolve({ids,total:ids.length,matching_total:ids.length,excluded:0});
+  const next=await requested(b,b.requests.indexOf(request)+1);
+  next.resolve(reviewContext(ids[0]));
+  await pending;
+}
+
+test('Save & next sends the displayed index/token once and advances the stable queue', async()=>{
+  const b=setup(), storage=storageFor(b); await queue(b);
+  assert.equal(b.get('metadataSaveNext').disabled,false);
+  assert.match(b.get('metadataAudio').src,/candidate=true/);
+  const pending=b.get('metadataSaveNext').listeners.click();
+  await b.get('metadataSaveNext').listeners.click();
+  assert.equal(b.requests.length,3);
+  assert.deepEqual(JSON.parse(b.requests[2].options.body),{user_id:'admin',mode:'approve',index:3,approval_token:'token-first'});
+  b.requests[2].resolve({message:'Queued'});
+  const second=await requested(b,3); assert.match(second.url,/tracks\/second\/metadata-context/);
+  second.resolve(reviewContext('second')); await pending;
+  assert.equal(b.get('metadataQueueProgress').textContent,'Track 2 of 2');
+  const saved=JSON.parse(storage.get('music-review-queue-v1:admin'));
+  assert.equal(saved.index,1); assert.deepEqual(saved.completed,['first']);
+});
+
+test('Skip, close, resume and Back preserve one queue per library and apply nothing', async()=>{
+  const b=setup(),storage=storageFor(b);await queue(b);
+  const skip=b.get('metadataQueueSkip').listeners.click();
+  (await requested(b,2)).resolve(reviewContext('second'));await skip;
+  assert.deepEqual(JSON.parse(storage.get('music-review-queue-v1:admin')).skipped,['first']);
+  b.metadata.reset();
+  const resume=b.metadata.startQueue();
+  assert.match(b.requests[3].url,/tracks\/second\/metadata-context/);
+  b.requests[3].resolve(reviewContext('second'));await resume;
+  const back=b.get('metadataQueueBack').listeners.click();
+  b.requests[4].resolve(reviewContext('first'));await back;
+  assert.equal(b.get('metadataQueueProgress').textContent,'Track 1 of 2');
+  assert.equal(b.requests.some(request=>request.options.method==='POST'),false);
+  assert.equal(storage.size,1);
+});
+
+test('an old save response cannot advance a closed and reopened review session', async()=>{
+  const b=setup(),storage=storageFor(b);await queue(b);
+  const save=b.get('metadataSaveNext').listeners.click(), old=b.requests[2];
+  b.metadata.reset();
+  const openNew=b.metadata.open({id:'other',title:'Other'},'search');
+  b.requests[3].resolve(reviewContext('other'));await openNew;
+  old.resolve({message:'Queued'});await save;
+  assert.equal(b.requests.length,4);
+  assert.equal(b.get('metadataCurrent').textContent,'Current other');
+  assert.equal(b.get('metadataQueueBar').hidden,true);
+  assert.equal(JSON.parse(storage.get('music-review-queue-v1:admin')).index,0);
+});
+
+test('switching library during a save leaves the new library review untouched', async()=>{
+  const b=setup();storageFor(b);await queue(b);
+  const save=b.get('metadataSaveNext').listeners.click(),old=b.requests[2];
+  b.app.state.user='guest';b.metadata.reset();
+  const next=b.metadata.open({id:'guest-track',title:'Guest'},'search');
+  b.requests[3].resolve(reviewContext('guest-track',{user_id:'guest'}));await next;
+  old.resolve({message:'Queued'});await save;
+  assert.equal(b.requests.length,4);assert.equal(b.get('metadataCurrent').textContent,'Current guest-track');
+  assert.match(b.get('metadataAudio').src,/user_id=guest/);
+});
+
+test('rejecting a candidate replaces the revision/token and requires another choice', async()=>{
+  const b=setup();
+  const pending=b.metadata.open({id:'first'},'suggestions');b.requests[0].resolve(reviewContext());await pending;
+  const entry=b.get('metadataSuggestions').children[0];
+  const reject=entry.children.find(child=>child.textContent==='Wrong recording');
+  const rejected=reject.listeners.click();
+  assert.deepEqual(JSON.parse(b.requests[1].options.body),{user_id:'admin',revision:'r'.repeat(64),mbid:MBID,reject:true});
+  b.requests[1].resolve(reviewContext('first',{revision:'s'.repeat(64),approval_token:'fresh-token',
+    choices:[{index:0,kind:'source',title:'誓いの旋律',artist:'Kenichiro Suehiro'}]}));
+  await rejected;
+  assert.equal(b.get('metadataSuggestionApply').disabled,true);
+  const radio=b.get('metadataSuggestions').children[0].children[0].children[0];
+  radio.checked=true;radio.listeners.change();
+  const applying=b.get('metadataSuggestionApply').listeners.click();
+  assert.deepEqual(JSON.parse(b.requests[2].options.body),{user_id:'admin',mode:'approve',index:0,approval_token:'fresh-token'});
+  b.requests[2].resolve({message:'Queued'});await applying;
+});
+
+test('manual editing starts with actual tags and sends only changed fields with its revision', async()=>{
+  const b=setup();
+  const pending=b.metadata.open({id:'first'},'manual');
+  b.requests[0].resolve(reviewContext('first',{state:'IDLE',current_release_id:result.releases[0].id}));await pending;
+  assert.equal(b.get('metadataManualArtist').value,'Wrong artist');
+  assert.equal(b.get('metadataManualRelease').value,result.releases[0].id);
+  b.get('metadataManualTitle').value='Corrected title';b.get('metadataManualTitle').listeners.input();
+  const applying=b.get('metadataManualApply').listeners.click();
+  assert.deepEqual(JSON.parse(b.requests[1].options.body),{user_id:'admin',mode:'retag',revision:'r'.repeat(64),overrides:{title:'Corrected title'}});
+  b.requests[1].resolve({error:'This track changed; review it again'},409);await applying;
+  assert.match(b.get('metadataNotice').textContent,/track changed/);
+  assert.equal(b.get('metadataReload').hidden,false);
+});
+
+test('broadened search explains its query and keeps the same query on later pages', async()=>{
+  const b=setup();await open(b);
+  const pending=b.metadata.search();
+  b.requests[1].resolve({items:[result],total:42,page:1,limit:20,query_used:{title:'Right song',artist:'',artist_id:null},
+    query_strategy:'title_only',query_note:'Artist constraint removed. Verify the artist.'});await pending;
+  assert.match(b.get('mbStatus').textContent,/Artist constraint removed/);
+  const next=b.get('mbNext').listeners.click();
+  assert.match(b.requests[2].url,/artist=&page=2/);
+  b.requests[2].resolve({items:[],total:42,page:2,limit:20});await next;
+});
+
+test('artist aliases require explicit confirmation and replace the correction revision', async()=>{
+  const b=setup();await open(b,'search',{search_hints:{title:'誓いの旋律',artist:'Kenichiro Suehiro',notes:[]}});
+  b.get('mbEntity').value='artist';b.get('mbEntity').listeners.change();
+  await searchResults(b,[{id:MBID,name:'末廣健一郎',aliases:[{name:'Kenichiro Suehiro',locale:'en'}]}]);
+  const remember=b.get('mbResults').children[0].children.find(child=>child.textContent==='Remember artist: 末廣健一郎');
+  assert.ok(remember);
+  b.context.confirm=()=>false;await remember.listeners.click();assert.equal(b.requests.length,2);
+  b.context.confirm=()=>true;
+  const saving=remember.listeners.click();
+  assert.deepEqual(JSON.parse(b.requests[2].options.body),{user_id:'admin',revision:'r'.repeat(64),artist_id:MBID,forget:false});
+  b.requests[2].resolve(reviewContext('track',{revision:'s'.repeat(64),approved_artist_alias:{alias:'Kenichiro Suehiro',artist_id:MBID,artist_name:'末廣健一郎'},
+    search_hints:{title:'誓いの旋律',artist:'末廣健一郎',artist_id:MBID,notes:[]}}));await saving;
+  b.get('metadataSourceTab').listeners.click();
+  const restore=b.get('sourceMetadataApply').listeners.click();
+  assert.equal(JSON.parse(b.requests[3].options.body).revision,'s'.repeat(64));
+  b.requests[3].resolve({message:'Queued'});await restore;
+});
+
+test('storage quota errors do not prevent reviewing or saving the next track', async()=>{
+  const b=setup();
+  b.context.localStorage={getItem:()=>null,setItem:()=>{throw new Error('Quota exceeded');}};
+  await queue(b,['first']);
+  assert.equal(b.get('metadataSaveNext').disabled,false);
+  const pending=b.get('metadataSaveNext').listeners.click();
+  b.requests[2].resolve({message:'Queued'});await pending;
+  assert.equal(b.get('metadataQueueComplete').hidden,false);
+  assert.match(b.get('metadataQueueScope').textContent,/Resume unavailable/);
+});
