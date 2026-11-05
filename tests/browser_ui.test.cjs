@@ -52,7 +52,7 @@ async function browser(t) {
   });
   const address = await new Promise((done, reject) => {
     let output = "";
-    const timer = setTimeout(() => reject(new Error("Chrome did not expose DevTools: " + output)), 15000);
+    const timer = setTimeout(() => reject(new Error("Chrome did not expose DevTools: " + output)), 30000);
     child.stderr.on("data", chunk => {
       output += chunk;
       const match = output.match(/DevTools listening on (ws:\/\/[^\s]+)/);

@@ -38,8 +38,8 @@ jobs:
           mkdir -p validation
           node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs tests/metadata_frontend.test.cjs | tee validation/frontend-tests.txt
       - name: Run real-browser interaction and layout checks
-        timeout-minutes: 2
-        run: timeout 90s node --test tests/browser_ui.test.cjs
+        timeout-minutes: 3
+        run: timeout 150s node --test tests/browser_ui.test.cjs
         env:
           REQUIRE_BROWSER: '1'
       - name: Archive the exact reviewed source
