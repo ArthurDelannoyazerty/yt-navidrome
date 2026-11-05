@@ -305,3 +305,51 @@ test("real browser: stop the active source and queue another URL without removin
   assert.deepEqual(chrome.errors, []);
 });
 
+test("real browser: continuous review saves, resumes and approves only the explicit selection", {timeout: 60000}, async t => {
+  const chrome = await browser(t);
+  if (!chrome) return;
+  const data = fixtures(), next = structuredClone(data.tracks[0]);
+  next.id = "track-2"; next.title = "第二の曲"; next.approval_token = "c".repeat(64);
+  next.origins[0].id = "origin-2"; next.current_origin_id = "origin-2";
+  next.choices.forEach(choice => { choice.title = next.title; });
+  data.tracks.push(next);
+  const origin = await fixtureServer(t, data);
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 1000, deviceScaleFactor: 1, mobile: false});
+  await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
+  await chrome.evaluate("document.querySelector('#startReview').click()");
+  await chrome.until("document.querySelector('#metadataDialog').open && document.querySelector('#metadataQueueProgress').textContent==='Track 1 of 2' && !document.querySelector('#metadataSaveNext').disabled");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataAudio').src.includes('candidate=true') && document.querySelector('#metadataAudio').src.includes('approval_token=')"), true);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataProposedValues').textContent.includes('末廣健一郎')"), true);
+  await chrome.screenshot("metadata-review-desktop");
+
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
+  assert.equal(await chrome.evaluate("(() => {const d=document.querySelector('#metadataDialog'),r=d.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth && d.scrollWidth<=d.clientWidth+1;})()"), true);
+  await chrome.evaluate("document.querySelector('#metadataSaveNext').scrollIntoView({block:'nearest'})");
+  assert.equal(await chrome.evaluate("(() => {const r=document.querySelector('#metadataSaveNext').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})()"), true);
+  await chrome.screenshot("metadata-review-mobile");
+  await chrome.evaluate("document.querySelector('#metadataSaveNext').click(); document.querySelector('#metadataSaveNext').click()");
+  await chrome.until("document.querySelector('#metadataQueueProgress').textContent==='Track 2 of 2' && document.querySelector('#metadataCurrent').textContent==='第二の曲'");
+  const saves = data.writes.filter(write => write.path.endsWith("/action"));
+  assert.equal(saves.length, 1);
+  assert.deepEqual(saves[0].body, {user_id: "admin", mode: "approve", index: 0, approval_token: "a".repeat(64)});
+
+  await chrome.evaluate("document.querySelector('#metadataClose').click()");
+  await chrome.until("!document.querySelector('#metadataDialog').open && document.querySelector('#startReview').textContent.includes('Resume')");
+  await chrome.evaluate("document.querySelector('#startReview').click()");
+  await chrome.until("document.querySelector('#metadataCurrent').textContent==='第二の曲' && !document.querySelector('#metadataSaveNext').disabled");
+  await chrome.evaluate("document.querySelector('#metadataQueueSkip').click()");
+  await chrome.until("!document.querySelector('#metadataQueueComplete').hidden");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataQueueSummary').textContent.includes('1 track left unchanged')"), true);
+  await chrome.evaluate("document.querySelector('#metadataReviewSkipped').click()");
+  await chrome.until("document.querySelector('#metadataQueueProgress').textContent==='Track 1 of 1' && document.querySelector('#metadataCurrent').textContent==='第二の曲'");
+  await chrome.evaluate("document.querySelector('#metadataClose').click()");
+  await chrome.evaluate("document.querySelector('#selectReviewPage').click()");
+  await chrome.until("document.querySelector('#approveSelected').textContent==='Approve selected (1)'");
+  await chrome.evaluate("document.querySelector('#approveSelected').click()");
+  await chrome.until("document.querySelector('#approveSelected').textContent==='Approve selected (0)'");
+  const batches = data.writes.filter(write => write.path === "/api/review/approve");
+  assert.equal(batches.length, 1);
+  assert.deepEqual(batches[0].body, {user_id: "admin", items: [{track_id: "track-2", index: 0, approval_token: "c".repeat(64)}]});
+  assert.deepEqual(chrome.errors, []);
+});

@@ -26,6 +26,8 @@ const state = {
   events: [],
   tracks: new Map(),
   approvals: new Map(),
+  reviewSelection: new Map(),
+  batchSerial: 0,
   fastPolling: false,
   slowPolling: false,
   systemSignature: "",
@@ -44,6 +46,7 @@ function beginRequest(scope) {
 }
 
 function setFilter(value) {
+  clearReviewSelection();
   state.musicView = value === "IGNORED" ? "ignored" : "tracks";
   $("musicResults").hidden = state.musicView === "ignored";
   $("ignoredMusicPanel").hidden = state.musicView !== "ignored";
@@ -54,6 +57,7 @@ function setFilter(value) {
     return;
   }
   $("filter").value = value;
+  window.MetadataUI?.updateLaunch();
   state.page = 1;
   state.generation += 1;
   guard(() => refreshTracks(false))();
@@ -279,6 +283,11 @@ function changeUser() {
   state.events = [];
   state.tracks.clear();
   state.approvals.clear();
+  state.reviewSelection.clear();
+  state.batchSerial += 1;
+  state.batchPending = false;
+  updateReviewSelection();
+  window.MetadataUI?.updateLaunch();
   state.systemSignature = "";
   $("logs").replaceChildren();
   $("tracks").replaceChildren();
@@ -663,6 +672,7 @@ $("closeDetails").addEventListener("click", () => $("detailsDialog").close());
 function renderTrack(track) {
   state.tracks.set(track.id, track);
   const row = node("tr");
+  row.reviewTrack = track;
   const music = node("td");
   const playlists = node("td");
   const health = node("td");
@@ -711,7 +721,7 @@ function renderTrack(track) {
   health.append(stateBadge);
   if (track.temporary_candidate_sha256) health.append(node("small", "Playable · temporary album", "availability"));
   else if (track.health === "AVAILABLE" && status !== "AVAILABLE") health.append(node("small", "Current audio is playable", "availability"));
-  if (!track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable)) stateBadge.textContent = "Needs audio link";
+  if (!track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable && originDownloadsEnabled(o))) stateBadge.textContent = "Needs audio link";
   if (track.operation_state === "DEFERRED" && track.retry_at) {
     health.append(node("div", `Retry after ${new Date(track.retry_at * 1000).toLocaleString()}`, "hint"));
   }
@@ -734,13 +744,27 @@ function renderTrack(track) {
     const select = node("select", null, "approval");
     select.setAttribute("aria-label", `Metadata suggestion for ${track.matched_title || track.title}`);
     track.choices.forEach((choice, index) => {
-      const option = node("option", `${choice.kind === "source" ? "Source" : choice.kind === "asis" ? "Current tags" : `${choice.similarity}%`} | ${choice.artist ? `${choice.artist} - ` : ""}${choice.title}${choice.description ? ` | ${choice.description}` : ""}`);
-      option.value = String(index);
+      const option = node("option", `${choice.kind === "source" ? "Source" : choice.kind === "asis" || choice.asis ? "Current tags" : `Match ${choice.match_score ?? choice.similarity ?? "?"}/100`} | ${choice.artist ? `${choice.artist} - ` : ""}${choice.title}${choice.description ? ` | ${choice.description}` : ""}`);
+      option.value = String(choice.index ?? index);
       select.append(option);
     });
-    select.value = state.approvals.get(track.id) ?? "0";
-    select.addEventListener("change", () => state.approvals.set(track.id, select.value));
-    controls.append(select, button("Approve", () => action(track, "approve", {index: Number(select.value)}), "primary"));
+    const previous = state.approvals.get(track.id);
+    select.value = previous && previous.token === track.approval_token ? previous.index : String(track.choices[0]?.index ?? 0);
+    row.reviewChoice = () => Number(select.value);
+    select.addEventListener("change", () => {
+      state.approvals.set(track.id, {index: select.value, token: track.approval_token});
+      if (state.reviewSelection.has(track.id)) selectForReview(track, true, Number(select.value));
+    });
+    const label = node("label", null, "check review-select");
+    const checkbox = node("input");
+    checkbox.type = "checkbox"; checkbox.className = "review-track-check";
+    checkbox.dataset.trackId = track.id;
+    checkbox.checked = state.reviewSelection.has(track.id);
+    checkbox.disabled = !track.approval_token || !track.choices.length;
+    checkbox.setAttribute("aria-label", `Select ${track.matched_title || track.title} for batch approval`);
+    checkbox.addEventListener("change", guard(() => selectForReview(track, checkbox.checked, Number(select.value))));
+    label.append(checkbox, node("span", "Select"));
+    controls.append(label, select, button("Approve", () => action(track, "approve", {index: Number(select.value)}), "primary"));
   }
   if (window.SpotifyUI) controls.append(...window.SpotifyUI.controls(track));
   if (window.MetadataUI) {
@@ -768,7 +792,7 @@ function renderTrack(track) {
   const menu = node("details", null, "action-menu");
   menu.append(node("summary", "More"));
   const menuItems = node("div", null, "action-menu-items");
-  const editMetadata = button("Edit metadata", () => showEditor(track));
+  const editMetadata = button("Edit metadata", () => window.MetadataUI ? window.MetadataUI.open(track, "manual") : showEditor(track));
   editMetadata.disabled = busy || track.health !== "AVAILABLE";
   const technicalDetails = button("Sources & details", () => showDetails(track));
   const repairTags = button("Repair tags / loudness", async () => {
@@ -826,6 +850,7 @@ function trackSignature(track) {
     choices: track.choices,
     issue_count: track.issue_count,
     approval_token: track.approval_token,
+    selected_for_review: state.reviewSelection.has(track.id),
   });
 }
 
@@ -837,6 +862,8 @@ function updateStats(stats) {
   const retryAll = $("retryAll");
   retryAll.disabled = !stats.failed || state.batchPending;
   retryAll.textContent = stats.failed ? `Retry all failed (${stats.failed})` : "Retry all failed";
+  updateReviewSelection();
+  window.MetadataUI?.updateLaunch();
   const values = [
     ["All music", stats.total, "ALL"], ["Waiting for approval", stats.approval, "NEEDS_APPROVAL"],
     ["In progress", stats.working + stats.deferred, "WORKING"], ["Needs attention", stats.attention, "ATTENTION"],
@@ -895,7 +922,79 @@ async function refreshTracks(background = true) {
       return row;
     },
   });
+  updateReviewSelection();
 }
+
+function clearReviewSelection() {
+  state.reviewSelection.clear();
+  updateReviewSelection();
+}
+
+function selectForReview(track, checked, index) {
+  if (track.user_id && track.user_id !== state.user) throw new Error("Library changed; select the current track again.");
+  if (!checked) state.reviewSelection.delete(track.id);
+  else {
+    if (track.operation_state !== "NEEDS_APPROVAL" || !track.approval_token || !track.choices.some((choice, offset) => (choice.index ?? offset) === index)) return;
+    if (!state.reviewSelection.has(track.id) && state.reviewSelection.size >= 500) throw new Error("Approve or clear the current selection before selecting more than 500 tracks.");
+    // The row owns this exact choices/token snapshot. Polling may have replaced
+    // state.tracks while an open or focused row still displays an older choice.
+    state.reviewSelection.set(track.id, {track_id: track.id, index, approval_token: track.approval_token});
+  }
+  updateReviewSelection();
+}
+
+function updateReviewSelection() {
+  const count = state.reviewSelection.size;
+  const changed = [...state.reviewSelection.values()].filter(item => {
+    const track = state.tracks.get(item.track_id);
+    return track && (track.operation_state !== "NEEDS_APPROVAL" || track.approval_token !== item.approval_token);
+  }).length;
+  $("approveSelected").textContent = `Approve selected (${count})`;
+  $("approveSelected").disabled = !count || state.batchPending;
+  $("clearReviewSelection").hidden = !count;
+  $("clearReviewSelection").disabled = state.batchPending;
+  $("selectReviewPage").disabled = state.batchPending || state.musicView !== "tracks";
+  $("reviewSelectionStatus").textContent = changed
+    ? `${changed} selected track${changed === 1 ? " has" : "s have"} changed. Outdated choices will be skipped for review.`
+    : count ? "Selection includes choices you selected on other pages of this view." : "";
+  for (const checkbox of document.querySelectorAll(".review-track-check")) {
+    checkbox.checked = state.reviewSelection.has(checkbox.dataset.trackId);
+  }
+}
+$("selectReviewPage").addEventListener("click", guard(() => {
+  for (const row of $("tracks").children) {
+    if (row.reviewTrack && row.reviewChoice) selectForReview(row.reviewTrack, true, row.reviewChoice());
+  }
+}));
+$("clearReviewSelection").addEventListener("click", clearReviewSelection);
+$("approveSelected").addEventListener("click", guard(async () => {
+  if (state.batchPending || !state.reviewSelection.size) return;
+  const user = state.user;
+  const items = [...state.reviewSelection.values()].map(item => ({...item}));
+  if (!confirm(`Approve the selected choices for ${items.length} track${items.length === 1 ? "" : "s"} in "${user}"? Only these selected tracks are included. Changed suggestions will be skipped.`)) return;
+  const serial = ++state.batchSerial;
+  state.batchPending = true; updateReviewSelection();
+  try {
+    const response = await api("/api/review/approve", {user_id: user, items});
+    if (user !== state.user || serial !== state.batchSerial) return;
+    for (const item of items) {
+      const saved = state.reviewSelection.get(item.track_id);
+      if (saved?.approval_token === item.approval_token && saved?.index === item.index) state.reviewSelection.delete(item.track_id);
+    }
+    const details = (response.results || []).filter(item => item.status === "skipped").slice(0, 5).map(item => item.message).filter(Boolean);
+    notice(`${response.queued} selected track${response.queued === 1 ? "" : "s"} queued; ${response.skipped} skipped.${details.length ? " " + [...new Set(details)].join(" ") : ""}`);
+    await refreshTracks(false);
+  } finally {
+    if (user === state.user && serial === state.batchSerial) {
+      state.batchPending = false; updateReviewSelection();
+    }
+  }
+}));
+$("startReview").addEventListener("click", guard(() => {
+  if (!window.MetadataUI) throw new Error("Review tools are still loading. Try again in a moment.");
+  return window.MetadataUI.startQueue();
+}));
+$("reviewSort").addEventListener("change", () => window.MetadataUI?.updateLaunch());
 
 function eventNode(event) {
   return node("div", `${event.at} ${event.level}${event.target ? ` [${event.target.slice(0, 12)}]` : ""} ${event.message}`, `log-${event.level}`);
@@ -1193,6 +1292,8 @@ async function refreshAll(background = false) {
 
 let searchTimer = null;
 $("search").addEventListener("input", () => {
+  clearReviewSelection();
+  window.MetadataUI?.updateLaunch();
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     state.page = 1;
@@ -1201,6 +1302,8 @@ $("search").addEventListener("input", () => {
   }, 300);
 });
 $("filter").addEventListener("change", () => {
+  clearReviewSelection();
+  window.MetadataUI?.updateLaunch();
   state.page = 1;
   state.generation += 1;
   guard(() => refreshTracks(false))();
@@ -1231,7 +1334,7 @@ $("syncAll").addEventListener("click", guard(async () => {
 }));
 
 for (const [id, mode, message] of [
-  ["approveAll", "best", () => `Approve the top candidate for every track awaiting approval for "${state.user}"? This only affects the current library user.`],
+  ["approveAll", "best", () => `Approve the first suggestion for EVERY waiting track in "${state.user}", across all pages and filters? This bypasses individual review. Use Approve selected to limit the operation.`],
   ["approveOriginal", "original", () => `Keep current/source metadata for all waiting tracks for "${state.user}"?`],
   ["retryAll", "retry", () => `Retry ALL failed tracks for "${state.user}", across every page? Search and filters do not limit this action. Deferred, queued and approval tracks are not changed.`],
   ["repairAll", "repair", () => `Repair discovery and loudness tags on ${state.repairable} eligible existing files for "${state.user}"? This uses the latest audit across all pages. No downloads, identity changes or audio re-encoding. Files with unexplained hash changes are excluded.`],
@@ -1241,15 +1344,20 @@ for (const [id, mode, message] of [
   element.addEventListener("click", guard(async () => {
     if (state.batchPending || !confirm(message())) return;
     const user = state.user;
+    const serial = ++state.batchSerial;
     state.batchPending = true;
+    updateReviewSelection();
     element.disabled = true;
     try {
       const result = await api("/api/batch", {user_id: user, mode});
       if (user !== state.user) return;
       notice(`${result.message}. ${result.skipped || 0} skipped because their state changed or they were ineligible.`);
     } finally {
-      state.batchPending = false;
-      await refreshAll(false);
+      if (user === state.user && serial === state.batchSerial) {
+        state.batchPending = false;
+        updateReviewSelection();
+        await refreshAll(false);
+      }
     }
   }));
 }

@@ -79,26 +79,46 @@ metadata, artwork, embedded lyrics, ReplayGain, discovery tags, and beets file
 organization. A changed identity always requires approval. When accepted, the
 previous confirmed identity is kept in `identity_history`, linked to the origin.
 
-### Delete / Delete and ignore
+### Remove music and ignore rules
 
-`Delete local copy` removes the selected user's file, beets item, memberships,
-and logical track. A monitored source can add it again.
+Open **More → Remove…** to choose a removal scope. The dialog explains each
+available choice and lists the affected URLs before the action is submitted:
 
-`Delete & block recording + URLs` creates a **global MusicBrainz recording**
-ignore rule for the selected library user, *plus* URL-specific ignore rules.
-It prevents approval of the same recording even from another video. Do not use
-it when you only want to remove a mistaken full-album upload.
+- **Remove from this library** deletes the local track, audio and local playlist
+  memberships. Monitored sources can import it again.
+- **Remove and ignore this URL** also prevents that video from being reimported.
+  Another upload of the same recording remains allowed. The plural URL choice is
+  shown only where the existing operation can provide that exact scope.
+- **Block this recording and its URLs** also blocks that MusicBrainz recording
+  throughout the selected library user, including future uploads that match it.
 
-After detaching a wrong upload into a single-origin entry, use
-**Delete & ignore this URL only**. This excludes only the video and prevents
-monitored source synchronization from reimporting it; the correct recording
-MBID is still allowed. If the separated entry has its own audio, that audio is
-also deleted with that entry. In **Maintenance > Ignored music**, **Allow recording
-(keep URLs ignored)** removes an accidental MBID-wide block but preserves all
-origin-specific ignore rules. If an old global block also ignored the
-*correct* video, use **Restore just this URL** beside that specific origin,
-leaving the unwanted full-album URL ignored. **Restore all** re-enables every
-URL and may cause the unwanted video to return at the next source sync.
+For a track with several origins, **Sources & details → Origins → Remove & ignore
+origin** can remove one eligible inactive origin while keeping the other origins
+and audio. Use **Separate track** first when an incorrectly merged origin needs
+its own review. The dialog never labels a recording-wide block as URL-only.
+
+Ignored entries are in **Music → Ignored music**, with search and pagination.
+**Allow recording (keep URLs ignored)** removes a recording-wide block without
+restoring its URLs. **Restore just this URL** allows one video; **Restore all**
+also allows every ignored URL, including an unwanted upload.
+
+### Stop retrying or use another video
+
+**Stop retrying this URL** disables the exact source used by the active download.
+It cancels queued/deferred work and requests cancellation of a running download.
+A publication transaction already in progress finishes safely. The track,
+existing audio, source history and playlist memberships remain available.
+
+Disabled URLs stay disabled across restarts and monitored-source sync.
+**Enable URL** permits future downloads without starting one. **Use another URL…**
+attaches one alternative YouTube video to the same track and checks its audio
+before replacement. Existing audio stays playable during review. The replacement
+cannot silently change a confirmed recording identity or merge another track.
+
+Permanent access restrictions stop that URL automatically. Transient download
+failures stop after `DOWNLOAD_MAX_ATTEMPTS` attempts (default `5`). Metadata
+deferrals and time spent waiting for a shared cooldown do not use that budget.
+See [Source controls and retry behavior](docs/source-controls.md).
 
 ## Asset provenance and health
 
@@ -111,7 +131,7 @@ Each current/replaced asset records:
 - current/replaced state.
 
 Track health (`AVAILABLE`, `MISSING`, `UNAVAILABLE`) is separate from the latest
-operation state (`QUEUED`, `RUNNING`, `DEFERRED`, `NEEDS_APPROVAL`, `FAILED`, `IDLE`). A failed
+operation state (`QUEUED`, `RUNNING`, `DEFERRED`, `NEEDS_APPROVAL`, `FAILED`, `STOPPED`, `IDLE`). A failed
 redownload therefore reports an operation error without making an intact current
 asset unavailable.
 
@@ -123,19 +143,23 @@ not silently delete or repair music.
 
 The single-page interface is split into five tabs:
 
-- **Music** — search, status filter, pagination, health, Reprocess/Redownload, and a
-  compact More menu for sources, reprocessing, deletion, and ignore;
-- **Sources** — URL ingestion and monitored playlists;
-- **Activity** — persistent server events plus a `Clear view` button that only
-  clears the browser display;
+- **Music** — search, status filters, continuous metadata review, explicit selected
+  approvals, pagination and an **Ignored music** view. Less frequent actions stay
+  in **More**, including sources, repair, reprocessing, redownload and removal.
+- **Sources** — URL ingestion and monitored playlists.
+- **Activity** — persistent events, following the latest message by default.
+  Scrolling up pauses following; **Jump to latest** resumes it. **Clear view**
+  clears only the browser display.
 - **Maintenance** — paginated integrity issues, optional batch tag/loudness repair,
-  failed-operation export, ignored music, and downloader updates;
-- **Help** — a three-step introduction, an operation state diagram with action-labelled
-  transitions, and expandable guidance for corrections, playback and administration.
+  failed-operation export and downloader updates.
+- **Help** — numbered workflow steps, separate recovery guidance and an expandable
+  table of operation transitions.
 
-Search is server-side and matches source titles and identified artist/title.
-Pagination is applied after filtering/search and uses 50 rows per page. Previous/Next
-controls appear above and below the results; mobile layouts use stacked track rows.
+Search is server-side and matches source titles/channels and identified
+artist/title. Pagination follows filtering/search, with 50 rows per page and
+Previous/Next controls above and below the results. Library totals stay in the
+filter counters; the redundant visible results-summary line is removed.
+Narrow screens use stacked track rows.
 
 ## Start with Docker Compose
 
@@ -177,6 +201,7 @@ The committed `uv.lock` is used by both CI and Docker with `uv sync --frozen`.
 | `YT_DLP_COOKIES_FILE` | empty | optional in-container cookie path |
 | `DOWNLOAD_SLEEP_MIN` | `2` | preserved downloader pacing |
 | `DOWNLOAD_SLEEP_MAX` | `6` | preserved downloader pacing |
+| `DOWNLOAD_MAX_ATTEMPTS` | `5` | failed download attempts before an automatic stop; excludes metadata/cooldown waits |
 | `YT_CIRCUIT_FAILURES` | `3` | blocked YouTube downloads before the shared circuit opens |
 | `YT_CIRCUIT_WINDOW_SECONDS` | `300` | rolling window for blocked-download detection |
 | `YT_CIRCUIT_COOLDOWN_SECONDS` | `900` | initial YouTube circuit cooldown |
@@ -192,27 +217,25 @@ separate audio origins. See [Spotify setup and workflow](docs/spotify.md).
 
 ## SQLite schema versioning
 
-The database uses `PRAGMA user_version`. Fresh installations create schema v3.
+The database uses `PRAGMA user_version`. Fresh installations create schema v5.
 An unversioned database containing data is refused rather than silently changed.
 
-Schema v1 upgrades automatically through v2 to v3 in place. Before the migration changes the
-durable job queue, it creates a consistent backup under `state/backups/`. The v2
-migration adds deferred-job scheduling and also repairs approval candidates that
-the old monitored-source resync bug may have changed back to `QUEUED`, provided
-their staged audio still exists.
+Existing versioned installations upgrade in place, with a consistent SQLite
+backup under `state/backups/` before each versioned migration:
 
-The v2 → v3 migration backs up SQLite before adding a temporary-candidate digest.
-The new origin identity rejection table remembers matches rejected by separating
-an origin. Existing tracks, assets, memberships and confirmed identities are retained.
+- v1 → v2 adds deferred-job scheduling and repairs approval candidates incorrectly
+  requeued by old monitored-source synchronization when staged audio still exists.
+- v2 → v3 adds the temporary-candidate digest used to validate approval audio.
+- v3 → v4 retains source channel names for conservative identification hints.
+- v4 → v5 adds persistent source download permissions, failure budgets and durable
+  cancellation/stage fields for jobs. Existing origins start enabled.
 
-Future schema upgrades follow the same pattern:
+Origin identity rejections, source snapshots, identification reports and explicit
+artist aliases are retained in additive tables. Existing tracks, assets,
+memberships and confirmed identities are preserved.
 
-1. make a consistent SQLite backup under `state/backups/`;
-2. run an explicit transactional migration;
-3. increment `user_version` only after success.
-
-This intentionally avoids a heavy migration framework while retaining deterministic,
-testable upgrades for the small SQLite schema.
+Future schema upgrades follow the same pattern: back up SQLite, apply an explicit
+transactional migration, and increment `user_version` only after success.
 
 ## Provider deferral and YouTube circuit breaker
 
@@ -250,9 +273,13 @@ node --check src/static/ui-state.js
 node --check src/static/spotify-ui.js
 node --check src/static/metadata-ui.js
 node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs tests/metadata_frontend.test.cjs
+# Requires Chrome/Chromium; set CHROME_PATH if it is not found automatically.
+REQUIRE_BROWSER=1 node --test tests/browser_ui.test.cjs
 ```
 
-CI runs these checks for every pull request. The container intentionally uses one
+CI runs these checks and builds the Docker image for every pull request. Browser
+checks exercise desktop and narrow-screen interactions and retain screenshots in
+the validation artifact. The container intentionally uses one
 Uvicorn worker because the durable SQLite job worker is single-instance.
 
 ## Correct an accidentally merged YouTube origin
@@ -270,7 +297,7 @@ Sources & details → Origins**, choose the *specific incorrect URL*:
 - **Remove & ignore origin** removes only that URL from locally generated
   playlists, retains the good track/audio/remaining origins, and records an
   origin-only ignore rule so monitored sync does not re-add it. It is reversible
-  in **Maintenance → Ignored music → Restore**.
+  in **Music → Ignored music → Restore**.
 
 Both operations require at least two origins, an idle track, and selecting an
 origin that **does not supply the currently active audio**. If the wrong video is
@@ -283,23 +310,40 @@ YouTube separately if you also want the remote playlist cleaned.
 
 ## Managing a large library
 
-Counters always describe the **whole selected library user**. Search and status
-filters affect the matching-results count and table, not those counters. Health
-and operation states overlap: an available track can have a failed redownload.
-The Attention filter has the same definition as its counter (missing audio or a
-failed operation). Click a counter to select its corresponding filter.
+Choose a Music filter and search, then **Review this view**. The dialog keeps a
+stable queue and puts original source values, actual current tags, the selected
+change and audio playback together. **Save & next**, **Back** and **Skip** avoid
+reopening each row. **Review skipped tracks** makes another pass over undecided
+items. The latest queue for each library user resumes in the same browser.
 
-**Retry all failed** queues every FAILED track for the selected user, across all
-pages and regardless of search. It does not retry deferred, queued, processing,
-or approval tracks. It preserves the original failed operation and recovery
-receipt. The response reports queued and skipped tracks. A shared circuit and
-provider pacing still apply; this does not launch hundreds of parallel downloads.
+Use Alt + Enter to save and advance, Alt + Right to skip and Alt + Left to go back.
+**A–Z (artist / title)** sorts the stored display title; it can help group related
+entries. Queue membership is a snapshot of the current filter/search/order, with
+fresh metadata and approval tokens loaded as each track opens.
 
-Maintenance includes a JSON export of failed operations for diagnosis and
-paginated/filterable audit results. Repair eligible tags operates on safe, audited,
-idle files only. It never approves identities or downloads audio. Hash mismatches,
-unreadable files and outside-library paths are excluded rather than silently
-accepting changed files. Individual repair is also in the track's More menu.
+For explicit batch approval, select waiting rows after checking their displayed
+choices, then **Approve selected**. Selection can span pages in the same view.
+The server receives those exact track IDs, candidate indexes and approval tokens;
+changed candidates are skipped for another review. Library-wide approval remains
+under **Advanced library actions** with its scope explained.
+
+Counters describe the **whole selected library user**. Search and status filters
+affect the table. Health and operation states overlap: playable audio can coexist
+with a failed or stopped download. **Attention** includes missing audio and failed
+or stopped operations.
+
+**Retry all failed** queues FAILED tracks for the selected user across all pages
+and searches. Stopped/disabled sources need an explicit source decision; they are
+not silently restarted by that bulk action. Original recovery receipts and
+provider pacing still apply.
+
+Maintenance includes failed-operation export and paginated/filterable audit
+results. Repair works only on eligible, audited idle files and never approves
+identities or downloads audio. Hash mismatches, unreadable files and paths outside
+the library are excluded. Individual repair remains in the track's More menu.
+
+See [Continuous review and selected approvals](docs/continuous-review.md) and
+[Metadata matching evidence and artist aliases](docs/metadata-review.md).
 
 ## Playback loudness and discovery tags
 
@@ -346,17 +390,30 @@ Tokens remain in protected server-side files; no client secret is needed.
 
 ## Correcting misidentified music
 
-Use **Search MusicBrainz** on a music row to search by song title and/or artist,
-preview a recording and release, and apply it without copying IDs or downloading
-available audio again. Search waits 500 ms after typing; all MusicBrainz traffic
-shares the application's 1.1-second server-side limiter.
+Open **Review metadata** and choose **Suggested matches**, **Search MusicBrainz**,
+**Original source** or **Edit manually**. Source restoration has one entry point
+inside this dialog; **More → Edit metadata** opens its manual pane.
 
-**More > Restore source metadata** is different from keeping current applied
-tags: it clears a bad MusicBrainz identity and restores the values retained from
-the original source. New downloads archive their pre-beets descriptive tags;
-older imports explicitly fall back to the retained provider title, without
-inventing missing album/date metadata. Both choices are distinct during approval.
+Search starts from conservative source hints. Native Japanese names remain intact;
+query normalization removes video decorations without discarding version clues.
+An explicitly confirmed artist alias is remembered for the selected library and
+uses the MusicBrainz artist ID in later searches. **Wrong recording** remembers a
+rejection for that source, with a way to allow the suggestion again.
+
+Automatic match scores, search relevance, duration differences and fingerprint
+evidence are shown as separate signals. They are not calibrated probabilities,
+and the automatic matching thresholds have not been lowered.
+
+**Original source** clears an incorrect MusicBrainz identity and restores only
+retained source values. It remains distinct from keeping current applied tags.
+Older imports without archived original tags explicitly fall back to retained
+provider metadata. Available audio can be corrected or used to refresh suggestions
+without downloading it again; pending replacement audio must finish its own review.
+
+MusicBrainz search waits 500 ms after typing and shares the server's 1.1-second
+provider limiter. The existing audio stays active until a successful replacement.
 
 See [Metadata correction and recognition diagnostics](docs/metadata-corrections.md)
-for source provenance, safe replacement/splitting, API limits, and why a recording
-present on the MusicBrainz website may not be an automatic fingerprint candidate.
+for provenance, identity changes, API limits and why a recording on MusicBrainz
+may not appear as an automatic fingerprint candidate.
+

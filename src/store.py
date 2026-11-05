@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from audio_tags import REPAIRABLE_ISSUES
+from library_query import track_where
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, correction_revision, prepare_correction
 
@@ -1753,32 +1754,7 @@ class Store:
 
     def dashboard_tracks(self, user: str, page: int, limit: int, status: str = "ALL", query: str = ""):
         self.require_user(user)
-        clauses = ["t.user_id=?"]
-        params: list[Any] = [user]
-        search = query.strip()
-        if search:
-            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            pattern = f"%{escaped}%"
-            clauses.append(
-                "(t.title LIKE ? ESCAPE '\\' OR COALESCE(t.matched_title,'') LIKE ? ESCAPE '\\' "
-                "OR EXISTS(SELECT 1 FROM track_origins so WHERE so.track_id=t.id AND so.title LIKE ? ESCAPE '\\'))"
-            )
-            params.extend((pattern, pattern, pattern))
-        filters = {
-            "AVAILABLE": "t.health='AVAILABLE'", "MISSING": "t.health='MISSING'",
-            "UNAVAILABLE": "t.health='UNAVAILABLE'", "WORKING": "t.operation_state IN ('QUEUED','RUNNING','DEFERRED')",
-            "QUEUED": "t.operation_state='QUEUED'", "RUNNING": "t.operation_state='RUNNING'",
-            "DEFERRED": "t.operation_state='DEFERRED'", "NEEDS_APPROVAL": "t.operation_state='NEEDS_APPROVAL'",
-            "FAILED": "t.operation_state='FAILED'", "STOPPED": "t.operation_state='STOPPED'", "ATTENTION": "(t.health='MISSING' OR t.operation_state IN ('FAILED','STOPPED'))",
-            "UNMATCHED": "(t.mbid IS NULL OR t.mbid='')",
-            "NEEDS_AUDIO": "t.current_asset_id IS NULL AND EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.provider='spotify') AND NOT EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.downloadable=1)",
-            "INTEGRITY": "EXISTS(SELECT 1 FROM integrity_issues i WHERE i.track_id=t.id AND i.resolved_at IS NULL)",
-        }
-        if status != "ALL":
-            if status not in filters:
-                raise ValueError("Unknown track filter")
-            clauses.append(filters[status])
-        where = " AND ".join(clauses)
+        where, params = track_where(user, status, query)
         total = self.one(f"SELECT COUNT(*) AS n FROM tracks t WHERE {where}", params)["n"]
         rows = self.rows(
             f"""SELECT t.*,a.sha256,a.size_bytes,a.mtime_ns,a.downloader_name,a.downloader_version,

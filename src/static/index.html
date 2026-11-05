@@ -35,7 +35,7 @@
     <div class="panel-heading">
       <div><span class="eyebrow">LIBRARY</span><h2>Your music</h2></div>
       <div class="row">
-        <details class="action-menu library-menu"><summary>Library actions</summary><div class="action-menu-items">
+        <details class="action-menu library-menu"><summary>Advanced library actions</summary><div class="action-menu-items">
           <button id="approveAll" class="secondary" type="button" disabled>Approve all</button>
           <button id="retryAll" class="secondary" type="button" disabled>Retry all failed</button>
           <button id="verifyFromMusic" class="secondary" type="button">Verify library</button>
@@ -80,6 +80,14 @@
       </nav>
     </div>
 
+    <div class="review-toolbar" role="group" aria-label="Metadata review actions">
+      <button id="startReview" type="button">Review this view</button>
+      <label class="review-sort">Review order<select id="reviewSort"><option value="updated">Recently updated</option><option value="artist">A–Z (artist / title)</option></select></label>
+      <button id="selectReviewPage" type="button" class="secondary">Select waiting on this page</button>
+      <button id="approveSelected" type="button" class="secondary" disabled>Approve selected (0)</button>
+      <button id="clearReviewSelection" type="button" class="secondary" hidden>Clear selection</button>
+      <span id="reviewSelectionStatus" class="hint" role="status" aria-live="polite"></span>
+    </div>
     <p id="resultsSummary" class="sr-only" role="status" aria-live="polite">Loading matching tracks...</p>
     <div class="table-scroll">
       <table>
@@ -168,7 +176,7 @@
       <li><strong>3. Review the metadata</strong><p>Choose a suggested match and Approve, search MusicBrainz, or keep the original source tags. The approved file replaces the temporary copy.</p></li>
     </ol>
     <h3>From import to approval</h3>
-    <p class="hint">Follow the arrows to see what happens next. Labels on arrows show the action that moves a track.</p>
+    <p class="hint">Follow the numbered steps for the usual path. The sections below explain retries, stopped downloads and other transitions.</p>
     <div class="workflow-guide" role="group" aria-label="Track operation states and transitions">
       <ol class="workflow-main">
         <li><strong>Queued</strong><span>Waiting for the worker</span></li>
@@ -227,7 +235,9 @@
         <dt>Refresh suggestions</dt><dd>Identify existing audio again using source hints, without downloading it again. Review the new suggestions before applying them.</dd>
         <dt>Reprocess</dt><dd>Download and identify again. Changed identities require approval.</dd>
         <dt>Redownload</dt><dd>Replace audio while retaining the confirmed identity. A mismatched recording is refused.</dd>
-        <dt>Approve all</dt><dd>Accept the first suggestion for every waiting track in the selected library, across all pages. Review weak matches individually.</dd>
+        <dt>Review this view</dt><dd>Review a stable queue from the current filter and search. Save &amp; next applies only the displayed choice, Skip leaves a track unchanged, and Back opens the previous item. Progress resumes for this library and view.</dd>
+        <dt>Approve selected</dt><dd>Apply the visible selected choices for explicitly selected waiting tracks, including selections on other pages of the same view. Changed suggestions are skipped and must be reviewed again.</dd>
+        <dt>Advanced: Approve all</dt><dd>Accept the first suggestion for every waiting track in the selected library, across all pages and filters. Use reviewed selections when suggestions need checking.</dd>
         <dt>Retry all failed</dt><dd>Retry failed operations across this library. Other states are unchanged.</dd>
         <dt>Remove…</dt><dd>Choose whether to remove the local entry, ignore its URLs, or block a confirmed recording throughout this library. The dialog explains the exact scope. Undo ignore rules in Music → Ignored music.</dd>
         <dt>Verify / Repair tags</dt><dd>Check files and metadata, then repair eligible tags without downloading audio again.</dd>
@@ -330,36 +340,81 @@
 </dialog>
 
 <dialog id="metadataDialog" class="metadata-dialog" aria-labelledby="metadataHeading">
-  <div class="panel-heading compact"><h2 id="metadataHeading">Correct music metadata</h2><button id="metadataClose" type="button" class="secondary">Close</button></div>
-  <p id="metadataCurrent" class="dialog-track"></p><p id="metadataOrigin" class="hint"></p>
-  <p id="metadataShared" class="warning-text" hidden>This recording has several origins. A correction may split or merge logical tracks; other origins may need reingestion. The selected audio is retained until success.</p>
-  <p id="metadataUnavailable" class="warning-text" hidden>Search is available, but this track needs downloaded audio and no active operation before a correction can be applied.</p>
-  <div class="row metadata-tabs"><button id="metadataSearchTab" type="button" class="secondary" aria-pressed="true">Search MusicBrainz</button><button id="metadataSourceTab" type="button" class="secondary" aria-pressed="false">Original source metadata</button></div>
-  <section id="metadataSearchPane">
-    <form id="mbSearchForm">
-      <div class="metadata-fields">
-        <label>Search for<select id="mbEntity"><option value="recording">Recordings</option><option value="artist">Artists</option></select></label>
-        <label>Song title<input id="mbTitle" maxlength="200" autocomplete="off" placeholder="Song title; remove video decorations"></label>
-        <label>Artist<input id="mbArtist" maxlength="200" autocomplete="off" placeholder="Artist name"></label>
+  <div class="panel-heading compact"><h2 id="metadataHeading">Review metadata</h2><button id="metadataClose" type="button" class="secondary">Close</button></div>
+  <section id="metadataQueueBar" class="review-queue-bar" hidden>
+    <div><strong id="metadataQueueProgress"></strong><p id="metadataQueueScope" class="hint"></p></div>
+    <button id="metadataQueueRestart" type="button" class="secondary">Restart this view</button>
+  </section>
+  <p id="metadataNotice" role="status" aria-live="polite"></p>
+  <button id="metadataReload" type="button" class="secondary" hidden>Reload this track</button>
+  <section id="metadataQueueComplete" hidden>
+    <h3>Review session finished</h3><p id="metadataQueueSummary"></p>
+    <button id="metadataReviewSkipped" type="button">Review skipped tracks</button>
+  </section>
+  <div id="metadataWorkspace">
+    <p id="metadataCurrent" class="dialog-track"></p><p id="metadataOrigin" class="hint"></p>
+    <div class="review-listening"><audio id="metadataAudio" controls preload="none" aria-label="Listen to the current local audio"></audio><a id="metadataSourceLink" target="_blank" rel="noopener noreferrer" hidden>Open source video</a><span id="metadataAudioNote" class="hint"></span></div>
+    <p id="metadataShared" class="warning-text" hidden>This recording has several origins. A correction may split or merge logical tracks; other origins may need reingestion. The selected audio is retained until success.</p>
+    <p id="metadataUnavailable" class="warning-text" hidden>This track needs downloaded audio and no active operation before changes can be applied. You can inspect it or skip to the next track.</p>
+    <div id="metadataComparison" class="metadata-comparison" aria-label="Source, current and selected metadata">
+      <section><h3>Original source</h3><dl id="metadataOriginalValues" class="metadata-values"></dl></section>
+      <section><h3>Current tags</h3><dl id="metadataCurrentValues" class="metadata-values"></dl></section>
+      <section><h3>Selected change</h3><dl id="metadataProposedValues" class="metadata-values"></dl></section>
+    </div>
+    <div class="row metadata-tabs" role="group" aria-label="Choose metadata">
+      <button id="metadataSuggestionsTab" type="button" class="secondary" aria-pressed="true">Suggested matches</button>
+      <button id="metadataSearchTab" type="button" class="secondary" aria-pressed="false">Search MusicBrainz</button>
+      <button id="metadataSourceTab" type="button" class="secondary" aria-pressed="false">Original source</button>
+      <button id="metadataManualTab" type="button" class="secondary" aria-pressed="false">Edit manually</button>
+    </div>
+    <section id="metadataSuggestionsPane">
+      <p class="hint">Match scores compare candidates; they are not a probability that the recording is correct. Check the title, artist, duration and version.</p>
+      <div id="metadataSuggestions" class="metadata-suggestions"></div>
+      <button id="metadataSuggestionApply" type="button" disabled>Apply selected suggestion</button>
+    </section>
+    <section id="metadataSearchPane" hidden>
+      <form id="mbSearchForm">
+        <div class="metadata-fields">
+          <label>Search for<select id="mbEntity"><option value="recording">Recordings</option><option value="artist">Artists</option></select></label>
+          <label>Song title<input id="mbTitle" maxlength="200" autocomplete="off" placeholder="Song title"></label>
+          <label>Artist<input id="mbArtist" maxlength="200" autocomplete="off" placeholder="Artist name"></label>
+        </div>
+        <div class="row"><button type="submit">Search now</button><button id="mbUseSource" type="button" class="secondary">Use source hints</button></div>
+      </form>
+      <p id="metadataSearchHint" class="hint"></p>
+      <p id="mbStatus" role="status" aria-live="polite"></p>
+      <div id="mbResults" class="mb-results"></div>
+      <div class="pagination"><button id="mbPrev" type="button" class="secondary" disabled>Previous</button><span id="mbPage"></span><button id="mbNext" type="button" class="secondary" disabled>Next</button></div>
+      <div class="metadata-selection"><p id="mbSelected">Select a recording to preview the change.</p><label id="mbReleaseField" hidden>Release / edition (returned by search)<select id="mbRelease"></select></label><div id="mbSelectedArtist"></div><button id="mbApply" type="button" disabled>Apply selected recording</button></div>
+    </section>
+    <section id="metadataSourcePane" hidden>
+      <h3>Restore source metadata</h3><p id="sourceMetadataProvenance" class="hint"></p>
+      <dl id="sourceMetadataValues" class="metadata-values"></dl>
+      <p>This removes the applied MusicBrainz identity and stale artwork/lyrics. The discovery date and measured loudness tags are retained/refreshed. Unknown fields are left empty. No audio re-encoding is performed.</p>
+      <button id="sourceMetadataApply" type="button" disabled>Restore source metadata</button>
+    </section>
+    <section id="metadataManualPane" hidden>
+      <p class="hint">Edit the current values. Blank fields keep their current tags; use Original source to remove an applied identity. Discovery and loudness are preserved.</p>
+      <div class="metadata-fields manual-fields">
+        <label>Artist<input id="metadataManualArtist" maxlength="1000"></label>
+        <label>Title<input id="metadataManualTitle" maxlength="1000"></label>
+        <label>Album<input id="metadataManualAlbum" maxlength="1000"></label>
+        <label>MusicBrainz recording ID<input id="metadataManualMbid" maxlength="36"></label>
+        <label>MusicBrainz release ID<input id="metadataManualRelease" maxlength="36"></label>
       </div>
-      <div class="row"><button type="submit">Search now</button><button id="mbUseSource" type="button" class="secondary">Use source title</button></div>
-    </form>
-
-    <p id="mbStatus" role="status" aria-live="polite"></p>
-    <div id="mbResults" class="mb-results"></div>
-    <div class="pagination"><button id="mbPrev" type="button" class="secondary" disabled>Previous</button><span id="mbPage"></span><button id="mbNext" type="button" class="secondary" disabled>Next</button></div>
-    <div class="metadata-selection"><p id="mbSelected">Select a recording to preview the change.</p><label id="mbReleaseField" hidden>Release / edition (returned by search)<select id="mbRelease"></select></label><button id="mbApply" type="button" disabled>Apply selected recording</button></div>
-  </section>
-  <section id="metadataSourcePane" hidden>
-    <h3>Restore source metadata</h3><p id="sourceMetadataProvenance" class="hint"></p>
-    <dl id="sourceMetadataValues" class="metadata-values"></dl>
-    <p>This removes the applied MusicBrainz identity and stale artwork/lyrics. The discovery date and measured loudness tags are retained/refreshed. Unknown fields are left empty. No audio re-encoding is performed.</p>
-    <button id="sourceMetadataApply" type="button" disabled>Restore source metadata</button>
-  </section>
-  <details class="metadata-evidence"><summary>Why was this recording not recognized?</summary>
-    <p>The automatic shortlist combines source text and acoustic fingerprint candidates. It is not an exhaustive MusicBrainz search. A recording can exist there without a matching AcoustID association, or differ in duration/version. Bulk approval can accept a weak candidate. Search above independently; no search result is automatically applied.</p>
-    <div id="metadataDiagnostic"></div>
-  </details>
+      <button id="metadataManualApply" type="button" disabled>Apply edited metadata</button>
+    </section>
+    <div id="metadataAlias" class="metadata-alias"></div>
+    <details id="metadataRejectedDetails" class="metadata-evidence" hidden><summary>Rejected suggestions for this source</summary><div id="metadataRejected"></div></details>
+    <details class="metadata-evidence"><summary>How the suggestions were found</summary>
+      <p>The automatic shortlist combines source text and acoustic fingerprints. It is not an exhaustive MusicBrainz search. A recording can exist there without a matching fingerprint, or differ in duration or version. Search independently when a suggestion looks wrong.</p>
+      <div id="metadataDiagnostic"></div>
+    </details>
+  </div>
+  <div id="metadataQueueActions" class="review-queue-actions" hidden>
+    <span class="hint">Alt + ← Back · Alt + → Skip · Alt + Enter Save &amp; next</span>
+    <div class="row"><button id="metadataQueueBack" type="button" class="secondary">Back</button><button id="metadataQueueSkip" type="button" class="secondary">Skip</button><button id="metadataSaveNext" type="button" disabled>Save &amp; next</button></div>
+  </div>
 </dialog>
 
 </body>

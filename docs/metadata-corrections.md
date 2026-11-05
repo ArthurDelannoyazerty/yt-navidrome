@@ -7,7 +7,7 @@
 only the descriptive values retained from the audio source. The approval list
 contains separate choices for both; the source choice has no MusicBrainz ID.
 
-For an available track, open **More > Restore source metadata**. The dialog shows
+For an available track, open **Review metadata → Original source**. The dialog shows
 exactly which values can be restored before confirmation. This operates on a
 staged copy of the current audio: it does not redownload or re-encode it. Stale
 MusicBrainz IDs, artist credits, album/date, artwork and lyrics from the bad match
@@ -43,7 +43,7 @@ mentions this and the existing receipt/recovery logic remains in use.
 
 ## Search MusicBrainz without copying IDs
 
-1. Click **Search MusicBrainz** on the music row. The initial fields come from the
+1. Open **Review metadata → Search MusicBrainz** on the music row. The initial fields come from the
    retained source, not the potentially wrong current identification.
 2. Search **Recordings** with a song title, artist, or both. Remove video-only
    decorations such as `Official Video` if there are no results.
@@ -52,8 +52,8 @@ mentions this and the existing receipt/recovery logic remains in use.
    title restriction. Results are paginated (20/page, up to 100 pages); narrow the
    title for a large catalogue.
 4. Check title, credited artists, duration, date and disambiguation (live/remix/etc.),
-   click **Select recording**, optionally choose a returned release, then
-   **Apply selected recording**. A final confirmation previews the old/new title.
+   select the recording, optionally choose a returned release, then save the
+   displayed change (or **Save & next** in continuous review).
    No search result is applied automatically, and no manual ID copying is needed.
 
 The browser sends IDs and a revision token, not trusted metadata tags. The worker
@@ -141,10 +141,11 @@ selected recording MBID is wrong.
 
 ## Compatibility and verification
 
-Two additive tables retain source snapshots and the latest identification report.
-Schema stays v2 and no tracks, sources or audio are rebuilt. Back up the state
-volume and music before any deployment. Apply only after reviewing the PR and
-rebuild/recreate the application container; updating yt-dlp alone is insufficient.
+Additive tables retain source snapshots, identification reports, rejected
+identities and explicitly confirmed artist aliases. The current schema is v5;
+versioned migrations create a SQLite backup before applying changes. Tracks,
+sources and audio are not rebuilt. Rebuild/recreate the application container to
+apply application changes; updating yt-dlp alone is insufficient.
 Rescan Navidrome after corrections that rename files or change tags.
 
 Tests cover raw audio-packet preservation, restoration and history, source-only
@@ -152,7 +153,8 @@ fallback, shared-origin splitting, pending approval bindings, stale revisions,
 server-side MB lookups, query escaping, cache/coalescing, shared rate limits,
 Retry-After, cross-user isolation, debounce, late replies and explicit selection.
 Live external availability and a particular user's failed recognition are not
-proved by mocked API tests.
+proved by mocked API tests. See [Continuous review](continuous-review.md) for the
+queue, selected approvals and current dialog workflow.
 
 ## Primary references
 

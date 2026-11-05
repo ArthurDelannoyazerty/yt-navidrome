@@ -104,6 +104,7 @@ def metadata_context(store, track_id, user):
     choices = public_choices(track)
     return {"track_id": track_id, "user_id": user, "revision": correction_revision(track),
             "current_title": track["matched_title"] or track["title"], "current_mbid": track["mbid"],
+            "current_release_id": track["release_id"],
             "state": track["operation_state"], "health": track["health"],
             "can_correct": bool(mutable and origin and ((track["health"] == "AVAILABLE" and track["file_path"]) or (track["operation_state"] == "NEEDS_APPROVAL" and pending.get("origin_id")))),
             "source": source, "source_url": origin["url"] if origin else None,

@@ -344,3 +344,57 @@ test('disabled-source responses and removal cancellation do not retain stale lib
   b.get('removeDialog').listeners.cancel();
   assert.equal(b.app.state.removeTrack,null);
 });
+
+
+test('batch approval keeps the token and choice from the displayed row during a polling race', async()=>{
+  const b=browser();b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{};',b.context);
+  const original={id:'song',user_id:'admin',title:'Displayed song',operation_state:'NEEDS_APPROVAL',health:'AVAILABLE',
+    approval_token:'displayed-token',origins:[],playlists:[],choices:[{title:'Displayed choice',artist:'Artist',similarity:85}]};
+  const row=vm.runInContext('renderTrack',b.context)(original);
+  b.get('tracks').children=[row];
+  // Background polling can update this map while the focused row is retained.
+  b.app.state.tracks.set('song',{...original,approval_token:'unseen-token',choices:[{title:'Unseen choice'}]});
+  await b.get('selectReviewPage').listeners.click();
+  const stored=b.app.state.reviewSelection.get('song');
+  assert.equal(stored.approval_token,'displayed-token');
+  assert.match(b.get('reviewSelectionStatus').textContent,/changed/);
+  const pending=b.get('approveSelected').listeners.click();
+  await b.get('approveSelected').listeners.click();
+  assert.equal(b.requests.length,1);
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin',items:[{track_id:'song',index:0,approval_token:'displayed-token'}]});
+  b.requests[0].resolve({queued:0,skipped:1,results:[{track_id:'song',status:'skipped',message:'Suggestions changed; review again'}]});
+  await pending;
+  assert.equal(b.app.state.reviewSelection.size,0);
+  assert.match(b.get('notice').textContent,/Suggestions changed/);
+});
+
+test('select page uses only rendered waiting rows and current dropdown choices', async()=>{
+  const b=browser();b.app.state.user='admin';
+  const waiting={id:'waiting',user_id:'admin',title:'Song',operation_state:'NEEDS_APPROVAL',health:'AVAILABLE',
+    approval_token:'token',origins:[],playlists:[],choices:[{title:'First'},{title:'Second'}]};
+  const row=vm.runInContext('renderTrack',b.context)(waiting);
+  const select=row.children[3].children[0].children.find(child=>child.tagName==='select');
+  select.value='1';select.listeners.change();
+  const idle=vm.runInContext('renderTrack',b.context)({...waiting,id:'idle',operation_state:'IDLE'});
+  b.get('tracks').children=[row,idle];
+  b.app.state.tracks.set('off-page',{...waiting,id:'off-page'});
+  await b.get('selectReviewPage').listeners.click();
+  assert.deepEqual([...b.app.state.reviewSelection.values()].map(item=>({track_id:item.track_id,index:item.index})),[{track_id:'waiting',index:1}]);
+  vm.runInContext('refreshTracks=async()=>{};',b.context);
+  vm.runInContext("setFilter('ALL')",b.context);
+  assert.equal(b.app.state.reviewSelection.size,0);
+});
+
+test('an old selected-approval response cannot clear selections for a new library', async()=>{
+  const b=browser();b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{};',b.context);
+  b.app.state.reviewSelection.set('old',{track_id:'old',index:0,approval_token:'old-token'});
+  const pending=b.get('approveSelected').listeners.click();
+  b.app.state.user='guest';b.app.state.batchSerial++;b.app.state.batchPending=false;
+  b.app.state.reviewSelection.clear();
+  b.app.state.reviewSelection.set('new',{track_id:'new',index:1,approval_token:'new-token'});
+  b.requests[0].resolve({queued:1,skipped:0,results:[]});await pending;
+  assert.equal(b.app.state.reviewSelection.has('new'),true);
+  assert.equal(b.app.state.reviewSelection.size,1);
+});

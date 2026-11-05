@@ -125,3 +125,7 @@ and unusual long uploads. Record these separately:
 Keep a held-out sample for evaluating new normalization or matching rules.
 Track wrong-version acceptance and false merges as well as top-choice accuracy.
 No percentage accuracy improvement is claimed by these code changes.
+
+## Review interface
+
+See [Review a large music library](continuous-review.md) for Save & next, resume, selected approvals, playback and the source/current/proposed comparison.
