@@ -1,4 +1,5 @@
 """Explicitly scoped review queues, selected approvals, and local audio previews."""
+import json
 from pathlib import Path
 
 from fastapi import Query, Response
@@ -117,10 +118,27 @@ def install_review_routes(app, store):
         return approve_selected(store, data)
 
     @app.get("/api/tracks/{track_id}/audio")
-    def preview_audio(track_id: str, user_id: str):
-        from common import LIBRARY
+    def preview_audio(
+        track_id: str, user_id: str, candidate: bool = False,
+        approval_token: str | None = Query(None, min_length=64, max_length=64),
+    ):
+        from common import LIBRARY, STATE
 
         track = store.owned("tracks", track_id, user_id)
+        if candidate:
+            if track["operation_state"] != "NEEDS_APPROVAL" or not track["temp_path"]:
+                raise LookupError("No staged review audio is available")
+            if approval_token and approval_token != store.approval_token(track):
+                raise ValueError("The audio under review changed; reopen metadata review")
+            pending = json.loads(track["pending_operation"] or "{}")
+            if not pending.get("origin_id"):
+                raise LookupError("No staged review audio is available")
+            path = Path(track["temp_path"]).resolve()
+            if not path.is_relative_to((STATE / "staging" / track_id).resolve()) or not path.is_file():
+                raise LookupError("No staged review audio is available")
+            return FileResponse(
+                path, media_type="audio/ogg", headers={"Cache-Control": "no-store"}
+            )
         asset = store.current_asset(track_id)
         if (
             not asset or track["health"] != "AVAILABLE"

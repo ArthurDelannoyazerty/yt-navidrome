@@ -189,3 +189,49 @@ def test_audio_rejects_paths_outside_user_library_and_missing_files(db, track, e
         path.unlink()
         assert client.get(f"/api/tracks/{current['id']}/audio",
                           params={"user_id": "admin"}).status_code == 404
+
+
+def test_review_audio_previews_pending_bytes_instead_of_old_playing_copy(db, track, environment):
+    current, _, current_path = active_track(db, track, environment)
+    waiting(db, current, environment)
+    current = db.owned("tracks", track["id"], "admin")
+    with client_for(db) as client:
+        response = client.get(
+            f"/api/tracks/{track['id']}/audio", params={
+                "user_id": "admin", "candidate": True,
+                "approval_token": db.approval_token(current),
+            }, headers={"Range": "bytes=0-6"},
+        )
+        assert response.status_code == 206
+        assert response.content == b"pending"
+        assert response.content != current_path.read_bytes()[:7]
+        assert client.get(f"/api/tracks/{track['id']}/audio",
+                          params={"user_id": "admin"}).content == current_path.read_bytes()
+        assert client.get(f"/api/tracks/{track['id']}/audio", params={
+            "user_id": "guest", "candidate": True,
+        }).status_code == 404
+
+
+def test_review_audio_requires_current_review_state_and_token(db, track, environment):
+    waiting(db, track, environment)
+    with client_for(db) as client:
+        assert client.get(f"/api/tracks/{track['id']}/audio", params={
+            "user_id": "admin", "candidate": True, "approval_token": "f" * 64,
+        }).status_code == 400
+        db.update("tracks", track["id"], operation_state="FAILED")
+        assert client.get(f"/api/tracks/{track['id']}/audio", params={
+            "user_id": "admin", "candidate": True,
+        }).status_code == 404
+
+
+def test_review_audio_cannot_read_outside_this_tracks_staging_directory(db, track, environment):
+    waiting(db, track, environment)
+    outside = environment[0] / "staging" / "another-track"
+    outside.mkdir(parents=True)
+    private_audio = outside / "candidate.opus"
+    private_audio.write_bytes(b"other-private-audio")
+    db.update("tracks", track["id"], temp_path=str(private_audio))
+    with client_for(db) as client:
+        assert client.get(f"/api/tracks/{track['id']}/audio", params={
+            "user_id": "admin", "candidate": True,
+        }).status_code == 404
