@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from audio_tags import loudness_values, write_loudness_tags
-from source_metadata import clear_descriptive_tags, clear_release_tags
+from source_metadata import clear_descriptive_tags, clear_release_tags, identification_hints
 from metadata_hints import evidence_for_candidate, search_hints
 from common import LIBRARY, ROOT, STATE, atomic_copy, atomic_json, discovery_comment, user_name
 from http_policy import ApiDeferred, HttpPolicy
@@ -166,22 +166,24 @@ class Bridge:
 
         item = Item.from_path(str(path))
         self.seed(item, title)
+        seeded_from_source = hints is not None
         hints = hints or search_hints({"source_title": title,
             "tags": {"title": [item.title or title], "artist": [item.artist] if item.artist else []},
             "basis": "original_download_tags"})
         # Hints affect only the in-memory lookup. Never rewrite retained/source tags.
         if hints.get("title"):
             item.title = hints["title"]
-        if hints.get("artist"):
-            item.artist = hints["artist"]
-            item.artists = [item.artist]
+        if hints.get("artist") or seeded_from_source:
+            item.artist = hints.get("artist") or ""
+            item.artists = [item.artist] if item.artist else []
         # Never let an embedded, previously assigned MBID short-circuit a fresh
         # candidate search. Fingerprinting and title/artist search start anew.
         ignored_mbid = item.mb_trackid or None
-        item.mb_trackid = ""
-        item.mb_albumid = ""
-        item.acoustid_id = ""
-        item.acoustid_fingerprint = ""
+        for field in ("mb_trackid", "mb_albumid", "mb_artistid", "mb_albumartistid",
+                      "mb_releasegroupid", "mb_releasetrackid", "acoustid_id", "acoustid_fingerprint"):
+            setattr(item, field, "")
+        item.mb_artistids = []
+        item.mb_albumartistids = []
         seed = {"title": item.title, "artist": item.artist, "length_seconds": item.length,
                 "ignored_embedded_mbid": ignored_mbid, "raw_source_title": title,
                 "artist_hint_basis": hints.get("artist_basis", "unknown"),
@@ -605,7 +607,19 @@ def main(request):
                 }
         return {"found": False}
     if mode == "identify":
-        return bridge.identify(path, track["title"], track.get("search_hints"))
+        hints = track.get("search_hints")
+        if hints is None and track.get("origin_id"):
+            origin = bridge.store.one("SELECT * FROM track_origins WHERE id=? AND user_id=?",
+                                      (track["origin_id"], track["user_id"]))
+            if origin:
+                hints = identification_hints(bridge.store, origin)
+        if hints is None and ("source_channel" in track or "source_tags" in track):
+            hints = search_hints({
+                "source_title": track.get("source_title") or track["title"],
+                "tags": track.get("source_tags") or {},
+                "basis": track.get("source_basis") or "provider_title_only",
+            }, {"channel": track.get("source_channel")})
+        return bridge.identify(path, track["title"], hints)
     if mode == "temporary":
         return bridge.publish_temporary(track, path, request["source"])
 
