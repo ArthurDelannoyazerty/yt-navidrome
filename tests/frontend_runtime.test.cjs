@@ -139,24 +139,54 @@ test('Maintenance can unblock a MusicBrainz identity without restoring ignored s
   assert.match(b.get('notice').textContent, /Identity allowed/);
 });
 
-test('delete controls distinguish source-only ignore from recording-wide block', () => {
+test('Remove dialog offers unique honest scopes and a single menu entry', () => {
   const b = browser(); b.app.state.user = 'admin';
-  const make = (mbid,asset,origins) => ({
-    id:'song',user_id:'admin',title:'Full album',matched_title:'Music',mbid,
-    current_asset_id:asset,file_path:asset ? '/library/song.opus' : null,
-    origins,playlists:[],discovered_at:'2021-01-01T00:00:00Z',
-    discovery_basis:'first_seen',health:asset?'AVAILABLE':'MISSING',
-    operation_state:'IDLE',choices:[],issue_count:0,
+  const origin = {provider:'youtube',url:'https://youtu.be/abc',downloadable:true};
+  const make = (mbid,origins) => ({id:'song',user_id:'admin',title:'Song',mbid,
+    health:'AVAILABLE',operation_state:'IDLE',origins,playlists:[],choices:[]});
+  const show = vm.runInContext('showRemoval', b.context);
+  show(make(null,[origin]));
+  assert.deepEqual(b.get('removeChoices').children.map(c=>c.children[0].value), ['delete','delete_ignore_urls']);
+  show(make('recording-id',[origin]));
+  assert.deepEqual(b.get('removeChoices').children.map(c=>c.children[0].value), ['delete','delete_ignore_urls','delete_ignore']);
+  show(make('recording-id',[origin,{...origin,url:'https://youtu.be/def'}]));
+  assert.deepEqual(b.get('removeChoices').children.map(c=>c.children[0].value), ['delete','delete_ignore']);
+  const row = vm.runInContext('renderTrack', b.context)(make(null,[origin]));
+  const menu = row.children[3].children[0].children.at(-1).children[1];
+  assert.equal(menu.children.filter(c=>c.textContent==='Remove…').length,1);
+  assert.equal(menu.children.some(c=>c.textContent==='Restore source metadata'),false);
+});
+
+test('Activity follows after a hidden load, pauses for reading and resumes on demand', async () => {
+  const b = browser(); b.app.state.user='admin';
+  const activity=b.get('activityPanel'); activity.dataset.panel='activity'; activity.hidden=true;
+  b.context.document.querySelectorAll = selector => selector==='[data-panel]' ? [activity] : [];
+  const logs=b.get('logs'); let position=0;
+  Object.defineProperties(logs, {
+    clientHeight:{get:()=>activity.hidden?0:480},
+    scrollHeight:{get:()=>activity.hidden?0:Math.max(480,logs.children.length*20)},
+    scrollTop:{get:()=>position,set:value=>{position=Math.min(Math.max(0,value),Math.max(0,logs.scrollHeight-logs.clientHeight));}},
   });
-  const menu = row => row.children[3].children[0].children.at(-1).children[1];
-  const detached = menu(vm.runInContext('renderTrack', b.context)(make(null,null,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true}])));
-  assert.ok(detached.children.some(c => c.textContent === 'Delete & ignore this URL only'));
-  assert.ok(detached.children.some(c => c.textContent === 'Delete & ignore source URLs'));
-  const available = menu(vm.runInContext('renderTrack', b.context)(make('recording-id',123,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true}])));
-  assert.ok(available.children.some(c => c.textContent === 'Delete & block recording + URLs'));
-  assert.equal(available.children.some(child=>child.textContent==='Delete & ignore this URL only'),true);
-  const combined = menu(vm.runInContext('renderTrack', b.context)(make('recording-id',123,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true},{provider:'youtube',url:'https://youtu.be/def',downloadable:true}])));
-  assert.equal(combined.children.some(child=>child.textContent==='Delete & ignore this URL only'),false);
+  const events=Array.from({length:100},(_,i)=>({id:i+1,at:'now',level:'INFO',message:'event'}));
+  let pending=b.app.loadEvents(); b.requests.at(-1).resolve(events); await pending;
+  vm.runInContext("setTab('activity')", b.context);
+  assert.equal(logs.scrollTop,1520);
+  logs.scrollTop=100; logs.listeners.scroll();
+  pending=b.app.loadEvents(); b.requests.at(-1).resolve([{...events[0],id:101}]); await pending;
+  assert.equal(logs.scrollTop,100); assert.equal(b.app.state.unseenEvents,1);
+  assert.equal(b.get('jumpLatest').hidden,false);
+  b.get('jumpLatest').listeners.click();
+  assert.equal(logs.scrollTop,1540); assert.equal(b.app.state.followLogs,true);
+});
+
+test('Ignored music is a Music view and leaves the active track filter intact', async () => {
+  const b=browser(); b.app.state.user='admin'; b.get('filter').value='NEEDS_APPROVAL';
+  vm.runInContext('updateKeyedChildren=()=>{};',b.context);
+  vm.runInContext("setFilter('IGNORED')",b.context);
+  assert.equal(b.get('musicResults').hidden,true);
+  assert.equal(b.get('ignoredMusicPanel').hidden,false);
+  assert.equal(b.get('filter').value,'NEEDS_APPROVAL');
+  b.requests.at(-1).resolve([]); await new Promise(resolve=>setImmediate(resolve));
 });
 
 test('ignored-source restore targets only one URL without changing identity block', async () => {

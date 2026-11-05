@@ -45,6 +45,7 @@
     </div>
     <h3 id="libraryScope" class="sr-only">Library totals</h3>
     <div id="stats" class="stats" role="group" aria-label="Quick filters for this library"></div>
+    <div id="musicResults">
     <div class="track-toolbar">
       <label class="control-field status-field">Show
         <select id="filter">
@@ -78,7 +79,7 @@
       </nav>
     </div>
 
-    <p id="resultsSummary" class="results-summary" role="status" aria-live="polite">Loading matching tracks...</p>
+    <p id="resultsSummary" class="sr-only" role="status" aria-live="polite">Loading matching tracks...</p>
     <div class="table-scroll">
       <table>
         <thead><tr><th scope="col">Track</th><th scope="col">Playlists</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
@@ -90,6 +91,12 @@
       <span id="pageBottom"></span>
       <button id="nextBottom" type="button" class="secondary">Next</button>
     </nav>
+    </div>
+    <section id="ignoredMusicPanel" class="ignored-panel" hidden>
+      <div class="panel-heading compact"><div><h3>Ignored music</h3><p class="hint">An ignored URL blocks that upload. A blocked recording prevents matching uploads throughout this library.</p></div></div>
+      <div class="track-toolbar"><label class="control-field search-field">Search ignored music<input id="ignoredSearch" type="search" placeholder="Title, URL or recording ID"></label><nav class="pagination" aria-label="Ignored music pages"><button id="ignoredPrev" type="button" class="secondary">Previous</button><span id="ignoredPage"></span><button id="ignoredNext" type="button" class="secondary">Next</button></nav></div>
+      <div id="ignored"></div>
+    </section>
   </section>
 
   <section class="panel" data-panel="sources" hidden>
@@ -122,7 +129,7 @@
   <section class="panel" data-panel="activity" hidden>
     <div class="panel-heading">
       <div><h2>Activity</h2><p class="hint">Recent application, provider, beets, downloader, and maintenance events.</p></div>
-      <div class="row"><label class="check"><input id="errorsOnly" type="checkbox"> Warnings and errors only</label><button id="clearLogs" class="secondary" title="Clears this browser view only. Stored server logs are retained.">Clear view</button></div>
+      <div class="row"><label class="check"><input id="followLogs" type="checkbox" checked> Follow latest</label><button id="jumpLatest" type="button" class="secondary" hidden>Jump to latest</button><label class="check"><input id="errorsOnly" type="checkbox"> Warnings and errors only</label><button id="clearLogs" class="secondary" title="Clears this browser view only. Stored server logs are retained.">Clear view</button></div>
     </div>
     <div id="logs" role="log" aria-label="Event log"></div>
   </section>
@@ -149,10 +156,7 @@
         <p class="hint">Future downloads switch runtimes atomically. Running downloads and FastAPI are not restarted.</p>
       </div>
     </div>
-    <div class="subpanel ignored-panel">
-      <div class="panel-heading compact"><div><h3>Ignored music</h3><p class="hint">An ignored MusicBrainz recording blocks all matching uploads, while an ignored source URL blocks only that upload. Use <strong>Allow recording (keep URLs ignored)</strong> to fix an accidental recording-wide block without re-importing the wrong video.</p></div></div>
-      <div id="ignored"></div>
-    </div>
+
   </section>
   <section class="panel help-panel" data-panel="help" hidden>
     <div class="panel-heading"><div><span class="eyebrow">QUICK GUIDE</span><h2>Import now. Organize when you’re ready.</h2></div></div>
@@ -163,36 +167,34 @@
     </ol>
     <h3>From import to approval</h3>
     <p class="hint">Follow the arrows to see what happens next. Labels on arrows show the action that moves a track.</p>
-    <figure class="state-diagram">
-      <svg viewBox="0 0 920 520" role="img" aria-labelledby="stateTitle stateDescription">
-        <title id="stateTitle">Track operation states and transitions</title>
-        <desc id="stateDescription">Queued moves to Processing when the worker starts. Processing moves to Waiting for approval when review is needed, or Ready when metadata application succeeds. Approve moves Waiting to Queued. A temporary provider error moves Processing to Deferred, then back to Processing automatically. Other errors move Processing to Failed; Retry returns it to Queued. Reprocess or Redownload moves Ready to Queued.</desc>
-        <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z"/></marker></defs>
-        <g class="diagram-edges" fill="none" marker-end="url(#arrow)">
-          <path d="M430 108 V190"/><path d="M335 224 H230"/>
-          <path d="M135 190 V74 H335"/><path d="M525 224 H635"/>
-          <path d="M730 258 V300 H495 V258"/>
-          <path d="M525 245 H580 V394 H635"/>
-          <path d="M825 394 H875 V74 H525"/>
-          <path d="M430 258 V410"/>
-          <path d="M335 444 H280 V116 H365 V108"/>
-        </g>
-        <g class="diagram-labels">
-          <text x="480" y="150">worker starts</text><text x="282" y="208">needs review</text>
-          <text x="235" y="62">Approve</text><text x="580" y="208">temporary error</text>
-          <text x="615" y="290">automatic retry</text><text x="621" y="340">error</text>
-          <text x="795" y="62">Retry</text><text x="484" y="350">success</text>
-          <text x="218" y="360">Reprocess /</text><text x="218" y="377">Redownload</text>
-        </g>
-        <g class="diagram-node"><rect x="335" y="40" width="190" height="68" rx="8"/><text x="430" y="69">Queued</text><text class="diagram-caption" x="430" y="90">Waiting for a worker</text></g>
-        <g class="diagram-node"><rect x="335" y="190" width="190" height="68" rx="8"/><text x="430" y="219">Processing</text><text class="diagram-caption" x="430" y="240">Download, identify or apply</text></g>
-        <g class="diagram-node diagram-waiting"><rect x="40" y="190" width="190" height="68" rx="8"/><text x="135" y="219">Waiting for approval</text><text class="diagram-caption" x="135" y="240">New audio is playable</text></g>
-        <g class="diagram-node"><rect x="635" y="190" width="190" height="68" rx="8"/><text x="730" y="219">Deferred</text><text class="diagram-caption" x="730" y="240">Retry scheduled</text></g>
-        <g class="diagram-node diagram-failed"><rect x="635" y="360" width="190" height="68" rx="8"/><text x="730" y="389">Failed</text><text class="diagram-caption" x="730" y="410">Read error, then Retry</text></g>
-        <g class="diagram-node diagram-ready"><rect x="335" y="410" width="190" height="68" rx="8"/><text x="430" y="439">Ready</text><text class="diagram-caption" x="430" y="460">No active job · IDLE</text></g>
-      </svg>
-      <figcaption>Deferred or Failed can happen during download, identification or metadata application. A failed replacement keeps the previous audio.</figcaption>
-    </figure>
+    <div class="workflow-guide" role="group" aria-label="Track operation states and transitions">
+      <ol class="workflow-main">
+        <li><strong>Queued</strong><span>Waiting for the worker</span></li>
+        <li><strong>Processing</strong><span>Download and identify</span></li>
+        <li><strong>Waiting for approval</strong><span>Listen and review the metadata</span></li>
+        <li><strong>Apply and finish</strong><span>Approval queues the worker again; success leaves the track idle</span></li>
+      </ol>
+      <div class="workflow-exceptions">
+        <section><h4>Temporary problem</h4><p><strong>Processing → Deferred → Processing</strong></p><p>The displayed retry time controls the next attempt. A shared YouTube pause can also move queued work directly to Deferred.</p></section>
+        <section><h4>Operation failed</h4><p><strong>Processing → Failed → Queued</strong></p><p>Read the error and choose Retry. A failed replacement keeps existing audio playable.</p></section>
+        <section><h4>Update existing music</h4><p><strong>Idle → Queued → Processing</strong></p><p>Reprocess, Redownload and metadata edits start a new operation. Only identity changes need another approval.</p></section>
+      </div>
+      <details class="help-detail"><summary>All operation transitions</summary>
+        <table class="transition-table"><thead><tr><th>From</th><th>What happens</th><th>Next</th></tr></thead><tbody>
+          <tr><td>Queued</td><td>The worker claims the job</td><td>Processing</td></tr>
+          <tr><td>Processing</td><td>A metadata decision is needed, or a candidate changed</td><td>Waiting for approval</td></tr>
+          <tr><td>Waiting for approval</td><td>You approve a choice or apply a correction</td><td>Queued</td></tr>
+          <tr><td>Processing</td><td>The operation finishes successfully</td><td>Idle</td></tr>
+          <tr><td>Processing</td><td>A provider temporarily cannot complete the operation</td><td>Deferred</td></tr>
+          <tr><td>Queued</td><td>A shared YouTube cooldown pauses pending downloads</td><td>Deferred</td></tr>
+          <tr><td>Deferred</td><td>The retry time arrives and the worker claims the job</td><td>Processing</td></tr>
+          <tr><td>Processing</td><td>An error needs your attention</td><td>Failed</td></tr>
+          <tr><td>Failed</td><td>You choose Retry</td><td>Queued</td></tr>
+          <tr><td>Idle</td><td>You request an operation, or monitored sync finds missing audio</td><td>Queued</td></tr>
+          <tr><td>Processing</td><td>The application restarts and recovers interrupted work</td><td>Queued</td></tr>
+        </tbody></table>
+      </details>
+    </div>
     <details class="help-detail"><summary>What do the statuses mean?</summary>
       <p><strong>Two independent states:</strong> audio tells you whether a file is playable; the operation tells you what the app is doing.</p>
       <dl class="help-definitions">
@@ -204,7 +206,7 @@
         <dt>Waiting / NEEDS_APPROVAL</dt><dd>Review the suggested metadata, search for another match, or use source tags.</dd>
         <dt>Deferred / DEFERRED</dt><dd>A provider is temporarily unavailable. Wait for the displayed retry time.</dd>
         <dt>Failed / FAILED</dt><dd>Open the error, fix the cause if needed, then Retry.</dd>
-        <dt>Ready / IDLE</dt><dd>No operation is running. Temporary audio remains marked until its metadata is approved.</dd>
+        <dt>Idle / IDLE</dt><dd>No operation is running. Temporary audio remains marked until its metadata is approved.</dd>
       </dl>
     </details>
     <details class="help-detail"><summary>Fix a wrong match or separate different songs</summary>
@@ -218,9 +220,7 @@
         <dt>Redownload</dt><dd>Replace audio while retaining the confirmed identity. A mismatched recording is refused.</dd>
         <dt>Approve all</dt><dd>Accept the first suggestion for every waiting track in the selected library, across all pages. Review weak matches individually.</dd>
         <dt>Retry all failed</dt><dd>Retry failed operations across this library. Other states are unchanged.</dd>
-        <dt>Delete local copy</dt><dd>Remove the track. A monitored playlist can import it again.</dd>
-        <dt>Delete &amp; ignore URL</dt><dd>Remove the entry and prevent that upload from returning.</dd>
-        <dt>Block recording + URLs</dt><dd>Block every upload of that MusicBrainz recording for this library user. Undo in Maintenance.</dd>
+        <dt>Remove…</dt><dd>Choose whether to remove the local entry, ignore its URLs, or block a confirmed recording throughout this library. The dialog explains the exact scope. Undo ignore rules in Music → Ignored music.</dd>
         <dt>Verify / Repair tags</dt><dd>Check files and metadata, then repair eligible tags without downloading audio again.</dd>
       </dl>
     </details>
@@ -242,6 +242,16 @@
     </details>
   </section>
 </main>
+
+<dialog id="removeDialog" aria-labelledby="removeHeading">
+  <form id="removeForm">
+    <h2 id="removeHeading">Remove music</h2><p id="removeTitle" class="dialog-track"></p><p id="removeLibrary" class="hint"></p>
+    <fieldset id="removeChoices" class="remove-choices" aria-label="Removal scope"><legend class="sr-only">Removal scope</legend></fieldset>
+    <details class="help-detail"><summary>Affected source URLs</summary><ul id="removeUrls"></ul></details>
+    <p class="hint">Online playlists are unchanged. Existing ignore rules can be restored in Music → Ignored music.</p>
+    <div class="dialog-actions"><button id="cancelRemoval" type="button" class="secondary">Cancel</button><button id="removeSubmit" type="submit" class="danger">Remove music</button></div>
+  </form>
+</dialog>
 
 <dialog id="operationDialog">
   <form id="operationForm">

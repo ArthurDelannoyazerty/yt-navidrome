@@ -31,7 +31,7 @@ function browser(spotify = false, metadata = false) {
     IngestorUI: {RequestGate, resultsLabel},
     localStorage: {setItem() {}, getItem() { return 'admin'; }},
     window: {getSelection: () => null, addEventListener() {}},
-    confirm: () => true, setTimeout, clearTimeout, setInterval() {},
+    confirm: () => true, setTimeout, clearTimeout, setInterval() {}, requestAnimationFrame: callback => callback(),
     fetch: (url, options) => new Promise(resolve => {
       requests.push({url, options, resolve: (data, status = 200) => resolve({
         ok: status >= 200 && status < 300, status, json: async () => data,

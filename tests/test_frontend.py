@@ -36,9 +36,9 @@ def test_frontend_exposes_low_friction_navigation_and_actions():
         assert f'data-panel="{tab}"' in html
     assert 'button("Reprocess"' in javascript
     assert 'button("Redownload"' in javascript
-    assert 'button("Delete local copy"' in javascript
-    assert 'button("Delete & ignore this URL only"' in javascript
-    assert 'Delete & block recording + URLs' in javascript
+    assert 'button("Remove…"' in javascript
+    assert 'Block this recording and its URLs' in javascript
+    assert 'id="removeChoices"' in html
     assert 'Allow recording (keep URLs ignored)' in javascript
     assert 'await api("/api/integrity/run"' in javascript
 
@@ -95,6 +95,7 @@ def test_help_and_bulk_maintenance_have_accessible_dom_targets():
     assert 'aria-label="Music ingestion workflow"' in html
     assert "Two independent states" in html
     assert "Button reference" in html
-    assert 'aria-labelledby="stateTitle stateDescription"' in html
+    assert 'aria-label="Track operation states and transitions"' in html
+    assert 'All operation transitions' in html
     assert "Waiting for approval" in html
     assert html.index('/static/ui-state.js?v=') < html.index('/static/app.js?v=')

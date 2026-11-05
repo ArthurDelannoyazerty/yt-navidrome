@@ -7,6 +7,13 @@ const SLOW_POLL_MS = 10000;
 const state = {
   user: "",
   tab: "music",
+  musicView: "tracks",
+  ignoredCount: 0,
+  ignoredPage: 1,
+  ignoredMaxPage: 1,
+  followLogs: true,
+  unseenEvents: 0,
+  removeTrack: null,
   page: 1,
   maxPage: 1,
   after: 0,
@@ -33,6 +40,15 @@ function beginRequest(scope) {
 }
 
 function setFilter(value) {
+  state.musicView = value === "IGNORED" ? "ignored" : "tracks";
+  $("musicResults").hidden = state.musicView === "ignored";
+  $("ignoredMusicPanel").hidden = state.musicView !== "ignored";
+  for (const tab of $("stats").children) tab.setAttribute("aria-pressed", String(tab.dataset.filter === value));
+  if (value === "IGNORED") {
+    state.ignoredPage = 1;
+    guard(() => loadIgnored(false))();
+    return;
+  }
   $("filter").value = value;
   state.page = 1;
   state.generation += 1;
@@ -188,6 +204,7 @@ function setTab(name) {
     panel.hidden = panel.dataset.panel !== name;
   }
   if (name === "maintenance") guard(() => refreshMaintenance(false))();
+  if (name === "activity" && state.followLogs) requestAnimationFrame(followLatestEvents);
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
@@ -214,6 +231,15 @@ function changeUser() {
   requestGate.reset();
   state.user = $("user").value;
   state.sources = [];
+  state.musicView = "tracks";
+  state.ignoredCount = 0;
+  state.ignoredPage = 1;
+  state.followLogs = true;
+  state.unseenEvents = 0;
+  state.removeTrack = null;
+  $("musicResults").hidden = false;
+  $("ignoredMusicPanel").hidden = true;
+  updateLogFollowing();
   state.integrityPage = 1;
   state.integrityMaxPage = 1;
   state.repairable = 0;
@@ -330,6 +356,45 @@ async function action(track, mode, extra = {}) {
   await refreshTracks(false);
 }
 
+function showRemoval(track) {
+  if (["QUEUED", "RUNNING", "DEFERRED"].includes(track.operation_state)) return;
+  state.removeTrack = {...track, user_id: state.user};
+  $("removeTitle").textContent = track.matched_title || track.title;
+  $("removeLibrary").textContent = `Library: ${state.user}`;
+  const options = [
+    ["delete", "Remove from this library", "Delete this entry and its local audio. A monitored source can import it again."],
+    [track.origins.length === 1 ? "delete_ignore_urls" : "delete_ignore", `Remove and ignore ${track.origins.length === 1 ? "this URL" : "these URLs"}`,
+      "These source URLs will stay ignored. Another upload of the same recording remains allowed."],
+  ];
+  // The legacy delete_ignore operation blocks an MBID too. For multiple origins,
+  // retain that honest scope until the dedicated source-only API is available.
+  if (track.mbid && track.origins.length > 1) options.pop();
+  if (track.mbid) options.push(["delete_ignore", "Block this recording and its URLs",
+    "Block this MusicBrainz recording throughout this library, including future uploads that match it."]);
+  $("removeChoices").replaceChildren(...options.map(([value, title, explanation], index) => {
+    const label = node("label", null, "remove-choice");
+    const input = node("input"); input.type = "radio"; input.name = "removeScope"; input.value = value; input.checked = index === 0;
+    const text = node("span"); text.append(node("strong", title), node("small", explanation));
+    label.append(input, text); return label;
+  }));
+  $("removeUrls").replaceChildren(...track.origins.map(origin => node("li", origin.url || origin.title)));
+  $("removeDialog").showModal();
+}
+$("cancelRemoval").addEventListener("click", () => { state.removeTrack = null; $("removeDialog").close(); });
+$("removeForm").addEventListener("submit", guard(async event => {
+  event.preventDefault();
+  const track = state.removeTrack;
+  if (!track || track.user_id !== state.user) throw new Error("Library changed; reopen this action.");
+  const selected = $("removeChoices").querySelector("input:checked");
+  if (!selected) throw new Error("Choose what to remove.");
+  $("removeSubmit").disabled = true;
+  try {
+    await action(track, selected.value);
+    state.removeTrack = null; $("removeDialog").close();
+    await loadIgnored(false);
+  } finally { $("removeSubmit").disabled = false; }
+}));
+
 function openOperation(track, mode) {
   const origins = track.origins.filter(origin => origin.downloadable);
   if (!origins.length) {
@@ -401,7 +466,7 @@ async function manageTrackOrigin(track, origin, mode) {
   if (track.user_id !== user) throw new Error("Library changed; reopen the details dialog.");
   const description = mode === "detach"
     ? `Separate "${origin.title}" into its own track? Its playlists follow it, and its audio will be downloaded for review. The existing audio is kept.`
-    : `Remove and ignore only the ${origin.provider} origin "${origin.title}"? It will disappear from local exported playlists and will NOT be imported again on monitored sync until restored in Maintenance. The online YouTube playlist is NOT changed.`;
+    : `Remove and ignore only the ${origin.provider} origin "${origin.title}"? It will disappear from local exported playlists and will NOT be imported again on monitored sync until restored in Music → Ignored music. The online YouTube playlist is NOT changed.`;
   if (!confirm(description)) return;
   const response = await api(
     `/api/tracks/${encodeURIComponent(track.id)}/origins/${encodeURIComponent(origin.id)}/${mode}`,
@@ -588,8 +653,6 @@ function renderTrack(track) {
   const menu = node("details", null, "action-menu");
   menu.append(node("summary", "More"));
   const menuItems = node("div", null, "action-menu-items");
-  const restoreSource = button("Restore source metadata", () => window.MetadataUI?.open(track, "source"));
-  restoreSource.disabled = busy || !window.MetadataUI || !(track.health === "AVAILABLE" || track.operation_state === "NEEDS_APPROVAL");
   const editMetadata = button("Edit metadata", () => showEditor(track));
   editMetadata.disabled = busy || track.health !== "AVAILABLE";
   const technicalDetails = button("Sources & details", () => showDetails(track));
@@ -598,29 +661,9 @@ function renderTrack(track) {
     await action(track, "repair");
   });
   repairTags.disabled = track.health !== "AVAILABLE" || track.operation_state !== "IDLE";
-  menuItems.append(
-    restoreSource, editMetadata, technicalDetails, repairTags,
-    button("Delete local copy", async () => {
-      if (!confirm(`Delete "${track.matched_title || track.title}" for ${state.user}? It can return on the next monitored sync.`)) return;
-      await action(track, "delete");
-    }, "danger"),
-    ...(track.origins.length === 1 ? [
-      button("Delete & ignore this URL only", async () => {
-        const fileWarning = track.current_asset_id ? " This will also delete this entry's current audio file." : "";
-        if (!confirm(`Delete the single-origin entry "${track.title}" and ignore ONLY its source URL for ${state.user}?${fileWarning} MusicBrainz recordings with the same identity remain allowed. Your online YouTube playlist is unchanged.`)) return;
-        await action(track, "delete_ignore_urls");
-      }, "danger"),
-    ] : []),
-    button(track.mbid ? "Delete & block recording + URLs" : "Delete & ignore source URLs", async () => {
-      const scope = track.mbid
-        ? `This will BLOCK MusicBrainz recording ${track.mbid} for the WHOLE ${state.user} library, even if another YouTube video matches it. Its source URLs will also be ignored.`
-        : `This entry has no confirmed MusicBrainz ID, so only its source URLs will be ignored.`;
-      if (!confirm(`Delete "${track.matched_title || track.title}"? ${scope} Use the URL-only action instead if this is merely the wrong video.`)) return;
-      await action(track, "delete_ignore");
-    }, "danger"),
-  );
-  // Set deletion eligibility before appending independently gated operations.
-  for (const child of [...menuItems.children].slice(4)) child.disabled = busy;
+  const remove = button("Remove…", () => showRemoval(track), "danger");
+  remove.disabled = busy;
+  menuItems.append(editMetadata, technicalDetails, repairTags, remove);
   const reprocess = button("Reprocess", () => openOperation(track, "reprocess"));
   const redownload = button("Redownload", () => openOperation(track, "redownload"));
   for (const operation of [reprocess, redownload]) {
@@ -671,6 +714,7 @@ function updateStats(stats) {
   const values = [
     ["All music", stats.total, "ALL"], ["Waiting for approval", stats.approval, "NEEDS_APPROVAL"],
     ["In progress", stats.working + stats.deferred, "WORKING"], ["Needs attention", stats.attention, "ATTENTION"],
+    ["Ignored music", state.ignoredCount, "IGNORED"],
   ];
   for (const [label, count, filter] of values) {
     let element = $("stats").querySelector(`[data-filter="${filter}"]`);
@@ -681,7 +725,7 @@ function updateStats(stats) {
       $("stats").append(element);
     }
     element.firstElementChild.textContent = count.toLocaleString();
-    element.setAttribute("aria-pressed", String($("filter").value === filter));
+    element.setAttribute("aria-pressed", String(state.musicView === "ignored" ? filter === "IGNORED" : $("filter").value === filter));
     element.title = `Filter by ${label.toLowerCase()}; the count is for the whole selected library`;
   }
 }
@@ -738,7 +782,7 @@ function eventVisible(event) {
 function renderEvents() {
   const box = $("logs");
   box.replaceChildren(...state.events.filter(eventVisible).map(eventNode));
-  box.scrollTop = box.scrollHeight;
+  if (state.followLogs) followLatestEvents();
 }
 
 async function loadEvents() {
@@ -751,14 +795,39 @@ async function loadEvents() {
   state.events.push(...events);
   state.events = state.events.slice(-2000);
   const box = $("logs");
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
   for (const event of events) if (eventVisible(event)) box.append(eventNode(event));
   if (!selectionTouches(box)) while (box.childElementCount > 2000) box.firstElementChild?.remove();
-  if (atBottom) box.scrollTop = box.scrollHeight;
+  if (state.followLogs) followLatestEvents();
+  else { state.unseenEvents += events.filter(eventVisible).length; updateLogFollowing(); }
 }
+
+function updateLogFollowing() {
+  $("followLogs").checked = state.followLogs;
+  $("jumpLatest").hidden = state.followLogs;
+  $("jumpLatest").textContent = state.unseenEvents ? `Jump to latest · ${state.unseenEvents} new` : "Jump to latest";
+}
+function followLatestEvents() {
+  if (state.tab !== "activity" || !state.followLogs) return;
+  const box = $("logs");
+  box.scrollTop = box.scrollHeight;
+  state.unseenEvents = 0; updateLogFollowing();
+}
+$("logs").addEventListener("scroll", () => {
+  if (state.tab !== "activity") return;
+  const box = $("logs");
+  state.followLogs = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  if (state.followLogs) state.unseenEvents = 0;
+  updateLogFollowing();
+});
+$("followLogs").addEventListener("change", () => {
+  state.followLogs = $("followLogs").checked;
+  updateLogFollowing(); followLatestEvents();
+});
+$("jumpLatest").addEventListener("click", () => { state.followLogs = true; followLatestEvents(); });
 
 $("clearLogs").addEventListener("click", () => {
   state.events = [];
+  state.unseenEvents = 0; state.followLogs = true; updateLogFollowing();
   $("logs").replaceChildren();
   notice("Displayed logs cleared. Stored server events were not deleted.");
 });
@@ -907,13 +976,31 @@ async function loadIgnored(background = true) {
   const current = beginRequest("ignored");
   const entries = await api(`/api/ignored?user_id=${encodeURIComponent(state.user)}`, null, null, current);
   if (!current()) return;
-  updateKeyedChildren($("ignored"), entries, {
+  state.ignoredCount = entries.length;
+  const ignoredTab = $("stats").querySelector('[data-filter="IGNORED"]');
+  if (ignoredTab) ignoredTab.firstElementChild.textContent = entries.length.toLocaleString();
+  const query = $("ignoredSearch").value.trim().toLocaleLowerCase();
+  const matching = entries.filter(entry => !query || `${entry.title} ${entry.mbid || ""} ${(entry.origins || []).map(origin => `${origin.title} ${origin.url}`).join(" ")}`.toLocaleLowerCase().includes(query));
+  state.ignoredMaxPage = Math.max(1, Math.ceil(matching.length / 50));
+  state.ignoredPage = Math.min(state.ignoredPage, state.ignoredMaxPage);
+  $("ignoredPage").textContent = `Page ${state.ignoredPage} of ${state.ignoredMaxPage}`;
+  $("ignoredPrev").disabled = state.ignoredPage <= 1;
+  $("ignoredNext").disabled = state.ignoredPage >= state.ignoredMaxPage;
+  updateKeyedChildren($("ignored"), matching.slice((state.ignoredPage - 1) * 50, state.ignoredPage * 50), {
     key: entry => entry.id,
     signature: stable,
     render: renderIgnored,
     background,
     empty: () => node("p", "No ignored music.", "empty"),
   });
+}
+
+$("ignoredSearch").addEventListener("input", () => { state.ignoredPage = 1; guard(() => loadIgnored(false))(); });
+for (const [id, delta] of [["ignoredPrev", -1], ["ignoredNext", 1]]) {
+  $(id).addEventListener("click", guard(async () => {
+    state.ignoredPage = Math.max(1, Math.min(state.ignoredMaxPage, state.ignoredPage + delta));
+    await loadIgnored(false);
+  }));
 }
 
 function reportErrors(results) {
@@ -963,7 +1050,7 @@ for (const suffix of ["", "Bottom"]) {
     $(direction + suffix).addEventListener("click", guard(async () => {
       state.page = Math.max(1, Math.min(state.maxPage, state.page + delta));
       await refreshTracks(false);
-      if (suffix) $("resultsSummary").scrollIntoView?.({block: "start"});
+      if (suffix) $("musicResults").scrollIntoView?.({block: "start"});
     }));
   }
 }
