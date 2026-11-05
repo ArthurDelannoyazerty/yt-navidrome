@@ -36,12 +36,19 @@ async function browser(t) {
   const child = spawn(binary, ["--headless=new", "--no-sandbox", "--disable-gpu",
     "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
     "--remote-debugging-port=0", "--user-data-dir=" + profile, "about:blank"],
-  {stdio: ["ignore", "ignore", "pipe"]});
-  t.after(async () => {
-    child.kill("SIGTERM");
-    await Promise.race([new Promise(done => child.once("exit", done)), delay(1500)]);
-    if (child.exitCode === null) child.kill("SIGKILL");
-    rmSync(profile, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});
+  {stdio: ["ignore", "ignore", "pipe"], detached: process.platform !== "win32"});
+  t.after(() => {
+    // Chrome forks subprocesses that can keep stderr open after its parent exits.
+    // Close the entire process group so a failed assertion cannot strand CI.
+    try {
+      if (process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+      else child.kill("SIGKILL");
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+    child.stderr.destroy();
+    child.unref();
+    rmSync(profile, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
   });
   const address = await new Promise((done, reject) => {
     let output = "";
