@@ -17,7 +17,11 @@ from audio_tags import REPAIRABLE_ISSUES
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, prepare_correction
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+
+class JobCancelled(RuntimeError):
+    """A durable user cancellation, distinct from service shutdown."""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -84,6 +88,9 @@ CREATE TABLE IF NOT EXISTS track_origins (
  channel TEXT,
  downloadable INTEGER NOT NULL DEFAULT 1,
  availability TEXT NOT NULL DEFAULT 'UNKNOWN',
+ download_enabled INTEGER NOT NULL DEFAULT 1,
+ disabled_at TEXT,
+ disabled_reason TEXT,
  first_seen_at TEXT NOT NULL,
  playlist_discovered_at TEXT,
  last_seen_at TEXT NOT NULL,
@@ -201,7 +208,10 @@ CREATE TABLE IF NOT EXISTS jobs (
  created_at TEXT NOT NULL,
  finished_at TEXT,
  not_before REAL NOT NULL DEFAULT 0,
- defer_count INTEGER NOT NULL DEFAULT 0
+ defer_count INTEGER NOT NULL DEFAULT 0,
+ download_failures INTEGER NOT NULL DEFAULT 0,
+ cancel_requested INTEGER NOT NULL DEFAULT 0,
+ stage TEXT NOT NULL DEFAULT 'queued'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_job
  ON jobs(kind, target) WHERE state IN ('PENDING', 'RUNNING');
@@ -317,7 +327,7 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
@@ -353,6 +363,23 @@ class Store:
                 if "channel" not in {row["name"] for row in con.execute("PRAGMA table_info(track_origins)")}:
                     con.execute("ALTER TABLE track_origins ADD COLUMN channel TEXT")
                 con.execute("PRAGMA user_version=4")
+                con.commit()
+
+            if version in (1, 2, 3, 4):
+                self.backup_database("schema-v4")
+                con.execute("BEGIN IMMEDIATE")
+                for table, fields in (
+                    ("track_origins", (("download_enabled", "INTEGER NOT NULL DEFAULT 1"),
+                                       ("disabled_at", "TEXT"), ("disabled_reason", "TEXT"))),
+                    ("jobs", (("download_failures", "INTEGER NOT NULL DEFAULT 0"),
+                              ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+                              ("stage", "TEXT NOT NULL DEFAULT 'queued'"))),
+                ):
+                    columns = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
+                    for name, definition in fields:
+                        if name not in columns:
+                            con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                con.execute("PRAGMA user_version=5")
                 con.commit()
 
             con.executescript(SCHEMA + METADATA_SCHEMA)
@@ -485,8 +512,160 @@ class Store:
             return con.execute(sql, args).rowcount > 0
         return self.execute(sql, args) > 0
 
+    @staticmethod
+    def _finish_cancelled_locked(con, job):
+        con.execute("UPDATE jobs SET state='CANCELLED',cancel_requested=1,finished_at=? WHERE id=?",
+                    (utcnow(), job["id"]))
+        if job["kind"] == "track":
+            con.execute(
+                """UPDATE tracks SET operation_state='STOPPED',operation_error=?,updated_at=?
+                   WHERE id=? AND NOT EXISTS(SELECT 1 FROM jobs WHERE kind='track' AND target=?
+                     AND id<>? AND state IN ('PENDING','RUNNING'))""",
+                ("Stopped by user; choose another video or enable this URL before retrying.",
+                 utcnow(), job["target"], job["target"], job["id"]),
+            )
+
+    def job_checkpoint(self, job_id: int, stage: str | None = None):
+        """Serialize stop requests with stage boundaries, before any publication."""
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            job = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not job or job["state"] == "CANCELLED" or job["cancel_requested"]:
+                raise JobCancelled("Track operation was stopped")
+            if stage:
+                con.execute("UPDATE jobs SET stage=? WHERE id=?", (stage, job_id))
+
+    def finish_job(self, job_id: int):
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            job = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not job:
+                return
+            if job["cancel_requested"] or job["state"] == "CANCELLED":
+                self._finish_cancelled_locked(con, job)
+            elif job["state"] == "RUNNING":
+                con.execute("UPDATE jobs SET state='DONE',finished_at=?,error=NULL WHERE id=?", (utcnow(), job_id))
+
+    def finish_cancelled_job(self, job_id: int):
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            job = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job:
+                self._finish_cancelled_locked(con, job)
+
+    def fail_job(self, job, kind: str, error: str):
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = con.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone()
+            if not current:
+                return
+            if current["cancel_requested"] or current["state"] == "CANCELLED":
+                self._finish_cancelled_locked(con, current)
+                return
+            con.execute("UPDATE jobs SET state='FAILED',error=?,finished_at=? WHERE id=?",
+                        (redact(error), utcnow(), job["id"]))
+            if job["kind"] == "track":
+                con.execute("UPDATE tracks SET operation_state='FAILED',operation_kind=?,operation_error=?,updated_at=? WHERE id=?",
+                            (kind.upper(), redact(error), utcnow(), job["target"]))
+            elif job["kind"] == "sync":
+                con.execute("UPDATE sources SET status='FAILED',error=? WHERE id=?", (redact(error), job["target"]))
+
+    def disable_origin(self, track_id: str, origin_id: str, user: str, reason: str = "Disabled by user"):
+        """Disable network use without removing audio, provenance or memberships."""
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=? AND user_id=?",
+                                 (origin_id, track_id, user)).fetchone()
+            if not origin:
+                raise LookupError("Origin not found on this track in the selected library")
+            if not origin["downloadable"]:
+                raise ValueError("This origin provides metadata only; it has no audio download to disable")
+            con.execute("UPDATE track_origins SET download_enabled=0,disabled_at=COALESCE(disabled_at,?),disabled_reason=? WHERE id=?",
+                        (utcnow(), redact(reason)[:1000], origin_id))
+            job = con.execute("SELECT * FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')",
+                              (track_id,)).fetchone()
+            result = {"origin_id": origin_id, "cancelled": False, "cancellation_pending": False,
+                      "publication_finishing": False, "job_id": None}
+            payload = json.loads(job["payload"] or "{}") if job else {}
+            if job and payload.get("origin_id") == origin_id and payload.get("mode") in {
+                "ingest", "redownload", "reprocess", "replace_source", "resume"
+            }:
+                directory = STATE / "staging" / track_id
+                committed = con.execute("SELECT 1 FROM operation_receipts WHERE operation_id=?",
+                                        (payload.get("operation"),)).fetchone()
+                # A process may already have written/moved the new file. Complete
+                # its recoverable publication rather than interrupting its commit.
+                if job["stage"] in {"applying", "publishing"} or (directory / "apply-request.json").exists() or committed:
+                    result["publication_finishing"] = True
+                else:
+                    con.execute("UPDATE jobs SET cancel_requested=1 WHERE id=?", (job["id"],))
+                    result["job_id"] = job["id"]
+                    if job["state"] == "PENDING":
+                        self._finish_cancelled_locked(con, job)
+                        result["cancelled"] = True
+                    else:
+                        result["cancellation_pending"] = True
+            return result
+
+    def enable_origin(self, track_id: str, origin_id: str, user: str):
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            changed = con.execute(
+                "UPDATE track_origins SET download_enabled=1,disabled_at=NULL,disabled_reason=NULL WHERE id=? AND track_id=? AND user_id=?",
+                (origin_id, track_id, user),
+            ).rowcount
+            if not changed:
+                raise LookupError("Origin not found on this track in the selected library")
+        return {"message": "Video enabled. Retry explicitly when ready."}
+
+    def disabled_origins(self, user: str):
+        self.require_user(user)
+        return self.rows(
+            """SELECT o.*,COALESCE(t.matched_title,t.title) AS track_title,t.health,t.operation_state
+               FROM track_origins o JOIN tracks t ON t.id=o.track_id
+               WHERE o.user_id=? AND o.download_enabled=0 ORDER BY o.disabled_at DESC,o.id""", (user,),
+        )
+
+    def queue_replacement(self, track_id: str, user: str, url: str):
+        from providers import parse_source
+        ref = parse_source(url)
+        if ref.provider != "youtube" or ref.is_playlist:
+            raise ValueError("Choose a single YouTube video as replacement audio")
+        media_key = ref.key.split(":", 1)[1]
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            track = con.execute("SELECT * FROM tracks WHERE id=? AND user_id=?", (track_id, user)).fetchone()
+            if not track:
+                raise LookupError("Track not found for this user")
+            if con.execute("SELECT 1 FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')", (track_id,)).fetchone():
+                raise ValueError("Stop the current download and wait until it has stopped before choosing another video")
+            if self._origin_ignored(con, user, ref.provider, media_key):
+                raise ValueError("This video URL is ignored. Restore that specific URL before using it.")
+            origin = con.execute("SELECT * FROM track_origins WHERE user_id=? AND provider=? AND media_key=?",
+                                 (user, ref.provider, media_key)).fetchone()
+            if origin and origin["track_id"] != track_id:
+                raise ValueError("This video already belongs to another library track. Review that track instead of silently merging its identity.")
+            if origin and not origin["download_enabled"]:
+                raise ValueError("This video is disabled. Enable it explicitly before selecting it again.")
+            origin_id = origin["id"] if origin else str(uuid.uuid4())
+            if not origin:
+                now = utcnow()
+                con.execute(
+                    """INSERT INTO track_origins(id,track_id,user_id,provider,media_key,url,title,
+                       downloadable,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?,?,1,?,?)""",
+                    (origin_id, track_id, user, ref.provider, media_key, ref.url, track["title"], now, now),
+                )
+            payload = {"mode": "replace_source", "origin_id": origin_id, "source_key": ref.key,
+                       "expected_mbid": track["mbid"], "expected_asset_id": track["current_asset_id"]}
+            if not self.enqueue("track", track_id, user, payload, con=con):
+                raise ValueError("This track already has an active job")
+            con.execute("UPDATE tracks SET operation_state='QUEUED',operation_kind='REPLACE_SOURCE',operation_error=NULL,pending_operation=NULL,updated_at=? WHERE id=?",
+                        (utcnow(), track_id))
+        return {"message": "Replacement video queued. Existing audio and playlists are kept until validation succeeds.",
+                "origin_id": origin_id}
+
     def defer_job(self, job_id: int, reason: str, *, retry_at: float | None = None,
-                  base_delay: float = 60.0) -> float:
+                  base_delay: float = 60.0, download_failure: bool = False) -> float | None:
         """Return a running job to the durable queue without losing staged work."""
         reason = redact(reason)
         now = time.time()
@@ -495,13 +674,29 @@ class Store:
             job = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not job:
                 raise LookupError("Job not found")
+            if job["cancel_requested"] or job["state"] == "CANCELLED":
+                self._finish_cancelled_locked(con, job)
+                return None
+            failures = int(job["download_failures"] or 0) + int(download_failure)
+            try:
+                maximum = max(1, int(os.getenv("DOWNLOAD_MAX_ATTEMPTS", "5")))
+            except ValueError:
+                maximum = 5
+            if download_failure and failures >= maximum:
+                message = f"Stopped after {failures} failed download attempts. Choose another video or retry explicitly. {reason}"
+                con.execute("UPDATE jobs SET state='FAILED',error=?,finished_at=?,download_failures=? WHERE id=?",
+                            (message, utcnow(), failures, job_id))
+                if job["kind"] == "track":
+                    con.execute("UPDATE tracks SET operation_state='FAILED',operation_error=?,updated_at=? WHERE id=?",
+                                (message, utcnow(), job["target"]))
+                return None
             count = int(job["defer_count"] or 0) + 1
             backoff_at = now + min(1800.0, base_delay * (2 ** min(count - 1, 5)))
             retry_at = max(float(retry_at or 0), backoff_at, now + 1.0)
             con.execute(
                 """UPDATE jobs SET state='PENDING',error=?,finished_at=NULL,
-                   not_before=?,defer_count=? WHERE id=?""",
-                (reason, retry_at, count, job_id),
+                   not_before=?,defer_count=?,download_failures=? WHERE id=?""",
+                (reason, retry_at, count, failures, job_id),
             )
             if job["kind"] == "track":
                 con.execute(
@@ -520,7 +715,7 @@ class Store:
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             pending = con.execute(
-                "SELECT id,target,payload,not_before FROM jobs WHERE kind='track' AND state='PENDING'"
+                "SELECT id,target,payload,not_before FROM jobs WHERE kind='track' AND state='PENDING' AND cancel_requested=0"
             ).fetchall()
             for job in pending:
                 try:
@@ -599,7 +794,7 @@ class Store:
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
-                "SELECT * FROM jobs WHERE state='PENDING' AND not_before<=? ORDER BY id LIMIT 1",
+                "SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 AND not_before<=? ORDER BY id LIMIT 1",
                 (time.time(),),
             ).fetchone()
             if not row:
@@ -613,6 +808,10 @@ class Store:
             return dict(row)
 
     def recover(self):
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            for job in con.execute("SELECT * FROM jobs WHERE cancel_requested=1 AND state IN ('PENDING','RUNNING')").fetchall():
+                self._finish_cancelled_locked(con, job)
         self.execute("UPDATE jobs SET state='PENDING' WHERE state='RUNNING'")
         self.execute("UPDATE tracks SET operation_state='QUEUED',updated_at=? WHERE operation_state='RUNNING'", (utcnow(),))
         self.execute("UPDATE sources SET status='PENDING' WHERE status='SYNCING'")
@@ -735,7 +934,7 @@ class Store:
                         (entry.url, entry.title, entry.channel, int(entry.downloadable), first_seen, origin_playlist, now, origin_id),
                     )
                     # Refresh must not steal approval, deferred or failed operations.
-                    if entry.downloadable and origin["health"] in {"UNAVAILABLE", "MISSING"} and origin["operation_state"] == "IDLE":
+                    if entry.downloadable and origin["download_enabled"] and origin["health"] in {"UNAVAILABLE", "MISSING"} and origin["operation_state"] == "IDLE":
                         queued = self.enqueue("track", track_id, source["user_id"], {"mode": "ingest", "origin_id": origin_id}, con=con)
                         if queued:
                             con.execute(
@@ -775,11 +974,13 @@ class Store:
                 origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=? AND user_id=?", (track["current_origin_id"], track_id, user)).fetchone()
             if origin is None:
                 origin = con.execute(
-                    """SELECT * FROM track_origins WHERE track_id=? AND user_id=? AND downloadable=1
+                    """SELECT * FROM track_origins WHERE track_id=? AND user_id=? AND downloadable=1 AND download_enabled=1
                        ORDER BY last_download_at IS NULL, last_download_at DESC, id LIMIT 1""", (track_id, user),
                 ).fetchone()
         if not origin:
             raise ValueError("No matching download origin exists for this track")
+        if not origin["download_enabled"]:
+            raise ValueError("This video is disabled. Enable it or choose another video.")
         if not origin["downloadable"]:
             raise ValueError("The selected origin provides discovery metadata but no downloadable audio")
         return origin
@@ -804,9 +1005,9 @@ class Store:
                 payload = prepare_correction(con, track, payload)
                 mode = payload["mode"]
             if mode == "retry":
-                if track["operation_state"] != "FAILED":
-                    raise ValueError("Only a failed operation can be retried")
-                previous = con.execute("SELECT payload FROM jobs WHERE kind='track' AND target=? AND state='FAILED' ORDER BY id DESC LIMIT 1", (track_id,)).fetchone()
+                if track["operation_state"] not in {"FAILED", "STOPPED"}:
+                    raise ValueError("Only a failed or stopped operation can be retried")
+                previous = con.execute("SELECT payload FROM jobs WHERE kind='track' AND target=? AND state IN ('FAILED','CANCELLED') ORDER BY id DESC LIMIT 1", (track_id,)).fetchone()
                 payload = json.loads(previous["payload"]) if previous else {"mode": "ingest"}
                 mode = payload.get("mode", "ingest")
             elif mode == "approve":
@@ -823,10 +1024,18 @@ class Store:
                 payload = {**pending, "mode": "resume", "selected": selected}
                 mode = pending.get("action", "reprocess")
                 con.execute("UPDATE tracks SET selected=? WHERE id=?", (json.dumps(selected), track_id))
-            elif mode in {"redownload", "reprocess"}:
+            elif mode in {"redownload", "reprocess", "refresh_suggestions"}:
                 if track["health"] not in {"AVAILABLE", "MISSING"}:
                     raise ValueError("This action requires an existing logical track")
-                origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
+                if mode == "refresh_suggestions":
+                    origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=?",
+                                         (track["current_origin_id"], track_id)).fetchone()
+                    if not origin:
+                        origin = con.execute("SELECT * FROM track_origins WHERE track_id=? ORDER BY id LIMIT 1", (track_id,)).fetchone()
+                    if not origin or not (track["file_path"] or track["temp_path"]):
+                        raise ValueError("Existing audio is required to refresh suggestions")
+                else:
+                    origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
                 payload["origin_id"] = origin["id"]
             elif mode == "repair":
                 if track["health"] != "AVAILABLE" or not track["file_path"]:
@@ -836,9 +1045,9 @@ class Store:
             elif mode in {"retag", "restore_source"}:
                 if track["health"] != "AVAILABLE" or not track["file_path"]:
                     raise ValueError("Metadata editing requires an available audio file")
-            elif mode not in {"delete", "delete_ignore", "delete_ignore_urls", "comment", "ingest", "resume"}:
+            elif mode not in {"delete", "delete_ignore", "delete_ignore_urls", "comment", "ingest", "resume", "replace_source"}:
                 raise ValueError("Unsupported track action")
-            if mode == "ingest":
+            if mode in {"ingest", "replace_source"}:
                 origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
                 payload["origin_id"] = origin["id"]
             if not self.enqueue("track", track_id, user, payload, con=con):
@@ -1069,7 +1278,7 @@ class Store:
                    health='UNAVAILABLE',beets_id=NULL,temporary_candidate_sha256=NULL,updated_at=? WHERE id=?""", (now, source_id),
             )
             remaining = con.execute(
-                """SELECT id FROM track_origins WHERE track_id=? AND id<>? AND downloadable=1
+                """SELECT id FROM track_origins WHERE track_id=? AND id<>? AND downloadable=1 AND download_enabled=1
                    ORDER BY last_download_at IS NULL,last_download_at DESC,id LIMIT 1""", (source_id, origin_id),
             ).fetchone()
             reingest_origin_id = remaining["id"] if remaining else None
@@ -1496,7 +1705,7 @@ class Store:
             "UNAVAILABLE": "t.health='UNAVAILABLE'", "WORKING": "t.operation_state IN ('QUEUED','RUNNING','DEFERRED')",
             "QUEUED": "t.operation_state='QUEUED'", "RUNNING": "t.operation_state='RUNNING'",
             "DEFERRED": "t.operation_state='DEFERRED'", "NEEDS_APPROVAL": "t.operation_state='NEEDS_APPROVAL'",
-            "FAILED": "t.operation_state='FAILED'", "ATTENTION": "(t.health='MISSING' OR t.operation_state='FAILED')",
+            "FAILED": "t.operation_state='FAILED'", "STOPPED": "t.operation_state='STOPPED'", "ATTENTION": "(t.health='MISSING' OR t.operation_state IN ('FAILED','STOPPED'))",
             "UNMATCHED": "(t.mbid IS NULL OR t.mbid='')",
             "NEEDS_AUDIO": "t.current_asset_id IS NULL AND EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.provider='spotify') AND NOT EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.downloadable=1)",
             "INTEGRITY": "EXISTS(SELECT 1 FROM integrity_issues i WHERE i.track_id=t.id AND i.resolved_at IS NULL)",
@@ -1529,7 +1738,7 @@ class Store:
                     GROUP BY o.track_id,s.id,s.title ORDER BY added_at""", ids,
             ):
                 playlists.setdefault(playlist.pop("track_id"), []).append(playlist)
-            for job in self.rows(f"SELECT target,not_before,defer_count FROM jobs WHERE kind='track' AND state IN ('PENDING','RUNNING') AND target IN ({marks})", ids):
+            for job in self.rows(f"SELECT target,not_before,defer_count,download_failures,cancel_requested,stage,payload FROM jobs WHERE kind='track' AND state IN ('PENDING','RUNNING') AND target IN ({marks})", ids):
                 jobs[job["target"]] = job
             for issue in self.rows(f"SELECT track_id,COUNT(*) AS n FROM integrity_issues WHERE resolved_at IS NULL AND track_id IN ({marks}) GROUP BY track_id", ids):
                 issues[issue["track_id"]] = issue["n"]
@@ -1542,6 +1751,14 @@ class Store:
             job = jobs.get(row["id"], {})
             row["retry_at"] = job.get("not_before")
             row["defer_count"] = int(job.get("defer_count") or 0)
+            row["download_failures"] = int(job.get("download_failures") or 0)
+            row["job_stage"] = job.get("stage")
+            row["cancellation_pending"] = bool(job.get("cancel_requested"))
+            payload = json.loads(job.get("payload") or "{}")
+            row["active_origin_id"] = payload.get("origin_id")
+            row["can_stop_download"] = bool(payload.get("origin_id") and job.get("stage") not in {"applying", "publishing"}
+                                                and payload.get("mode") in {"ingest", "redownload", "reprocess", "replace_source", "resume"})
+            row["needs_source"] = not row.get("current_asset_id") and not any(o["downloadable"] and o["download_enabled"] for o in row["origins"])
             row["playlists"] = playlists.get(row["id"], [])
             row["issue_count"] = issues.get(row["id"], 0)
         stats_rows = self.rows(
@@ -1549,7 +1766,7 @@ class Store:
                SUM(operation_state='QUEUED') AS queued,SUM(operation_state='RUNNING') AS running,
                SUM(operation_state IN ('QUEUED','RUNNING')) AS working,
                SUM(operation_state='DEFERRED') AS deferred,SUM(operation_state='NEEDS_APPROVAL') AS approval,
-               SUM(operation_state='FAILED') AS failed,SUM(health='MISSING' OR operation_state='FAILED') AS attention
+               SUM(operation_state='FAILED') AS failed,SUM(operation_state='STOPPED') AS stopped,SUM(health='MISSING' OR operation_state IN ('FAILED','STOPPED')) AS attention
                FROM tracks WHERE user_id=?""", (user,),
         )[0]
         return {"tracks": rows, "total": total, "page": page, "limit": limit,
