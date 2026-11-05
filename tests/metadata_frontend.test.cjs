@@ -240,6 +240,7 @@ test('switching library during a save leaves the new library review untouched', 
 test('rejecting a candidate replaces the revision/token and requires another choice', async()=>{
   const b=setup();
   const pending=b.metadata.open({id:'first'},'suggestions');b.requests[0].resolve(reviewContext());await pending;
+  const audio=b.get('metadataAudio');audio.currentTime=42;audio.paused=true;audio.duration=190;
   const entry=b.get('metadataSuggestions').children[0];
   const reject=entry.children.find(child=>child.textContent==='Wrong recording');
   const rejected=reject.listeners.click();
@@ -247,6 +248,8 @@ test('rejecting a candidate replaces the revision/token and requires another cho
   b.requests[1].resolve(reviewContext('first',{revision:'s'.repeat(64),approval_token:'fresh-token',
     choices:[{index:0,kind:'source',title:'誓いの旋律',artist:'Kenichiro Suehiro'}]}));
   await rejected;
+  assert.match(audio.src,/approval_token=fresh-token/);
+  audio.currentTime=0;audio.listeners.loadedmetadata();assert.equal(audio.currentTime,42);
   assert.equal(b.get('metadataSuggestionApply').disabled,true);
   const radio=b.get('metadataSuggestions').children[0].children[0].children[0];
   radio.checked=true;radio.listeners.change();
@@ -307,4 +310,41 @@ test('storage quota errors do not prevent reviewing or saving the next track', a
   b.requests[2].resolve({message:'Queued'});await pending;
   assert.equal(b.get('metadataQueueComplete').hidden,false);
   assert.match(b.get('metadataQueueScope').textContent,/Resume unavailable/);
+});
+
+
+function treeText(element) {
+  return [element.textContent,...(element.children||[]).map(treeText)].filter(Boolean).join(' ');
+}
+test('review evidence uses backend fingerprint tri-state and diagnostic score gap', async()=>{
+  const b=setup();
+  const pending=b.metadata.open({id:'first'},'suggestions');
+  b.requests[0].resolve(reviewContext('first',{choices:[true,false,null].map((support,index)=>({
+    index,kind:'candidate',title:'Choice '+index,artist:'Artist',match_score:85-index,
+    evidence:{fingerprint_support:support,duration_delta_seconds:2.1,penalties:[{field:'artist',penalty:0.1}]}
+  })),latest_identification:{at:'now',source_title:'Song',recommendation:'medium',candidate_count:3,
+    diagnostics:{fingerprint_generated:true,acoustid_id_present:true,top_score_gap:3.4}}}));
+  await pending;
+  const suggestions=b.get('metadataSuggestions').children;
+  assert.match(treeText(suggestions[0]),/Fingerprint lookup supports this recording/);
+  assert.match(treeText(suggestions[1]),/Fingerprint lookup returned other recordings/);
+  assert.match(treeText(suggestions[2]),/Fingerprint support is unknown/);
+  assert.match(treeText(suggestions[0]),/Matching differences: artist/);
+  assert.match(treeText(b.get('metadataDiagnostic')),/top two match scores differed by 3.4 points out of 100/);
+});
+
+test('missing actual tags remain unknown and alias confirmation names the original source text', async()=>{
+  const b=setup();
+  await open(b,'search',{current_tags:{},current_tags_error:'Current audio metadata could not be read.',
+    search_hints:{artist:'Already mapped canonical name',title:'Song',artist_id:MBID,notes:[]},
+    approved_artist_alias:{alias:'Kenichiro Suehiro',artist_name:'Already mapped canonical name',artist_id:MBID}});
+  assert.equal(b.get('metadataCurrentValues').children[3].textContent,'Not available');
+  b.get('mbEntity').value='artist';b.get('mbEntity').listeners.change();
+  const different='33333333-3333-4333-8333-333333333333';
+  await searchResults(b,[{id:different,name:'Correct artist'}]);
+  let confirmation='';
+  b.context.confirm=message=>{confirmation=message;return false;};
+  const remember=b.get('mbResults').children[0].children.find(child=>child.textContent==='Remember artist: Correct artist');
+  await remember.listeners.click();
+  assert.match(confirmation,/Remember "Kenichiro Suehiro" as "Correct artist"/);
 });

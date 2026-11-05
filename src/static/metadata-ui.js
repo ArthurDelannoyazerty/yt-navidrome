@@ -4,7 +4,7 @@ window.MetadataUI = (() => {
   const ui = {context: null, user: null, track: null, serial: 0, loadSerial: 0, timer: null,
     controller: null, page: 1, maxPage: 1, artistId: null, selected: null, choiceIndex: null,
     pane: "suggestions", sending: false, loading: false, retryUntil: 0, effectiveQuery: null,
-    searchLoaded: false, queue: null, manualOriginal: {}, storageWarned: false};
+    searchLoaded: false, queue: null, manualOriginal: {}, storageWarned: false, audioKey: null, audioSerial: 0};
   const manualFields = {artist: "metadataManualArtist", title: "metadataManualTitle", album: "metadataManualAlbum",
     mbid: "metadataManualMbid", release_id: "metadataManualRelease"};
   const paneNames = ["suggestions", "search", "source", "manual"];
@@ -20,7 +20,37 @@ window.MetadataUI = (() => {
   }
   function stopAudio() {
     const audio = $("metadataAudio");
+    ui.audioSerial += 1; ui.audioKey = null; delete audio.dataset.reviewUrl;
     audio.pause?.(); audio.removeAttribute?.("src"); audio.load?.();
+  }
+  function syncAudio(data) {
+    const audio = $("metadataAudio"), reviewing = data.state === "NEEDS_APPROVAL";
+    audio.hidden = data.health !== "AVAILABLE" && !reviewing;
+    audio.setAttribute("aria-label", reviewing ? "Listen to the audio under review" : "Listen to the current local audio");
+    const key = [ui.user, data.track_id, reviewing ? data.origin_id || data.source?.origin_id || "candidate" : "current"].join(":");
+    const url = audio.hidden ? "" : `/api/tracks/${encodeURIComponent(data.track_id)}/audio?user_id=${encodeURIComponent(ui.user)}${reviewing ? "&candidate=true" + (data.approval_token ? "&approval_token=" + encodeURIComponent(data.approval_token) : "") : ""}`;
+    if (!url) stopAudio();
+    else if (audio.dataset.reviewUrl !== url) {
+      const position = ui.audioKey === key && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+      const resume = ui.audioKey === key && audio.paused === false;
+      const serial = ++ui.audioSerial;
+      audio.pause?.(); audio.src = url; audio.dataset.reviewUrl = url; ui.audioKey = key;
+      if (position > 0 || resume) {
+        audio.addEventListener("loadedmetadata", () => {
+          if (serial !== ui.audioSerial || audio.dataset.reviewUrl !== url) return;
+          try { audio.currentTime = Number.isFinite(audio.duration) ? Math.min(position, audio.duration) : position; } catch (_) {}
+          if (resume) audio.play?.()?.catch?.(() => {});
+        }, {once: true});
+        audio.load?.();
+      }
+    }
+    $("metadataAudioNote").textContent = audio.hidden ? "No local audio is available." : reviewing
+      ? "Audio under review. Existing library audio is retained until the change succeeds." : "Current local audio.";
+    if (data.current_tags_error) $("metadataAudioNote").textContent += ` ${data.current_tags_error}`;
+    const sourceLink = $("metadataSourceLink"), sourceUrl = data.source_url;
+    sourceLink.hidden = !sourceUrl || !/^https?:\/\//i.test(sourceUrl);
+    if (!sourceLink.hidden) sourceLink.href = sourceUrl;
+    else sourceLink.removeAttribute?.("href");
   }
   function reset() {
     invalidate(); ui.loadSerial += 1; stopAudio();
@@ -151,8 +181,9 @@ window.MetadataUI = (() => {
     if (Number.isFinite(data.candidate_duration_seconds)) parts.push(`Recording ${duration(data.candidate_duration_seconds)}`);
     if (Number.isFinite(data.local_duration_seconds)) parts.push(`Audio ${duration(data.local_duration_seconds)}`);
     if (Number.isFinite(data.duration_delta_seconds)) parts.push(`Duration difference ${Math.abs(data.duration_delta_seconds).toFixed(1)} s`);
-    if (data.fingerprint_supported != null) parts.push(data.fingerprint_supported ? "Fingerprint support recorded" : "No fingerprint support recorded");
-    if (Number.isFinite(data.score_gap)) parts.push(`Score gap ${data.score_gap}`);
+    if (data.fingerprint_support === true) parts.push("Fingerprint lookup supports this recording");
+    else if (data.fingerprint_support === false) parts.push("Fingerprint lookup returned other recordings");
+    else if ("fingerprint_support" in data) parts.push("Fingerprint support is unknown");
     if (parts.length) box.append(node("small", parts.join(" · ")));
     if (data.source_version_clues?.length || data.version_clues?.length) box.append(node("small", `Source version: ${(data.source_version_clues || []).join(", ") || "unspecified"} · Recording version: ${(data.version_clues || []).join(", ") || "unspecified"}`));
     if (data.version_conflict) box.append(node("strong", "Version clues differ. Listen before choosing.", "warning-text"));
@@ -308,6 +339,8 @@ window.MetadataUI = (() => {
       node("p", `Search seed: ${seed.artist || "unknown artist"} — ${seed.title || "unknown title"}`),
       node("p", `Recommendation: ${report.recommendation}. Automatic candidates: ${report.candidate_count}.`),
       node("p", `Fingerprint generated: ${report.diagnostics?.fingerprint_generated ? "yes" : "not recorded"}; AcoustID identifier: ${report.diagnostics?.acoustid_id_present ? "present" : "not recorded"}.`));
+    const gap = report.diagnostics?.top_score_gap;
+    if (Number.isFinite(gap)) box.append(node("p", `At the last identification, the top two match scores differed by ${gap.toFixed(1)} points out of 100.`));
     if (report.previous_mbid) box.append(node("p", `Previously applied identity: ${report.previous_title || report.previous_mbid}`));
   }
   function renderContext(data, fresh = false) {
@@ -322,7 +355,7 @@ window.MetadataUI = (() => {
     const source = data.source?.tags || {}, current = data.current_tags || {};
     values("sourceMetadataValues", Object.entries(source));
     values("metadataOriginalValues", [["Artist", source.artist], ["Title", source.title], ["Album", source.album], ["Duration", duration(data.candidate_duration_seconds)]]);
-    values("metadataCurrentValues", [["Artist", current.artist], ["Title", current.title || data.current_title], ["Album", current.album],
+    values("metadataCurrentValues", [["Artist", current.artist], ["Title", current.title], ["Album", current.album],
       ["Recording", data.current_mbid || "No MusicBrainz identity"], ["Duration", duration(data.current_duration_seconds)]]);
     const hints = data.search_hints || {};
     $("metadataSearchHint").textContent = [...(hints.notes || []), hints.artist_id ? "Search uses the confirmed artist ID." : ""].filter(Boolean).join(" ");
@@ -332,17 +365,9 @@ window.MetadataUI = (() => {
         mbid: data.current_mbid || "", release_id: data.current_release_id || ""};
       for (const [field, id] of Object.entries(manualFields)) $(id).value = ui.manualOriginal[field];
       sourceQuery(false);
-      const audio = $("metadataAudio"), reviewing = data.state === "NEEDS_APPROVAL";
-      audio.hidden = data.health !== "AVAILABLE" && !reviewing;
-      audio.setAttribute("aria-label", reviewing ? "Listen to the audio under review" : "Listen to the current local audio");
-      if (!audio.hidden) audio.src = `/api/tracks/${encodeURIComponent(data.track_id)}/audio?user_id=${encodeURIComponent(ui.user)}${reviewing ? "&candidate=true" + (data.approval_token ? "&approval_token=" + encodeURIComponent(data.approval_token) : "") : ""}`;
-      $("metadataAudioNote").textContent = audio.hidden ? "No local audio is available." : reviewing ? "Audio under review. Existing library audio is retained until the change succeeds." : "Current local audio.";
-      if (data.current_tags_error) $("metadataAudioNote").textContent += ` ${data.current_tags_error}`;
-      const sourceLink = $("metadataSourceLink"), url = data.source_url;
-      sourceLink.hidden = !url || !/^https?:\/\//i.test(url);
-      if (!sourceLink.hidden) sourceLink.href = url;
-      else sourceLink.removeAttribute?.("href");
+
     }
+    syncAudio(data);
     renderSuggestions(); renderAlias(); renderRejected(); diagnostic(data.latest_identification); proposal();
   }
   async function loadTrack(track, initialPane = "suggestions") {
@@ -418,7 +443,8 @@ window.MetadataUI = (() => {
   async function decide(endpoint, payload, artist = null) {
     if (!ui.context?.can_correct || ui.sending || ui.loading) return;
     const context = ui.context, user = ui.user, loadSerial = ui.loadSerial;
-    if (artist && !confirm(`Remember "${context.search_hints.artist}" as "${artist.name}" for future searches in ${user}? Existing tags and approvals are unchanged.`)) return;
+    const sourceArtist = context.approved_artist_alias?.alias || context.search_hints?.artist;
+    if (artist && !confirm(`Remember "${sourceArtist}" as "${artist.name}" for future searches in ${user}? Existing tags and approvals are unchanged.`)) return;
     const current = () => context === ui.context && loadSerial === ui.loadSerial && user === ui.user && user === state.user;
     ui.sending = true; invalidate(); updateButtons();
     try {
