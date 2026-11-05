@@ -258,3 +258,143 @@ test('YouTube channel prefixes the title without adding rows or changing sources
   assert.equal(unmatched.children[0].textContent, `Other channel | ${track.title}`);
   assert.equal(unmatched.children.length, 2);
 });
+
+
+test('Stop retrying disables the active job URL, not the source of playing audio', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  const track={id:'song',user_id:'admin',title:'Song',health:'AVAILABLE',operation_state:'DEFERRED',
+    current_origin_id:'playing',active_origin_id:'replacement',can_stop_download:true,playlists:[],choices:[],
+    origins:[{id:'playing',provider:'youtube',title:'Old audio',url:'https://youtu.be/playing',downloadable:true},
+      {id:'replacement',provider:'youtube',title:'New audio',url:'https://youtu.be/replacement',downloadable:true}]};
+  const row=vm.runInContext('renderTrack',b.context)(track);
+  const stop=row.children[3].children[0].children.find(c=>c.textContent==='Stop retrying this URL');
+  assert.ok(stop); assert.equal(stop.disabled,false);
+  const pending=stop.listeners.click();
+  assert.equal(b.requests[0].url,'/api/tracks/song/origins/replacement/disable');
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin'});
+  b.requests[0].resolve({message:'URL disabled',cancellation_pending:true});
+  await pending;
+  assert.match(b.get('notice').textContent,/Stopping the current download/);
+  const unknown=vm.runInContext('renderTrack',b.context)({...track,active_origin_id:null});
+  assert.equal(unknown.children[3].children[0].children.some(c=>c.textContent==='Stop retrying this URL'),false);
+});
+
+test('disabled origins cannot be selected for a new download and can be enabled without retrying', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  const track={id:'song',user_id:'admin',title:'Song',origins:[
+    {id:'bad',provider:'youtube',title:'Restricted',downloadable:true,download_enabled:0},
+    {id:'good',provider:'youtube',title:'Available',downloadable:true,download_enabled:1}]};
+  vm.runInContext('openOperation',b.context)(track,'redownload');
+  assert.deepEqual(b.get('operationOrigin').children.map(c=>c.value),['good']);
+  const pending=vm.runInContext('setOriginDownload',b.context)(track,track.origins[0],true);
+  assert.equal(b.requests[0].url,'/api/tracks/song/origins/bad/enable');
+  b.requests[0].resolve({message:'URL enabled. Retry explicitly when ready.'});
+  await pending;
+  assert.equal(b.requests.length,1);
+  b.app.state.user='guest';
+  await assert.rejects(()=>vm.runInContext('setOriginDownload',b.context)(track,track.origins[0],false),/Library changed/);
+  assert.equal(b.requests.length,1);
+});
+
+test('stopped tracks keep audio availability and offer another URL', () => {
+  const b=browser(); b.app.state.user='admin';
+  const track={id:'song',user_id:'admin',title:'Song',health:'AVAILABLE',operation_state:'STOPPED',
+    playlists:[],choices:[],origins:[{id:'bad',downloadable:true,download_enabled:0}]};
+  const row=vm.runInContext('renderTrack',b.context)(track);
+  assert.equal(row.children[2].children[0].textContent,'Downloads stopped');
+  assert.equal(row.children[2].children[1].textContent,'Current audio is playable');
+  const controls=row.children[3].children[0].children;
+  assert.ok(controls.some(c=>c.textContent==='Use another URL…' && !c.disabled));
+  assert.equal(controls.some(c=>c.textContent==='Retry'),false);
+});
+
+test('replacement URL submission is scoped, resists double clicks and keeps errors visible', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  vm.runInContext('openReplacement',b.context)({id:'song',user_id:'admin',title:'Song'});
+  b.get('replacementUrl').value='https://youtu.be/newvideo';
+  const event={preventDefault(){}};
+  const pending=b.get('replacementForm').listeners.submit(event);
+  await b.get('replacementForm').listeners.submit(event);
+  assert.equal(b.requests.length,1);
+  assert.equal(b.requests[0].url,'/api/tracks/song/replacement');
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin',url:'https://youtu.be/newvideo'});
+  b.requests[0].resolve({error:'Stop the current download first'},409);
+  await pending;
+  assert.match(b.get('replacementStatus').textContent,/Stop the current download first/);
+  assert.equal(b.get('replacementSubmit').disabled,false);
+  assert.ok(b.app.state.replacementTrack);
+  const second=b.get('replacementForm').listeners.submit(event);
+  b.app.state.user='guest';
+  b.get('replacementStatus').textContent='New library';
+  b.requests[1].resolve({message:'Queued'});
+  await second;
+  assert.equal(b.get('replacementStatus').textContent,'New library');
+});
+
+test('disabled-source responses and removal cancellation do not retain stale library state', async () => {
+  const b=browser(); b.app.state.user='admin';
+  const pending=vm.runInContext('loadDisabledOrigins',b.context)();
+  b.app.state.user='guest'; b.app.state.generation++;
+  b.requests[0].resolve(null); await pending;
+  assert.equal(b.get('disabledSources').children.length,0);
+  b.app.state.removeTrack={id:'old'};
+  b.get('removeDialog').listeners.cancel();
+  assert.equal(b.app.state.removeTrack,null);
+});
+
+
+test('batch approval keeps the token and choice from the displayed row during a polling race', async()=>{
+  const b=browser();b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{};',b.context);
+  const original={id:'song',user_id:'admin',title:'Displayed song',operation_state:'NEEDS_APPROVAL',health:'AVAILABLE',
+    approval_token:'displayed-token',origins:[],playlists:[],choices:[{title:'Displayed choice',artist:'Artist',similarity:85}]};
+  const row=vm.runInContext('renderTrack',b.context)(original);
+  b.get('tracks').children=[row];
+  // Background polling can update this map while the focused row is retained.
+  b.app.state.tracks.set('song',{...original,approval_token:'unseen-token',choices:[{title:'Unseen choice'}]});
+  await b.get('selectReviewPage').listeners.click();
+  const stored=b.app.state.reviewSelection.get('song');
+  assert.equal(stored.approval_token,'displayed-token');
+  assert.match(b.get('reviewSelectionStatus').textContent,/changed/);
+  const pending=b.get('approveSelected').listeners.click();
+  await b.get('approveSelected').listeners.click();
+  assert.equal(b.requests.length,1);
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin',items:[{track_id:'song',index:0,approval_token:'displayed-token'}]});
+  b.requests[0].resolve({queued:0,skipped:1,results:[{track_id:'song',status:'skipped',message:'Suggestions changed; review again'}]});
+  await pending;
+  assert.equal(b.app.state.reviewSelection.size,0);
+  assert.match(b.get('notice').textContent,/Suggestions changed/);
+});
+
+test('select page uses only rendered waiting rows and current dropdown choices', async()=>{
+  const b=browser();b.app.state.user='admin';
+  const waiting={id:'waiting',user_id:'admin',title:'Song',operation_state:'NEEDS_APPROVAL',health:'AVAILABLE',
+    approval_token:'token',origins:[],playlists:[],choices:[{title:'First'},{title:'Second'}]};
+  const row=vm.runInContext('renderTrack',b.context)(waiting);
+  const select=row.children[3].children[0].children.find(child=>child.tagName==='select');
+  select.value='1';select.listeners.change();
+  const idle=vm.runInContext('renderTrack',b.context)({...waiting,id:'idle',operation_state:'IDLE'});
+  b.get('tracks').children=[row,idle];
+  b.app.state.tracks.set('off-page',{...waiting,id:'off-page'});
+  await b.get('selectReviewPage').listeners.click();
+  assert.deepEqual([...b.app.state.reviewSelection.values()].map(item=>({track_id:item.track_id,index:item.index})),[{track_id:'waiting',index:1}]);
+  vm.runInContext('refreshTracks=async()=>{};',b.context);
+  vm.runInContext("setFilter('ALL')",b.context);
+  assert.equal(b.app.state.reviewSelection.size,0);
+});
+
+test('an old selected-approval response cannot clear selections for a new library', async()=>{
+  const b=browser();b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{};',b.context);
+  b.app.state.reviewSelection.set('old',{track_id:'old',index:0,approval_token:'old-token'});
+  const pending=b.get('approveSelected').listeners.click();
+  b.app.state.user='guest';b.app.state.batchSerial++;b.app.state.batchPending=false;
+  b.app.state.reviewSelection.clear();
+  b.app.state.reviewSelection.set('new',{track_id:'new',index:1,approval_token:'new-token'});
+  b.requests[0].resolve({queued:1,skipped:0,results:[]});await pending;
+  assert.equal(b.app.state.reviewSelection.has('new'),true);
+  assert.equal(b.app.state.reviewSelection.size,1);
+});

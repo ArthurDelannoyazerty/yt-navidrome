@@ -235,3 +235,26 @@ def test_review_audio_cannot_read_outside_this_tracks_staging_directory(db, trac
         assert client.get(f"/api/tracks/{track['id']}/audio", params={
             "user_id": "admin", "candidate": True,
         }).status_code == 404
+
+
+def test_library_and_review_use_the_same_native_channel_search(db, track, environment):
+    waiting(db, track, environment)
+    origin = db.origins_for_track(track["id"])[0]
+    db.update("track_origins", origin["id"], channel="末廣健一郎 - Topic")
+    with client_for(db) as client:
+        params = {"user_id": "admin", "status": "NEEDS_APPROVAL", "q": "末廣健一郎"}
+        library = client.get("/api/tracks", params=params).json()
+        review = client.get("/api/review/queue", params=params).json()
+        assert [row["id"] for row in library["tracks"]] == review["ids"] == [track["id"]]
+
+
+def test_stopped_tracks_remain_reviewable_when_existing_audio_is_playable(db, track, environment):
+    current, _, _ = active_track(db, track, environment)
+    missing = second_track(db)
+    for value in (current, missing):
+        db.update("tracks", value["id"], operation_state="STOPPED")
+    with client_for(db) as client:
+        result = client.get("/api/review/queue", params={"user_id": "admin", "status": "STOPPED"}).json()
+    assert result["ids"] == [current["id"]]
+    assert result["matching_total"] == 2
+    assert result["excluded"] == 1

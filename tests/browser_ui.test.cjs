@@ -130,7 +130,7 @@ function fixtures() {
   const event = id => ({id, at: "2026-11-05T14:00:00Z", level: "INFO", target: "track-1",
     message: "Fixture event " + id + " — downloaded music remains available while metadata is reviewed."});
   return {tracks: [track], events: Array.from({length: 240}, (_, n) => event(n + 1)), event,
-    writes: [], ignored: [{id: "ignored-1", title: "Ignored song", mbid: null,
+    writes: [], disabled: [], ignored: [{id: "ignored-1", title: "Ignored song", mbid: null,
       origins: [{provider: "youtube", media_key: "lmnopqrstuv", url: "https://youtu.be/lmnopqrstuv", title: "Ignored song"}]}]};
 }
 
@@ -151,12 +151,35 @@ async function fixtureServer(t, data) {
       if (request.method !== "GET") {
         let body = "";
         for await (const chunk of request) body += chunk;
-        data.writes.push({path: url.pathname, method: request.method, body: body ? JSON.parse(body) : null});
+        const payload = body ? JSON.parse(body) : null;
+        data.writes.push({path: url.pathname, method: request.method, body: payload});
         result = {message: "Change queued", queued: 1, skipped: 0, results: []};
+        const parts = url.pathname.split("/");
+        const current = data.tracks.find(track => track.id === parts[3]);
+        if (url.pathname === "/api/review/approve") {
+          result.results = (payload.items || []).map(item => ({track_id: item.track_id, status: "queued"}));
+          result.queued = result.results.length;
+          for (const item of result.results) data.tracks.find(track => track.id === item.track_id).operation_state = "QUEUED";
+        } else if (current && url.pathname.endsWith("/action")) {
+          current.operation_state = "QUEUED";
+        } else if (current && url.pathname.endsWith("/disable")) {
+          const origin = current.origins.find(origin => origin.id === parts[5]);
+          origin.download_enabled = 0; origin.disabled_reason = "Disabled by user";
+          current.operation_state = "STOPPED"; current.can_stop_download = false;
+          data.disabled = [{...origin, track_id: current.id, track_title: current.title,
+            user_id: current.user_id, operation_state: "STOPPED"}];
+          result = {message: "URL disabled; audio and playlists retained", cancelled: true, cancellation_pending: false};
+        } else if (current && url.pathname.endsWith("/enable")) {
+          current.origins.find(origin => origin.id === parts[5]).download_enabled = 1;
+          data.disabled = data.disabled.filter(origin => origin.id !== parts[5]);
+        } else if (current && url.pathname.endsWith("/replacement")) {
+          current.operation_state = "QUEUED";
+        }
       } else if (url.pathname === "/api/users") result = ["admin", "guest"];
       else if (url.pathname === "/api/tracks") result = {tracks: data.tracks, total: data.tracks.length,
         page: 1, limit: 50, stats: {total: data.tracks.length, available: 1, approval: 1, working: 0, deferred: 0, failed: 0, attention: 0}};
-      else if (url.pathname === "/api/sources" || url.pathname === "/api/disabled-origins") result = [];
+      else if (url.pathname === "/api/sources") result = [];
+      else if (url.pathname === "/api/disabled-origins") result = data.disabled;
       else if (url.pathname === "/api/ignored") result = data.ignored;
       else if (url.pathname === "/api/events") result = data.events.filter(event => event.id > Number(url.searchParams.get("after") || 0));
       else if (url.pathname === "/api/integrity") result = {page: 1, limit: 50, total: 0, issues: [], kinds: [],
@@ -168,7 +191,7 @@ async function fixtureServer(t, data) {
         tracks: data.tracks, total: data.tracks.length, matching_total: data.tracks.length, excluded: 0, truncated: false};
       else if (url.pathname === "/api/musicbrainz/search") result = {entity: "recording", items: [], total: 0, page: 1, limit: 20};
       else if (url.pathname.endsWith("/metadata-context")) {
-        const track = data.tracks[0];
+        const track = data.tracks.find(track => track.id === url.pathname.split("/")[3]) || data.tracks[0];
         result = {track_id: track.id, user_id: "admin", revision: "b".repeat(64),
           current_title: track.title, current_mbid: null, state: track.operation_state, health: track.health,
           can_correct: true, origin_id: track.current_origin_id, source_url: track.origins[0].url, origin_count: 1,
@@ -179,7 +202,17 @@ async function fixtureServer(t, data) {
           candidates: track.choices.map((choice, index) => ({...choice, index})),
           approval_token: track.approval_token, latest_identification: null, artist_aliases: [], rejected_candidates: []};
       } else if (url.pathname === "/api/tracks/track-1") result = {...data.tracks[0], assets: [], identity_history: [], integrity_issues: [], file_tags: {tags: {}, issues: []}};
-      else if (url.pathname.endsWith("/audio")) { response.statusCode = 404; result = {error: "Fixture has no media"}; }
+      else if (url.pathname.endsWith("/audio")) {
+        // A short silent PCM fixture exercises the real native player without a provider.
+        const wav = Buffer.alloc(16044);
+        wav.write("RIFF", 0); wav.writeUInt32LE(wav.length - 8, 4); wav.write("WAVEfmt ", 8);
+        wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+        wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28);
+        wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+        wav.write("data", 36); wav.writeUInt32LE(16000, 40);
+        response.setHeader("Content-Type", "audio/wav");
+        response.end(wav); return;
+      }
       else { response.statusCode = 404; result = {error: "Unexpected fixture request: " + url.pathname}; }
       response.end(JSON.stringify(result));
     } catch (error) {
@@ -231,5 +264,92 @@ test("real browser: log following, focused removal, ignored navigation and mobil
   await chrome.until("!document.querySelector('#ignoredMusicPanel').hidden && document.querySelector('#ignored').textContent.includes('Ignored song')");
   assert.equal(await chrome.evaluate("document.querySelector('#ignoredMusicPanel').closest('[data-panel]').dataset.panel"), "music");
   await chrome.screenshot("ignored-music-mobile");
+  assert.deepEqual(chrome.errors, []);
+});
+
+
+test("real browser: stop the active source and queue another URL without removing music", {timeout: 60000}, async t => {
+  const chrome = await browser(t);
+  if (!chrome) return;
+  const data = fixtures(), track = data.tracks[0];
+  track.operation_state = "DEFERRED"; track.temporary_candidate_sha256 = null;
+  track.origins.push({...track.origins[0], id: "origin-2", media_key: "lmnopqrstuv",
+    title: "Restricted alternative", url: "https://www.youtube.com/watch?v=lmnopqrstuv"});
+  track.active_origin_id = "origin-2"; track.can_stop_download = true; track.job_stage = "downloading";
+  const origin = await fixtureServer(t, data);
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 900, deviceScaleFactor: 1, mobile: false});
+  await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelector('.stop-download') && !document.querySelector('.stop-download').disabled");
+  await chrome.evaluate("document.querySelector('.stop-download').click()");
+  await chrome.until("document.querySelector('#tracks').textContent.includes('Downloads stopped')");
+  assert.equal(data.writes[0].path, "/api/tracks/track-1/origins/origin-2/disable");
+  assert.equal(track.origins[0].download_enabled, 1);
+  assert.equal(track.origins[1].download_enabled, 0);
+  assert.equal(track.current_asset_id, 1);
+  assert.equal(track.playlists.length, 1);
+
+  await chrome.evaluate("document.querySelector('.replace-source[data-track-id=\"track-1\"]').click()");
+  await chrome.until("document.querySelector('#replacementDialog').open");
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
+  assert.equal(await chrome.evaluate("(() => {const r=document.querySelector('#replacementDialog').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth;})()"), true);
+  await chrome.screenshot("replacement-source-mobile");
+  await chrome.evaluate("document.querySelector('#replacementUrl').value='https://www.youtube.com/watch?v=ZYXWVUTSRQP'; document.querySelector('#replacementForm').requestSubmit(); document.querySelector('#replacementForm').requestSubmit()");
+  await chrome.until("!document.querySelector('#replacementDialog').open");
+  const replacements = data.writes.filter(write => write.path.endsWith("/replacement"));
+  assert.equal(replacements.length, 1);
+  assert.deepEqual(replacements[0].body, {user_id: "admin", url: "https://www.youtube.com/watch?v=ZYXWVUTSRQP"});
+  assert.equal(track.origins[1].download_enabled, 0);
+  await chrome.evaluate("document.querySelector('#stats [data-filter=IGNORED]').click()");
+  await chrome.until("document.querySelector('#disabledSources').textContent.includes('Disabled by user')");
+  assert.equal(await chrome.evaluate("document.querySelector('#disabledSources').closest('[data-panel]').dataset.panel"), "music");
+  assert.deepEqual(chrome.errors, []);
+});
+
+test("real browser: continuous review saves, resumes and approves only the explicit selection", {timeout: 60000}, async t => {
+  const chrome = await browser(t);
+  if (!chrome) return;
+  const data = fixtures(), next = structuredClone(data.tracks[0]);
+  next.id = "track-2"; next.title = "第二の曲"; next.approval_token = "c".repeat(64);
+  next.origins[0].id = "origin-2"; next.current_origin_id = "origin-2";
+  next.choices.forEach(choice => { choice.title = next.title; });
+  data.tracks.push(next);
+  const origin = await fixtureServer(t, data);
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 1000, deviceScaleFactor: 1, mobile: false});
+  await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
+  await chrome.evaluate("document.querySelector('#startReview').click()");
+  await chrome.until("document.querySelector('#metadataDialog').open && document.querySelector('#metadataQueueProgress').textContent==='Track 1 of 2' && !document.querySelector('#metadataSaveNext').disabled");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataAudio').src.includes('candidate=true') && document.querySelector('#metadataAudio').src.includes('approval_token=')"), true);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataProposedValues').textContent.includes('末廣健一郎')"), true);
+  await chrome.screenshot("metadata-review-desktop");
+
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
+  assert.equal(await chrome.evaluate("(() => {const d=document.querySelector('#metadataDialog'),r=d.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth && d.scrollWidth<=d.clientWidth+1;})()"), true);
+  await chrome.evaluate("document.querySelector('#metadataSaveNext').scrollIntoView({block:'nearest'})");
+  assert.equal(await chrome.evaluate("(() => {const r=document.querySelector('#metadataSaveNext').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})()"), true);
+  await chrome.screenshot("metadata-review-mobile");
+  await chrome.evaluate("document.querySelector('#metadataSaveNext').click(); document.querySelector('#metadataSaveNext').click()");
+  await chrome.until("document.querySelector('#metadataQueueProgress').textContent==='Track 2 of 2' && document.querySelector('#metadataCurrent').textContent==='第二の曲'");
+  const saves = data.writes.filter(write => write.path.endsWith("/action"));
+  assert.equal(saves.length, 1);
+  assert.deepEqual(saves[0].body, {user_id: "admin", mode: "approve", index: 0, approval_token: "a".repeat(64)});
+
+  await chrome.evaluate("document.querySelector('#metadataClose').click()");
+  await chrome.until("!document.querySelector('#metadataDialog').open && document.querySelector('#startReview').textContent.includes('Resume')");
+  await chrome.evaluate("document.querySelector('#startReview').click()");
+  await chrome.until("document.querySelector('#metadataCurrent').textContent==='第二の曲' && !document.querySelector('#metadataSaveNext').disabled");
+  await chrome.evaluate("document.querySelector('#metadataQueueSkip').click()");
+  await chrome.until("!document.querySelector('#metadataQueueComplete').hidden");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataQueueSummary').textContent.includes('1 track left unchanged')"), true);
+  await chrome.evaluate("document.querySelector('#metadataReviewSkipped').click()");
+  await chrome.until("document.querySelector('#metadataQueueProgress').textContent==='Track 1 of 1' && document.querySelector('#metadataCurrent').textContent==='第二の曲'");
+  await chrome.evaluate("document.querySelector('#metadataClose').click()");
+  await chrome.evaluate("document.querySelector('#selectReviewPage').click()");
+  await chrome.until("document.querySelector('#approveSelected').textContent==='Approve selected (1)'");
+  await chrome.evaluate("document.querySelector('#approveSelected').click()");
+  await chrome.until("document.querySelector('#approveSelected').textContent==='Approve selected (0)'");
+  const batches = data.writes.filter(write => write.path === "/api/review/approve");
+  assert.equal(batches.length, 1);
+  assert.deepEqual(batches[0].body, {user_id: "admin", items: [{track_id: "track-2", index: 0, approval_token: "c".repeat(64)}]});
   assert.deepEqual(chrome.errors, []);
 });

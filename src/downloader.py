@@ -24,6 +24,7 @@ PLAYER_CLIENTS = ([c.strip() for c in os.getenv("YT_PLAYER_CLIENTS", "").split("
 YT_COOKIES_FILE = os.getenv("YT_DLP_COOKIES_FILE", "")
 
 class DownloadBotError(Exception): pass
+class DownloadRestrictedError(Exception): pass
 class DownloadUnavailableError(Exception): pass
 class DownloadNetworkError(Exception): pass
 class DownloadPermanentError(Exception): pass
@@ -58,6 +59,15 @@ def download_audio_file(url: str, track_uuid: str):
         return f"{temp_filename}.opus"
     except yt_dlp.utils.DownloadError as e:
         err = str(e).lower()
+        # Access requirements are not an outage: waiting will not change them.
+        # Check them before the generic "sign in to confirm" bot wording.
+        if any(k in err for k in (
+            "confirm your age", "age-restricted", "age restricted",
+            "login required", "authentication required", "members-only",
+            "members only", "not available in your country", "geo restricted",
+            "geo-restricted", "join this channel",
+        )):
+            raise DownloadRestrictedError(f"This video requires access or another source: {e}") from e
         if any(k in err for k in (
             "sign in to confirm", "403", "429", "bot",
             "try again later", "precondition check failed",
@@ -82,6 +92,9 @@ def download_audio_file(url: str, track_uuid: str):
 if __name__ == "__main__":
     try:
         print(download_audio_file(sys.argv[1], sys.argv[2]), flush=True)
+    except DownloadRestrictedError:
+        traceback.print_exc()
+        sys.exit(24)
     except DownloadBotError:
         traceback.print_exc()
         sys.exit(20)

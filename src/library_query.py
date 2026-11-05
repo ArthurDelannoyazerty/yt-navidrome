@@ -28,7 +28,7 @@ def track_where(user: str, status: str = "ALL", query: str = ""):
         "NEEDS_AUDIO": (
             "t.current_asset_id IS NULL AND EXISTS(SELECT 1 FROM track_origins o "
             "WHERE o.track_id=t.id AND o.provider='spotify') AND NOT EXISTS("
-            "SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.downloadable=1)"
+            "SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.downloadable=1 AND o.download_enabled=1)"
         ),
         "INTEGRITY": "EXISTS(SELECT 1 FROM integrity_issues i WHERE i.track_id=t.id AND i.resolved_at IS NULL)",
     }

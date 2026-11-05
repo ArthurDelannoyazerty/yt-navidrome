@@ -51,7 +51,18 @@ class ActionInput(BaseModel):
     origin_id: str | None = None
     index: int | None = None
     approval_token: str | None = None
+    revision: str | None = None
     overrides: dict[str, str | None] = Field(default_factory=dict)
+
+
+class OriginControlInput(BaseModel):
+    user_id: str
+    reason: str = Field(default="Disabled by user", max_length=1000)
+
+
+class ReplacementInput(BaseModel):
+    user_id: str
+    url: str = Field(min_length=1, max_length=2048)
 
 
 class EventHandler(logging.Handler):
@@ -253,6 +264,36 @@ def create_app(store=None, start_workers=True):
     ):
         return store.dashboard_tracks(user_id, page, limit, status, q)
 
+    @app.get("/api/disabled-origins")
+    def disabled_origins(user_id: str):
+        return store.disabled_origins(user_id)
+
+    @app.post("/api/tracks/{track_id}/origins/{origin_id}/disable")
+    async def disable_origin(track_id: str, origin_id: str, data: OriginControlInput):
+        result = store.disable_origin(track_id, origin_id, data.user_id,
+                                      data.reason.strip() or "Disabled by user")
+        if result["job_id"] is not None:
+            pipeline.cancel_job(result["job_id"])
+        if result["publication_finishing"]:
+            result["message"] = (
+                "Video disabled. The current audio update is already publishing and will finish safely."
+            )
+        elif result["cancellation_pending"]:
+            result["message"] = "Stopping this operation. The video is disabled; existing audio and playlists are kept."
+        elif result["cancelled"]:
+            result["message"] = "Retries stopped and video disabled. Existing audio and playlists are kept."
+        else:
+            result["message"] = "Video disabled. Existing audio, metadata and playlists are kept."
+        return result
+
+    @app.post("/api/tracks/{track_id}/origins/{origin_id}/enable")
+    def enable_origin(track_id: str, origin_id: str, data: OriginControlInput):
+        return store.enable_origin(track_id, origin_id, data.user_id)
+
+    @app.post("/api/tracks/{track_id}/replacement")
+    def replace_source(track_id: str, data: ReplacementInput):
+        return store.queue_replacement(track_id, data.user_id, data.url)
+
     @app.post("/api/tracks/{track_id}/origins/{origin_id}/{mode}")
     def manage_origin(track_id: str, origin_id: str, mode: str, data: ActionInput):
         if mode not in {"detach", "ignore"}:
@@ -299,7 +340,7 @@ def create_app(store=None, start_workers=True):
     @app.post("/api/tracks/{track_id}/action")
     def track_action(track_id: str, data: ActionInput):
         allowed = {
-            "retry", "approve", "redownload", "reprocess", "retag",
+            "retry", "approve", "redownload", "reprocess", "refresh_suggestions", "retag",
             "delete", "delete_ignore", "delete_ignore_urls", "repair",
         }
         if data.mode not in allowed:
