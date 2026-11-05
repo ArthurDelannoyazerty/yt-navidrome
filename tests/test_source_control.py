@@ -173,14 +173,24 @@ def test_unavailable_or_restricted_video_is_disabled_without_global_circuit(db, 
 
     monkeypatch.setattr(runtime, "run_process", restricted)
     db.queue_track(track["id"], "admin", {"mode": "redownload", "origin_id": origin["id"]})
-    job = db.claim()
-    with pytest.raises(SourceAccessError) as caught:
-        asyncio.run(processor.process_track(job))
-    db.fail_job(job, "redownload", str(caught.value), stopped=True)
+    db.enqueue("integrity", "admin", "admin", {"mode": "verify"})
+
+    async def next_job(job):
+        processor.stopping.set()
+
+    async def run_worker():
+        await asyncio.wait_for(processor.work(), 10)
+
+    monkeypatch.setattr(processor, "process_integrity", next_job)
+    asyncio.run(run_worker())
     disabled = db.owned("track_origins", origin["id"], "admin")
     assert not disabled["download_enabled"]
     assert disabled["disabled_at"] and disabled["disabled_reason"]
-    assert db.owned("tracks", track["id"], "admin")["operation_state"] == "STOPPED"
+    stopped = db.owned("tracks", track["id"], "admin")
+    assert stopped["operation_state"] == "STOPPED"
+    assert stopped["operation_error"] == disabled["disabled_reason"]
+    assert "Stopped by user" not in stopped["operation_error"]
+    assert db.one("SELECT state FROM jobs WHERE kind='integrity'")["state"] == "DONE"
     assert not processor.downloader.circuit_status()["open"]
     assert processor.downloader.circuit_status()["failures"] == 0
     assert audio.read_bytes() == b"existing-playable-audio"
@@ -570,3 +580,62 @@ def test_explicit_retry_can_choose_another_enabled_associated_origin(db, track):
     assert payload["operation"] != original_operation
     assert not payload.get("selected")
     assert db.owned("track_origins", old_origin["id"], "admin")["download_enabled"] == 0
+
+
+@pytest.mark.parametrize("mode", ["refresh_suggestions", "retag"])
+def test_shared_youtube_pause_does_not_delay_new_existing_audio_review(db, track, environment, mode):
+    track, origin, audio = activate(db, track, environment)
+    db.queue_track(track["id"], "admin", {"mode": mode, "origin_id": origin["id"]})
+    assert db.defer_pending_youtube_jobs(9999999999, "Shared YouTube cooldown") == 0
+    assert db.owned("tracks", track["id"], "admin")["operation_state"] == "QUEUED"
+    job = db.claim()
+    assert job and json.loads(job["payload"])["mode"] == mode
+    assert job["download_failures"] == 0
+    assert audio.read_bytes() == b"existing-playable-audio"
+
+
+@pytest.mark.parametrize("lease_state", ["RUNNING", "QUEUED", "DEFERRED"])
+def test_replacement_respects_a_spotify_destination_lease(db, track, environment, monkeypatch, lease_state):
+    from spotify_library import queue_link
+
+    destination, old_origin, audio = activate(db, track, environment)
+    spotify_url = "https://open.spotify.com/track/abcdefghijklmnopqrstuv"
+    source = db.add_source(parse_source(spotify_url), "admin")
+    db.apply_snapshot(source, Snapshot("Spotify", [
+        Entry("abcdefghijklmnopqrstuv", spotify_url, "Artist - Song", utcnow(),
+              "spotify-entry", 0, basis="first_seen", downloadable=False)
+    ]))
+    db.execute("UPDATE jobs SET state='DONE' WHERE kind='sync'")
+    incoming = db.one("SELECT * FROM tracks WHERE id<>?", (destination["id"],))
+    queue_link(db, incoming["id"], "admin", target_id=destination["id"])
+    job = db.claim()
+    assert job["target"] == incoming["id"]
+    processor = Pipeline(db)
+
+    async def hold_finalization(job, current, directory, mode, **kwargs):
+        assert mode == "comment"
+        raise DeferredOperation("Hold the link's destination lease")
+
+    monkeypatch.setattr(processor, "bridge", hold_finalization)
+    with pytest.raises(DeferredOperation):
+        asyncio.run(processor.process_track(job))
+    leased = db.owned("tracks", destination["id"], "admin")
+    assert leased["operation_kind"] == "SPOTIFY_LINK"
+    assert leased["operation_state"] == "RUNNING"
+    if lease_state == "QUEUED":
+        # Recovery resets RUNNING state even though the active job belongs to
+        # the metadata source, not to its already-playable destination.
+        db.recover()
+    elif lease_state == "DEFERRED":
+        db.update("tracks", destination["id"], operation_state="DEFERRED")
+    before = db.owned("tracks", destination["id"], "admin")
+    origins = db.rows("SELECT * FROM track_origins ORDER BY id")
+    jobs = db.rows("SELECT * FROM jobs ORDER BY id")
+    assert before["operation_state"] == lease_state
+    with pytest.raises(ValueError, match="Spotify link"):
+        db.queue_replacement(destination["id"], "admin", ALTERNATIVE)
+    assert db.owned("tracks", destination["id"], "admin") == before
+    assert db.rows("SELECT * FROM track_origins ORDER BY id") == origins
+    assert db.rows("SELECT * FROM jobs ORDER BY id") == jobs
+    assert db.current_asset(destination["id"])["id"] == destination["current_asset_id"]
+    assert audio.read_bytes() == b"existing-playable-audio"

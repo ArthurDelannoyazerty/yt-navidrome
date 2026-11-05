@@ -648,6 +648,8 @@ class Store:
                 raise LookupError("Track not found for this user")
             if con.execute("SELECT 1 FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')", (track_id,)).fetchone():
                 raise ValueError("Stop the current download and wait until it has stopped before choosing another video")
+            if track["operation_kind"] == "SPOTIFY_LINK" and track["operation_state"] in {"QUEUED", "RUNNING", "DEFERRED"}:
+                raise ValueError("Wait for the Spotify link to finish updating this track")
             if (STATE / "staging" / track_id / "apply-request.json").exists():
                 raise ValueError("Retry the previous metadata application before choosing a replacement video")
             if self._origin_ignored(con, user, ref.provider, media_key):
@@ -732,7 +734,10 @@ class Store:
             ).fetchall()
             for job in pending:
                 try:
-                    origin_id = json.loads(job["payload"] or "{}").get("origin_id")
+                    payload = json.loads(job["payload"] or "{}")
+                    if not _downloads_from_origin(payload):
+                        continue
+                    origin_id = payload.get("origin_id")
                 except (TypeError, ValueError):
                     continue
                 if not origin_id:
