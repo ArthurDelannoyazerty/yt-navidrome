@@ -31,6 +31,12 @@ def test_explicit_playlist_still_imports_playlist():
     ("Service temporarily unavailable", "DownloadNetworkError"),
     ("HTTP Error 503", "DownloadNetworkError"),
     ("Video unavailable: Sign in to confirm you are not a bot", "DownloadBotError"),
+    ("Sign in to confirm your age. This video may be inappropriate for some users.", "DownloadRestrictedError"),
+    ("Video unavailable: Sign in to confirm your age", "DownloadRestrictedError"),
+    ("This is an age-restricted video", "DownloadRestrictedError"),
+    ("Login required to view this video", "DownloadRestrictedError"),
+    ("This video is available to members-only", "DownloadRestrictedError"),
+    ("This video is not available in your country", "DownloadRestrictedError"),
     ("Private video", "DownloadUnavailableError"),
 ])
 def test_download_failure_classification(message, expected):

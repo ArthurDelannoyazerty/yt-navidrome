@@ -15,7 +15,7 @@ from typing import Any
 
 from audio_tags import REPAIRABLE_ISSUES
 from common import STATE, utcnow, user_name
-from source_metadata import SCHEMA as METADATA_SCHEMA, prepare_correction
+from source_metadata import SCHEMA as METADATA_SCHEMA, correction_revision, prepare_correction
 
 SCHEMA_VERSION = 5
 
@@ -253,7 +253,7 @@ CREATE TABLE IF NOT EXISTS quota (
 """
 
 DROP_ORDER = [
-    "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
+    "metadata_artist_aliases", "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
     "assets", "memberships", "track_origins", "tracks", "operation_receipts",
     "jobs", "sources",
     "events", "settings", "api_clock", "quota", "users",
@@ -520,7 +520,7 @@ class Store:
             con.execute(
                 """UPDATE tracks SET operation_state='STOPPED',operation_error=?,updated_at=?
                    WHERE id=? AND NOT EXISTS(SELECT 1 FROM jobs WHERE kind='track' AND target=?
-                     AND id<>? AND state IN ('PENDING','RUNNING'))""",
+                     AND id>? )""",
                 ("Stopped by user; choose another video or enable this URL before retrying.",
                  utcnow(), job["target"], job["target"], job["id"]),
             )
@@ -639,6 +639,8 @@ class Store:
                 raise LookupError("Track not found for this user")
             if con.execute("SELECT 1 FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')", (track_id,)).fetchone():
                 raise ValueError("Stop the current download and wait until it has stopped before choosing another video")
+            if (STATE / "staging" / track_id / "apply-request.json").exists():
+                raise ValueError("Retry the previous metadata application before choosing a replacement video")
             if self._origin_ignored(con, user, ref.provider, media_key):
                 raise ValueError("This video URL is ignored. Restore that specific URL before using it.")
             origin = con.execute("SELECT * FROM track_origins WHERE user_id=? AND provider=? AND media_key=?",
@@ -676,6 +678,8 @@ class Store:
                 raise LookupError("Job not found")
             if job["cancel_requested"] or job["state"] == "CANCELLED":
                 self._finish_cancelled_locked(con, job)
+                return None
+            if job["state"] not in {"PENDING", "RUNNING"}:
                 return None
             failures = int(job["download_failures"] or 0) + int(download_failure)
             try:
@@ -971,7 +975,7 @@ class Store:
             track = con.execute("SELECT current_origin_id FROM tracks WHERE id=? AND user_id=?", (track_id, user)).fetchone()
             origin = None
             if track and track["current_origin_id"]:
-                origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=? AND user_id=?", (track["current_origin_id"], track_id, user)).fetchone()
+                origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=? AND user_id=? AND downloadable=1 AND download_enabled=1", (track["current_origin_id"], track_id, user)).fetchone()
             if origin is None:
                 origin = con.execute(
                     """SELECT * FROM track_origins WHERE track_id=? AND user_id=? AND downloadable=1 AND download_enabled=1
@@ -1001,6 +1005,9 @@ class Store:
                 raise ValueError("Wait for the Spotify link to finish updating this track")
             payload = dict(payload)
             mode = payload.get("mode", "retry")
+            if (mode in {"retag", "refresh_suggestions"} and payload.get("revision") is not None
+                    and payload["revision"] != correction_revision(track)):
+                raise ValueError("This track changed; reopen the metadata review and try again")
             if mode in {"restore_source", "select_recording"}:
                 payload = prepare_correction(con, track, payload)
                 mode = payload["mode"]
@@ -1010,6 +1017,27 @@ class Store:
                 previous = con.execute("SELECT payload FROM jobs WHERE kind='track' AND target=? AND state IN ('FAILED','CANCELLED') ORDER BY id DESC LIMIT 1", (track_id,)).fetchone()
                 payload = json.loads(previous["payload"]) if previous else {"mode": "ingest"}
                 mode = payload.get("mode", "ingest")
+                action = payload.get("action") or payload.get("pending_action") or mode
+                if mode in {"ingest", "redownload", "reprocess", "replace_source", "resume"} and action != "refresh_suggestions":
+                    origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=?",
+                                         (payload.get("origin_id"), track_id)).fetchone()
+                    directory = STATE / "staging" / track_id
+                    staged = directory / f"temp_{track_id}.opus"
+                    receipt_file = directory / "download-complete.json"
+                    staged_ok = False
+                    if staged.is_file() and receipt_file.is_file() and origin:
+                        try:
+                            staged_ok = json.loads(receipt_file.read_text()).get("source_url") == origin["url"]
+                        except (OSError, ValueError):
+                            pass
+                    if not origin or (not origin["download_enabled"] and not staged_ok):
+                        replacement = self._select_origin_locked(con, track_id, user, None)
+                        if replacement["id"] != payload.get("origin_id"):
+                            # A user retry may choose another enabled association,
+                            # but its bytes must receive a new review and operation.
+                            payload = {"mode": "reprocess" if track["current_asset_id"] else "ingest",
+                                       "origin_id": replacement["id"]}
+                            mode = payload["mode"]
             elif mode == "approve":
                 if track["operation_state"] != "NEEDS_APPROVAL":
                     raise ValueError("Track is not awaiting approval")
@@ -1028,6 +1056,8 @@ class Store:
                 if track["health"] not in {"AVAILABLE", "MISSING"}:
                     raise ValueError("This action requires an existing logical track")
                 if mode == "refresh_suggestions":
+                    if (STATE / "staging" / track_id / "apply-request.json").exists():
+                        raise ValueError("Retry the previous metadata application before refreshing suggestions")
                     origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=?",
                                          (track["current_origin_id"], track_id)).fetchone()
                     if not origin:
@@ -1047,8 +1077,20 @@ class Store:
                     raise ValueError("Metadata editing requires an available audio file")
             elif mode not in {"delete", "delete_ignore", "delete_ignore_urls", "comment", "ingest", "resume", "replace_source"}:
                 raise ValueError("Unsupported track action")
-            if mode in {"ingest", "replace_source"}:
-                origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
+            if payload.get("mode") in {"ingest", "replace_source"}:
+                # A retry with a retained candidate can finish review even when
+                # future network use of its URL has been disabled.
+                origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=? AND user_id=?",
+                                     (payload.get("origin_id"), track_id, user)).fetchone()
+                retained = False
+                directory = STATE / "staging" / track_id
+                if origin and (directory / f"temp_{track_id}.opus").is_file():
+                    try:
+                        retained = json.loads((directory / "download-complete.json").read_text()).get("source_url") == origin["url"]
+                    except (OSError, ValueError):
+                        pass
+                if not retained:
+                    origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
                 payload["origin_id"] = origin["id"]
             if not self.enqueue("track", track_id, user, payload, con=con):
                 raise ValueError("This track already has an active job")
@@ -1756,6 +1798,7 @@ class Store:
             row["cancellation_pending"] = bool(job.get("cancel_requested"))
             payload = json.loads(job.get("payload") or "{}")
             row["active_origin_id"] = payload.get("origin_id")
+            row["job_origin_id"] = row["active_origin_id"]
             row["can_stop_download"] = bool(payload.get("origin_id") and job.get("stage") not in {"applying", "publishing"}
                                                 and payload.get("mode") in {"ingest", "redownload", "reprocess", "replace_source", "resume"})
             row["needs_source"] = not row.get("current_asset_id") and not any(o["downloadable"] and o["download_enabled"] for o in row["origins"])
@@ -1778,6 +1821,23 @@ class Store:
         track["assets"] = self.rows("SELECT * FROM assets WHERE track_id=? ORDER BY id DESC", (track_id,))
         track["identity_history"] = self.rows("SELECT * FROM identity_history WHERE user_id=? AND track_id=? ORDER BY id DESC", (user, track_id))
         track["integrity_issues"] = self.rows("SELECT * FROM integrity_issues WHERE user_id=? AND track_id=? AND resolved_at IS NULL ORDER BY severity DESC,id", (user, track_id))
+        job = self.one(
+            "SELECT * FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')",
+            (track_id,),
+        ) or {}
+        payload = json.loads(job.get("payload") or "{}")
+        track["active_origin_id"] = payload.get("origin_id")
+        track["job_origin_id"] = track["active_origin_id"]
+        track["job_stage"] = job.get("stage")
+        track["cancellation_pending"] = bool(job.get("cancel_requested"))
+        track["download_failures"] = int(job.get("download_failures") or 0)
+        track["can_stop_download"] = bool(
+            payload.get("origin_id") and job.get("stage") not in {"applying", "publishing"}
+            and payload.get("mode") in {"ingest", "redownload", "reprocess", "replace_source", "resume"}
+        )
+        track["needs_source"] = not track.get("current_asset_id") and not any(
+            origin["downloadable"] and origin["download_enabled"] for origin in track["origins"]
+        )
         return track
 
     def replace_integrity_issues(self, user: str, issues: list[dict]):
