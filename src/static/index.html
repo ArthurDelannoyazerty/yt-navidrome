@@ -63,6 +63,7 @@
           <option value="INTEGRITY">Integrity issues</option>
           <option value="DEFERRED">Deferred retry</option>
           <option value="FAILED">Last operation failed</option>
+          <option value="STOPPED">Downloads stopped</option>
           <option value="MISSING">Missing audio</option>
           <option value="NEEDS_AUDIO">Spotify: needs audio link</option>
           <option value="UNAVAILABLE">No audio yet</option>
@@ -93,9 +94,10 @@
     </nav>
     </div>
     <section id="ignoredMusicPanel" class="ignored-panel" hidden>
-      <div class="panel-heading compact"><div><h3>Ignored music</h3><p class="hint">An ignored URL blocks that upload. A blocked recording prevents matching uploads throughout this library.</p></div></div>
+      <div class="panel-heading compact"><div><h3>Ignored music</h3><p class="hint">Ignore rules prevent re-imports. Disabled URLs stop future downloads while keeping the track, audio and playlists.</p></div></div>
       <div class="track-toolbar"><label class="control-field search-field">Search ignored music<input id="ignoredSearch" type="search" placeholder="Title, URL or recording ID"></label><nav class="pagination" aria-label="Ignored music pages"><button id="ignoredPrev" type="button" class="secondary">Previous</button><span id="ignoredPage"></span><button id="ignoredNext" type="button" class="secondary">Next</button></nav></div>
-      <div id="ignored"></div>
+      <h4>Ignore rules</h4><div id="ignored"></div>
+      <h4>Disabled download URLs</h4><p class="hint">Enable a URL to allow it again, then choose Retry from the track. Use another URL if this upload cannot be downloaded.</p><div id="disabledSources"></div>
     </section>
   </section>
 
@@ -175,9 +177,10 @@
         <li><strong>Apply and finish</strong><span>Approval queues the worker again; success leaves the track idle</span></li>
       </ol>
       <div class="workflow-exceptions">
-        <section><h4>Temporary problem</h4><p><strong>Processing → Deferred → Processing</strong></p><p>The displayed retry time controls the next attempt. A shared YouTube pause can also move queued work directly to Deferred.</p></section>
+        <section><h4>Temporary problem</h4><p><strong>Processing → Deferred → Processing</strong></p><p>The displayed retry time controls the next attempt. A shared YouTube pause can also move queued work directly to Deferred. Repeated download failures eventually need your attention.</p></section>
+        <section><h4>Source cannot be downloaded</h4><p><strong>Download work → Stopped</strong></p><p>Use Stop retrying this URL, or let a restricted-video error stop it automatically. Choose another URL, or enable the old one before retrying. Existing audio stays playable.</p></section>
         <section><h4>Operation failed</h4><p><strong>Processing → Failed → Queued</strong></p><p>Read the error and choose Retry. A failed replacement keeps existing audio playable.</p></section>
-        <section><h4>Update existing music</h4><p><strong>Idle → Queued → Processing</strong></p><p>Reprocess, Redownload and metadata edits start a new operation. Only identity changes need another approval.</p></section>
+        <section><h4>Update existing music</h4><p><strong>Idle → Queued → Processing</strong></p><p>Reprocess, Redownload and metadata edits start a new operation. The worker asks for review when a match needs your decision.</p></section>
       </div>
       <details class="help-detail"><summary>All operation transitions</summary>
         <table class="transition-table"><thead><tr><th>From</th><th>What happens</th><th>Next</th></tr></thead><tbody>
@@ -190,6 +193,8 @@
           <tr><td>Deferred</td><td>The retry time arrives and the worker claims the job</td><td>Processing</td></tr>
           <tr><td>Processing</td><td>An error needs your attention</td><td>Failed</td></tr>
           <tr><td>Failed</td><td>You choose Retry</td><td>Queued</td></tr>
+          <tr><td>Queued / Deferred / Processing</td><td>You disable the download URL, or a source restriction stops the download. A file already being published finishes safely.</td><td>Stopped when cancellation finishes</td></tr>
+          <tr><td>Stopped</td><td>You choose another URL, or enable the source and Retry</td><td>Queued</td></tr>
           <tr><td>Idle</td><td>You request an operation, or monitored sync finds missing audio</td><td>Queued</td></tr>
           <tr><td>Processing</td><td>The application restarts and recovers interrupted work</td><td>Queued</td></tr>
         </tbody></table>
@@ -205,6 +210,7 @@
         <dt>Processing / RUNNING</dt><dd>A download or metadata operation is running.</dd>
         <dt>Waiting / NEEDS_APPROVAL</dt><dd>Review the suggested metadata, search for another match, or use source tags.</dd>
         <dt>Deferred / DEFERRED</dt><dd>A provider is temporarily unavailable. Wait for the displayed retry time.</dd>
+        <dt>Stopped / STOPPED</dt><dd>Downloads were stopped. Choose another URL, or enable the source and retry. Existing audio is kept.</dd>
         <dt>Failed / FAILED</dt><dd>Open the error, fix the cause if needed, then Retry.</dd>
         <dt>Idle / IDLE</dt><dd>No operation is running. Temporary audio remains marked until its metadata is approved.</dd>
       </dl>
@@ -216,6 +222,9 @@
     </details>
     <details class="help-detail"><summary>Button reference and bulk actions</summary>
       <dl class="help-definitions">
+        <dt>Stop retrying this URL</dt><dd>Stop download work and disable future downloads from that URL. Keep existing music, audio and playlist membership. Enable it again in Music → Ignored music.</dd>
+        <dt>Use another URL…</dt><dd>Queue a different YouTube video for this track. Existing audio remains until the replacement succeeds; uncertain matches require review.</dd>
+        <dt>Refresh suggestions</dt><dd>Identify existing audio again using source hints, without downloading it again. Review the new suggestions before applying them.</dd>
         <dt>Reprocess</dt><dd>Download and identify again. Changed identities require approval.</dd>
         <dt>Redownload</dt><dd>Replace audio while retaining the confirmed identity. A mismatched recording is refused.</dd>
         <dt>Approve all</dt><dd>Accept the first suggestion for every waiting track in the selected library, across all pages. Review weak matches individually.</dd>
@@ -250,6 +259,17 @@
     <details class="help-detail"><summary>Affected source URLs</summary><ul id="removeUrls"></ul></details>
     <p class="hint">Online playlists are unchanged. Existing ignore rules can be restored in Music → Ignored music.</p>
     <div class="dialog-actions"><button id="cancelRemoval" type="button" class="secondary">Cancel</button><button id="removeSubmit" type="submit" class="danger">Remove music</button></div>
+  </form>
+</dialog>
+
+<dialog id="replacementDialog" aria-labelledby="replacementHeading">
+  <form id="replacementForm">
+    <h2 id="replacementHeading">Use another audio URL</h2>
+    <p id="replacementTitle" class="dialog-track"></p>
+    <label>Single YouTube video URL<input id="replacementUrl" type="url" required maxlength="2048" placeholder="https://www.youtube.com/watch?v=..."></label>
+    <p class="hint">The replacement is checked before it replaces existing audio. Disabled URLs stay disabled. Your music and playlist memberships are kept.</p>
+    <p id="replacementStatus" role="status" aria-live="polite"></p>
+    <div class="dialog-actions"><button id="replacementSubmit" type="submit">Check replacement audio</button><button id="cancelReplacement" type="button" class="secondary">Cancel</button></div>
   </form>
 </dialog>
 

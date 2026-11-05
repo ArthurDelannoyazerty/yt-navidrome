@@ -9,6 +9,10 @@ const state = {
   tab: "music",
   musicView: "tracks",
   ignoredCount: 0,
+  ignoredRulesCount: 0,
+  disabledCount: 0,
+  replacementTrack: null,
+  replacementPending: false,
   ignoredPage: 1,
   ignoredMaxPage: 1,
   followLogs: true,
@@ -46,7 +50,7 @@ function setFilter(value) {
   for (const tab of $("stats").children) tab.setAttribute("aria-pressed", String(tab.dataset.filter === value));
   if (value === "IGNORED") {
     state.ignoredPage = 1;
-    guard(() => loadIgnored(false))();
+    guard(async () => reportErrors(await Promise.allSettled([loadIgnored(false), loadDisabledOrigins(false)])))();
     return;
   }
   $("filter").value = value;
@@ -233,6 +237,12 @@ function changeUser() {
   state.sources = [];
   state.musicView = "tracks";
   state.ignoredCount = 0;
+  state.ignoredRulesCount = 0;
+  state.disabledCount = 0;
+  state.replacementTrack = null;
+  state.replacementPending = false;
+  $("replacementStatus").textContent = "";
+  $("replacementSubmit").disabled = false;
   state.ignoredPage = 1;
   state.followLogs = true;
   state.unseenEvents = 0;
@@ -253,6 +263,7 @@ function changeUser() {
   $("issueKind").firstElementChild.value = "ALL";
   $("integrityIssues").replaceChildren();
   $("ignored").replaceChildren();
+  $("disabledSources").replaceChildren();
   $("integritySummary").textContent = "Loading library audit...";
   $("healthSummary").textContent = "Library health: loading...";
   $("repairAll").disabled = true;
@@ -380,7 +391,10 @@ function showRemoval(track) {
   $("removeUrls").replaceChildren(...track.origins.map(origin => node("li", origin.url || origin.title)));
   $("removeDialog").showModal();
 }
-$("cancelRemoval").addEventListener("click", () => { state.removeTrack = null; $("removeDialog").close(); });
+function closeRemoval() { state.removeTrack = null; $("removeDialog").close(); }
+$("cancelRemoval").addEventListener("click", closeRemoval);
+$("removeDialog").addEventListener("cancel", () => { state.removeTrack = null; });
+$("removeDialog").addEventListener("close", () => { state.removeTrack = null; });
 $("removeForm").addEventListener("submit", guard(async event => {
   event.preventDefault();
   const track = state.removeTrack;
@@ -396,9 +410,9 @@ $("removeForm").addEventListener("submit", guard(async event => {
 }));
 
 function openOperation(track, mode) {
-  const origins = track.origins.filter(origin => origin.downloadable);
+  const origins = track.origins.filter(origin => origin.downloadable && originDownloadsEnabled(origin));
   if (!origins.length) {
-    notice("This music has no downloadable origin.", true);
+    notice("No enabled audio URL is available. Enable a source or choose another URL.", true);
     return;
   }
   $("operationForm").dataset.user = state.user;
@@ -479,6 +493,77 @@ async function manageTrackOrigin(track, origin, mode) {
   if (response.playlist_refresh_failed?.length) await loadSources(state.generation, false);
 }
 
+function originDownloadsEnabled(origin) {
+  return origin.download_enabled !== 0 && origin.download_enabled !== false;
+}
+
+async function setOriginDownload(track, origin, enabled) {
+  const user = state.user;
+  if (track.user_id !== user) throw new Error("Library changed; reopen this action.");
+  if (!enabled && !confirm(`Stop downloads from this URL and disable future retries?\n${origin.url || origin.title}\n\nYour music, existing audio and playlists are kept. You can enable the URL again in Ignored music.`)) return;
+  const result = await api(
+    `/api/tracks/${encodeURIComponent(track.id)}/origins/${encodeURIComponent(origin.id)}/${enabled ? "enable" : "disable"}`,
+    {user_id: user},
+  );
+  if (state.user !== user) return;
+  const detail = result.publication_finishing
+    ? " The current file is finishing safely; future downloads from this URL are disabled."
+    : result.cancellation_pending ? " Stopping the current download. Wait for it to finish stopping before choosing another URL." : "";
+  notice((result.message || (enabled ? "URL enabled. Retry when ready." : "Future downloads from this URL disabled.")) + detail);
+  await Promise.all([refreshTracks(false), loadDisabledOrigins(false)]);
+  if (state.user === user && $("detailsDialog").open) await showDetails(track);
+}
+
+function openReplacement(track) {
+  if (track.user_id !== state.user) throw new Error("Library changed; reopen this action.");
+  state.replacementTrack = {...track};
+  state.replacementPending = false;
+  $("replacementTitle").textContent = track.matched_title || track.title || track.track_title;
+  $("replacementUrl").value = "";
+  $("replacementStatus").textContent = "";
+  $("replacementSubmit").disabled = false;
+  $("replacementDialog").showModal();
+  $("replacementUrl").focus?.();
+}
+
+function closeReplacement() {
+  if (state.replacementPending) return;
+  state.replacementTrack = null;
+  $("replacementDialog").close();
+}
+$("cancelReplacement").addEventListener("click", closeReplacement);
+$("replacementDialog").addEventListener("cancel", event => {
+  if (state.replacementPending) event.preventDefault();
+  else state.replacementTrack = null;
+});
+$("replacementForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const track = state.replacementTrack;
+  if (state.replacementPending || !track) return;
+  if (track.user_id !== state.user) { $("replacementStatus").textContent = "Library changed; reopen this action."; return; }
+  const url = $("replacementUrl").value.trim();
+  if (!url) { $("replacementStatus").textContent = "Enter a single YouTube video URL."; return; }
+  state.replacementPending = true;
+  $("replacementSubmit").disabled = true;
+  $("replacementStatus").textContent = "Queuing replacement audio…";
+  try {
+    const result = await api(`/api/tracks/${encodeURIComponent(track.id)}/replacement`, {user_id: track.user_id, url});
+    if (track.user_id !== state.user || state.replacementTrack !== track) return;
+    state.replacementPending = false;
+    closeReplacement();
+    $("detailsDialog").close();
+    notice(result.message || "Replacement audio queued. Existing audio stays playable until it succeeds.");
+    await Promise.all([refreshTracks(false), loadDisabledOrigins(false)]);
+  } catch (error) {
+    if (track.user_id === state.user && state.replacementTrack === track) $("replacementStatus").textContent = error.message || String(error);
+  } finally {
+    if (track.user_id === state.user && (!state.replacementTrack || state.replacementTrack === track)) {
+      state.replacementPending = false;
+      $("replacementSubmit").disabled = false;
+    }
+  }
+});
+
 async function showDetails(track) {
   const current = beginRequest("details");
   const details = await api(`/api/tracks/${encodeURIComponent(track.id)}?user_id=${encodeURIComponent(state.user)}`, null, null, current);
@@ -495,6 +580,9 @@ async function showDetails(track) {
     entry.append(node("strong", origin.provider), node("div", origin.title), node("small", origin.url));
     const currentAudio = origin.id === details.current_origin_id || details.assets.some(asset => asset.state === "CURRENT" && asset.origin_id === origin.id);
     if (currentAudio) entry.append(node("small", "Current audio source — reprocess from another origin before detaching", "hint"));
+    if (!originDownloadsEnabled(origin)) {
+      entry.append(badge("DISABLED"), node("small", origin.disabled_reason || "Future downloads from this URL are disabled.", "hint"));
+    }
     if (origin.last_error) entry.append(node("div", origin.last_error, "error-text"));
     const actions = node("div", null, "source-buttons origin-buttons");
     const detached = button("Separate track", () => manageTrackOrigin(details, origin, "detach"));
@@ -502,10 +590,18 @@ async function showDetails(track) {
     const unavailable = details.origins.length < 2 || details.operation_state !== "IDLE" || currentAudio;
     detached.disabled = ignored.disabled = unavailable;
     actions.append(detached, ignored);
+    if (origin.downloadable) {
+      const enabled = originDownloadsEnabled(origin);
+      const toggle = button(enabled ? "Disable downloads" : "Enable URL", () => setOriginDownload(details, origin, !enabled), enabled ? "secondary origin-disable" : "secondary origin-enable");
+      toggle.dataset.originId = origin.id;
+      actions.append(toggle);
+    }
     entry.append(actions);
     originList.append(entry);
   }
-  origins.append(originList);
+  const replacement = button("Use another URL…", () => openReplacement(details), "secondary replace-source");
+  replacement.disabled = ["QUEUED", "RUNNING", "DEFERRED"].includes(details.operation_state);
+  origins.append(originList, replacement, node("p", "Disabling downloads keeps the track and its audio. A replacement video is checked before it replaces existing audio.", "hint"));
 
   const assets = node("div", null, "details-block");
   assets.append(node("h3", "Asset history"));
@@ -593,6 +689,7 @@ function renderTrack(track) {
     } else {
       line.append(node("span", origin.url || origin.media_key || "Unknown origin", "origin-url"));
     }
+    if (!originDownloadsEnabled(origin)) line.append(badge("DISABLED"));
     originList.append(line);
   }
   music.append(originList);
@@ -607,7 +704,7 @@ function renderTrack(track) {
 
   const labels = {AVAILABLE: "Playable", MISSING: "Missing audio", UNAVAILABLE: "No audio yet",
     QUEUED: "Queued", RUNNING: "Processing", NEEDS_APPROVAL: "Waiting for approval",
-    DEFERRED: "Retry scheduled", FAILED: "Failed", IDLE: "Ready"};
+    DEFERRED: "Retry scheduled", FAILED: "Failed", STOPPED: "Downloads stopped", IDLE: "Ready"};
   const status = track.operation_state === "IDLE" ? track.health : track.operation_state;
   const stateBadge = badge(status);
   stateBadge.textContent = labels[status] || status;
@@ -618,6 +715,9 @@ function renderTrack(track) {
   if (track.operation_state === "DEFERRED" && track.retry_at) {
     health.append(node("div", `Retry after ${new Date(track.retry_at * 1000).toLocaleString()}`, "hint"));
   }
+  if (track.cancellation_pending) health.append(node("div", "Stopping download…", "hint"));
+  else if (track.needs_source) health.append(node("div", "Choose another audio URL or enable a source.", "hint"));
+  if (track.download_failures) health.append(node("div", `${track.download_failures} failed download attempt${track.download_failures === 1 ? "" : "s"}`, "hint"));
   if (track.issue_count) health.append(node("div", `${track.issue_count} integrity issue${track.issue_count === 1 ? "" : "s"}`, "issue-link"));
   if (track.operation_error) {
     const details = node("details", null, "error-text");
@@ -648,7 +748,22 @@ function renderTrack(track) {
     review.disabled = busy;
     controls.append(review);
   }
-  if (track.operation_state === "FAILED") controls.append(button("Retry", () => action(track, "retry")));
+  const activeOrigin = track.origins.find(origin => origin.id === track.active_origin_id);
+  if (track.can_stop_download && activeOrigin) {
+    const stop = button(track.cancellation_pending ? "Stopping…" : "Stop retrying this URL", () => setOriginDownload(track, activeOrigin, false), "secondary stop-download");
+    stop.disabled = Boolean(track.cancellation_pending) || !originDownloadsEnabled(activeOrigin);
+    stop.dataset.trackId = track.id;
+    controls.append(stop);
+  }
+  if (track.operation_state === "FAILED" || (track.operation_state === "STOPPED" && track.origins.some(origin => origin.downloadable && originDownloadsEnabled(origin)))) {
+    controls.append(button("Retry", () => action(track, "retry")));
+  }
+  if (track.operation_state === "STOPPED" || track.needs_source) {
+    const replacement = button("Use another URL…", () => openReplacement(track), "primary replace-source");
+    replacement.disabled = busy || Boolean(track.cancellation_pending);
+    replacement.dataset.trackId = track.id;
+    controls.append(replacement);
+  }
 
   const menu = node("details", null, "action-menu");
   menu.append(node("summary", "More"));
@@ -663,11 +778,16 @@ function renderTrack(track) {
   repairTags.disabled = track.health !== "AVAILABLE" || track.operation_state !== "IDLE";
   const remove = button("Remove…", () => showRemoval(track), "danger");
   remove.disabled = busy;
-  menuItems.append(editMetadata, technicalDetails, repairTags, remove);
+  const refreshSuggestions = button("Refresh suggestions", async () => {
+    await action(track, "refresh_suggestions");
+  });
+  refreshSuggestions.disabled = busy || track.health !== "AVAILABLE";
+  refreshSuggestions.title = "Identify the existing audio again using its source hints. No new download.";
+  menuItems.append(editMetadata, technicalDetails, refreshSuggestions, repairTags, remove);
   const reprocess = button("Reprocess", () => openOperation(track, "reprocess"));
   const redownload = button("Redownload", () => openOperation(track, "redownload"));
   for (const operation of [reprocess, redownload]) {
-    operation.disabled = busy || !["AVAILABLE", "MISSING"].includes(track.health) || !track.origins.some(origin => origin.downloadable);
+    operation.disabled = busy || !["AVAILABLE", "MISSING"].includes(track.health) || !track.origins.some(origin => origin.downloadable && originDownloadsEnabled(origin));
   }
   menuItems.append(reprocess, redownload);
   menu.append(menuItems);
@@ -697,6 +817,12 @@ function trackSignature(track) {
     operation_error: track.operation_error,
     retry_at: track.retry_at,
     defer_count: track.defer_count,
+    job_stage: track.job_stage,
+    active_origin_id: track.active_origin_id,
+    can_stop_download: track.can_stop_download,
+    cancellation_pending: track.cancellation_pending,
+    download_failures: track.download_failures,
+    needs_source: track.needs_source,
     choices: track.choices,
     issue_count: track.issue_count,
     approval_token: track.approval_token,
@@ -976,9 +1102,8 @@ async function loadIgnored(background = true) {
   const current = beginRequest("ignored");
   const entries = await api(`/api/ignored?user_id=${encodeURIComponent(state.user)}`, null, null, current);
   if (!current()) return;
-  state.ignoredCount = entries.length;
-  const ignoredTab = $("stats").querySelector('[data-filter="IGNORED"]');
-  if (ignoredTab) ignoredTab.firstElementChild.textContent = entries.length.toLocaleString();
+  state.ignoredRulesCount = entries.length;
+  updateIgnoredCount();
   const query = $("ignoredSearch").value.trim().toLocaleLowerCase();
   const matching = entries.filter(entry => !query || `${entry.title} ${entry.mbid || ""} ${(entry.origins || []).map(origin => `${origin.title} ${origin.url}`).join(" ")}`.toLocaleLowerCase().includes(query));
   state.ignoredMaxPage = Math.max(1, Math.ceil(matching.length / 50));
@@ -995,12 +1120,47 @@ async function loadIgnored(background = true) {
   });
 }
 
-$("ignoredSearch").addEventListener("input", () => { state.ignoredPage = 1; guard(() => loadIgnored(false))(); });
+$("ignoredSearch").addEventListener("input", () => { state.ignoredPage = 1; guard(async () => reportErrors(await Promise.allSettled([loadIgnored(false), loadDisabledOrigins(false)])))(); });
 for (const [id, delta] of [["ignoredPrev", -1], ["ignoredNext", 1]]) {
   $(id).addEventListener("click", guard(async () => {
     state.ignoredPage = Math.max(1, Math.min(state.ignoredMaxPage, state.ignoredPage + delta));
     await loadIgnored(false);
   }));
+}
+
+function updateIgnoredCount() {
+  state.ignoredCount = state.ignoredRulesCount + state.disabledCount;
+  const tab = $("stats").querySelector('[data-filter="IGNORED"]');
+  if (tab) tab.firstElementChild.textContent = state.ignoredCount.toLocaleString();
+}
+
+function renderDisabledOrigin(origin) {
+  const track = {id: origin.track_id, user_id: origin.user_id || state.user, title: origin.track_title || origin.title};
+  const item = node("div", null, "ignored-item disabled-origin");
+  const head = node("div", null, "ignored-head");
+  head.append(node("strong", track.title), badge("DISABLED"));
+  item.append(head, node("p", origin.url, "origin-url"), node("p", origin.disabled_reason || "Downloads from this URL are disabled.", "hint"));
+  const actions = node("div", null, "row");
+  const enable = button("Enable URL", () => setOriginDownload(track, origin, true), "secondary origin-enable");
+  const replacement = button("Use another URL…", () => openReplacement(track), "secondary replace-source");
+  replacement.disabled = ["QUEUED", "RUNNING", "DEFERRED"].includes(origin.operation_state);
+  actions.append(enable, replacement, button("Sources & details", () => showDetails(track)));
+  item.append(actions);
+  return item;
+}
+
+async function loadDisabledOrigins(background = true) {
+  const current = beginRequest("disabledOrigins");
+  const entries = await api(`/api/disabled-origins?user_id=${encodeURIComponent(state.user)}`, null, null, current);
+  if (!current()) return;
+  state.disabledCount = new Set(entries.map(entry => entry.track_id)).size;
+  updateIgnoredCount();
+  const query = $("ignoredSearch").value.trim().toLocaleLowerCase();
+  const matching = entries.filter(entry => !query || `${entry.track_title || ""} ${entry.title} ${entry.url}`.toLocaleLowerCase().includes(query));
+  updateKeyedChildren($("disabledSources"), matching, {
+    key: entry => entry.id, signature: stable, render: renderDisabledOrigin, background,
+    empty: () => node("p", "No disabled download URLs.", "empty"),
+  });
 }
 
 function reportErrors(results) {
@@ -1016,7 +1176,7 @@ async function refreshFast(background = true) {
 
 async function refreshMaintenance(background = true) {
   if (!state.user) return;
-  const results = await Promise.allSettled([loadIntegrity(background), loadIgnored(background), loadSystem(background)]);
+  const results = await Promise.allSettled([loadIntegrity(background), loadIgnored(background), loadDisabledOrigins(background), loadSystem(background)]);
   reportErrors(results);
 }
 

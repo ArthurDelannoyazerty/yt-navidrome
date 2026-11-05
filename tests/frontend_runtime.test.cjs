@@ -258,3 +258,89 @@ test('YouTube channel prefixes the title without adding rows or changing sources
   assert.equal(unmatched.children[0].textContent, `Other channel | ${track.title}`);
   assert.equal(unmatched.children.length, 2);
 });
+
+
+test('Stop retrying disables the active job URL, not the source of playing audio', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  const track={id:'song',user_id:'admin',title:'Song',health:'AVAILABLE',operation_state:'DEFERRED',
+    current_origin_id:'playing',active_origin_id:'replacement',can_stop_download:true,playlists:[],choices:[],
+    origins:[{id:'playing',provider:'youtube',title:'Old audio',url:'https://youtu.be/playing',downloadable:true},
+      {id:'replacement',provider:'youtube',title:'New audio',url:'https://youtu.be/replacement',downloadable:true}]};
+  const row=vm.runInContext('renderTrack',b.context)(track);
+  const stop=row.children[3].children[0].children.find(c=>c.textContent==='Stop retrying this URL');
+  assert.ok(stop); assert.equal(stop.disabled,false);
+  const pending=stop.listeners.click();
+  assert.equal(b.requests[0].url,'/api/tracks/song/origins/replacement/disable');
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin'});
+  b.requests[0].resolve({message:'URL disabled',cancellation_pending:true});
+  await pending;
+  assert.match(b.get('notice').textContent,/Stopping the current download/);
+  const unknown=vm.runInContext('renderTrack',b.context)({...track,active_origin_id:null});
+  assert.equal(unknown.children[3].children[0].children.some(c=>c.textContent==='Stop retrying this URL'),false);
+});
+
+test('disabled origins cannot be selected for a new download and can be enabled without retrying', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  const track={id:'song',user_id:'admin',title:'Song',origins:[
+    {id:'bad',provider:'youtube',title:'Restricted',downloadable:true,download_enabled:0},
+    {id:'good',provider:'youtube',title:'Available',downloadable:true,download_enabled:1}]};
+  vm.runInContext('openOperation',b.context)(track,'redownload');
+  assert.deepEqual(b.get('operationOrigin').children.map(c=>c.value),['good']);
+  const pending=vm.runInContext('setOriginDownload',b.context)(track,track.origins[0],true);
+  assert.equal(b.requests[0].url,'/api/tracks/song/origins/bad/enable');
+  b.requests[0].resolve({message:'URL enabled. Retry explicitly when ready.'});
+  await pending;
+  assert.equal(b.requests.length,1);
+  b.app.state.user='guest';
+  await assert.rejects(()=>vm.runInContext('setOriginDownload',b.context)(track,track.origins[0],false),/Library changed/);
+  assert.equal(b.requests.length,1);
+});
+
+test('stopped tracks keep audio availability and offer another URL', () => {
+  const b=browser(); b.app.state.user='admin';
+  const track={id:'song',user_id:'admin',title:'Song',health:'AVAILABLE',operation_state:'STOPPED',
+    playlists:[],choices:[],origins:[{id:'bad',downloadable:true,download_enabled:0}]};
+  const row=vm.runInContext('renderTrack',b.context)(track);
+  assert.equal(row.children[2].children[0].textContent,'Downloads stopped');
+  assert.equal(row.children[2].children[1].textContent,'Current audio is playable');
+  const controls=row.children[3].children[0].children;
+  assert.ok(controls.some(c=>c.textContent==='Use another URL…' && !c.disabled));
+  assert.equal(controls.some(c=>c.textContent==='Retry'),false);
+});
+
+test('replacement URL submission is scoped, resists double clicks and keeps errors visible', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  vm.runInContext('openReplacement',b.context)({id:'song',user_id:'admin',title:'Song'});
+  b.get('replacementUrl').value='https://youtu.be/newvideo';
+  const event={preventDefault(){}};
+  const pending=b.get('replacementForm').listeners.submit(event);
+  await b.get('replacementForm').listeners.submit(event);
+  assert.equal(b.requests.length,1);
+  assert.equal(b.requests[0].url,'/api/tracks/song/replacement');
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin',url:'https://youtu.be/newvideo'});
+  b.requests[0].resolve({error:'Stop the current download first'},409);
+  await pending;
+  assert.match(b.get('replacementStatus').textContent,/Stop the current download first/);
+  assert.equal(b.get('replacementSubmit').disabled,false);
+  assert.ok(b.app.state.replacementTrack);
+  const second=b.get('replacementForm').listeners.submit(event);
+  b.app.state.user='guest';
+  b.get('replacementStatus').textContent='New library';
+  b.requests[1].resolve({message:'Queued'});
+  await second;
+  assert.equal(b.get('replacementStatus').textContent,'New library');
+});
+
+test('disabled-source responses and removal cancellation do not retain stale library state', async () => {
+  const b=browser(); b.app.state.user='admin';
+  const pending=vm.runInContext('loadDisabledOrigins',b.context)();
+  b.app.state.user='guest'; b.app.state.generation++;
+  b.requests[0].resolve(null); await pending;
+  assert.equal(b.get('disabledSources').children.length,0);
+  b.app.state.removeTrack={id:'old'};
+  b.get('removeDialog').listeners.cancel();
+  assert.equal(b.app.state.removeTrack,null);
+});
