@@ -253,11 +253,22 @@ CREATE TABLE IF NOT EXISTS quota (
 """
 
 DROP_ORDER = [
-    "metadata_artist_aliases", "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
+    "metadata_artist_aliases",
+    "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
     "assets", "memberships", "track_origins", "tracks", "operation_receipts",
     "jobs", "sources",
     "events", "settings", "api_clock", "quota", "users",
 ]
+
+
+def _downloads_from_origin(payload: dict) -> bool:
+    """Source disabling concerns network audio, not a review of retained bytes."""
+    actions = {"ingest", "redownload", "reprocess", "replace_source"}
+    mode = payload.get("mode", "ingest")
+    if mode == "resume":
+        action = payload.get("action") or payload.get("pending_action") or "ingest"
+        return action in actions and not payload.get("reviewed_correction")
+    return mode in actions
 
 
 def redact(message: Any) -> str:
@@ -553,7 +564,7 @@ class Store:
             if job:
                 self._finish_cancelled_locked(con, job)
 
-    def fail_job(self, job, kind: str, error: str):
+    def fail_job(self, job, kind: str, error: str, *, stopped: bool = False):
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             current = con.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone()
@@ -565,8 +576,8 @@ class Store:
             con.execute("UPDATE jobs SET state='FAILED',error=?,finished_at=? WHERE id=?",
                         (redact(error), utcnow(), job["id"]))
             if job["kind"] == "track":
-                con.execute("UPDATE tracks SET operation_state='FAILED',operation_kind=?,operation_error=?,updated_at=? WHERE id=?",
-                            (kind.upper(), redact(error), utcnow(), job["target"]))
+                con.execute("UPDATE tracks SET operation_state=?,operation_kind=?,operation_error=?,updated_at=? WHERE id=?",
+                            ("STOPPED" if stopped else "FAILED", kind.upper(), redact(error), utcnow(), job["target"]))
             elif job["kind"] == "sync":
                 con.execute("UPDATE sources SET status='FAILED',error=? WHERE id=?", (redact(error), job["target"]))
 
@@ -587,9 +598,7 @@ class Store:
             result = {"origin_id": origin_id, "cancelled": False, "cancellation_pending": False,
                       "publication_finishing": False, "job_id": None}
             payload = json.loads(job["payload"] or "{}") if job else {}
-            if job and payload.get("origin_id") == origin_id and payload.get("mode") in {
-                "ingest", "redownload", "reprocess", "replace_source", "resume"
-            }:
+            if job and payload.get("origin_id") == origin_id and _downloads_from_origin(payload):
                 directory = STATE / "staging" / track_id
                 committed = con.execute("SELECT 1 FROM operation_receipts WHERE operation_id=?",
                                         (payload.get("operation"),)).fetchone()
@@ -1008,6 +1017,14 @@ class Store:
             if (mode in {"retag", "refresh_suggestions"} and payload.get("revision") is not None
                     and payload["revision"] != correction_revision(track)):
                 raise ValueError("This track changed; reopen the metadata review and try again")
+            if mode in {"retag", "refresh_suggestions"} and track["operation_state"] == "NEEDS_APPROVAL":
+                pending = json.loads(track["pending_operation"] or "{}")
+                if (pending.get("action") == "replace_source"
+                        or (pending.get("origin_id") and pending["origin_id"] != track["current_origin_id"])):
+                    raise ValueError(
+                        "Finish the pending alternative-audio review before editing current metadata or "
+                        "refreshing suggestions; its candidate differs from the currently playing audio."
+                    )
             if mode in {"restore_source", "select_recording"}:
                 payload = prepare_correction(con, track, payload)
                 mode = payload["mode"]
@@ -1800,7 +1817,7 @@ class Store:
             row["active_origin_id"] = payload.get("origin_id")
             row["job_origin_id"] = row["active_origin_id"]
             row["can_stop_download"] = bool(payload.get("origin_id") and job.get("stage") not in {"applying", "publishing"}
-                                                and payload.get("mode") in {"ingest", "redownload", "reprocess", "replace_source", "resume"})
+                                                and _downloads_from_origin(payload))
             row["needs_source"] = not row.get("current_asset_id") and not any(o["downloadable"] and o["download_enabled"] for o in row["origins"])
             row["playlists"] = playlists.get(row["id"], [])
             row["issue_count"] = issues.get(row["id"], 0)
@@ -1833,7 +1850,7 @@ class Store:
         track["download_failures"] = int(job.get("download_failures") or 0)
         track["can_stop_download"] = bool(
             payload.get("origin_id") and job.get("stage") not in {"applying", "publishing"}
-            and payload.get("mode") in {"ingest", "redownload", "reprocess", "replace_source", "resume"}
+            and _downloads_from_origin(payload)
         )
         track["needs_source"] = not track.get("current_asset_id") and not any(
             origin["downloadable"] and origin["download_enabled"] for origin in track["origins"]

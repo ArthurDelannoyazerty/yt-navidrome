@@ -30,7 +30,7 @@ Stopped tracks use operation state `STOPPED` and appear in Attention. Their heal
 
 The `refresh_suggestions` action identifies existing audio without downloading. It reuses the original staged candidate when available, otherwise copies the verified current audio. Retained source tags, the original title, and channel are supplied as identification hints; processed library tags are not archived as original source metadata.
 
-Refreshing always returns suggestions for human review. It retains the current playable file until the user approves an application. An unfinished application must be recovered with Retry before starting a fresh review or alternative download.
+Refreshing always returns suggestions for human review. It retains the current playable file until the user approves an application. An unfinished application must be recovered with Retry before starting a fresh review or alternative download. While an alternative video's approval is pending, finish that candidate review before manually retagging the currently playing audio or refreshing suggestions; those actions must not silently switch from the candidate to the old file.
 
 Clients can include the current metadata `revision` with `retag` and `refresh_suggestions`. A stale provided revision is rejected inside the queue transaction. Older clients may omit it.
 

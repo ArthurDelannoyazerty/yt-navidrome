@@ -176,11 +176,11 @@ def test_unavailable_or_restricted_video_is_disabled_without_global_circuit(db, 
     job = db.claim()
     with pytest.raises(SourceAccessError) as caught:
         asyncio.run(processor.process_track(job))
-    db.fail_job(job, "redownload", str(caught.value))
+    db.fail_job(job, "redownload", str(caught.value), stopped=True)
     disabled = db.owned("track_origins", origin["id"], "admin")
     assert not disabled["download_enabled"]
     assert disabled["disabled_at"] and disabled["disabled_reason"]
-    assert db.owned("tracks", track["id"], "admin")["operation_state"] == "FAILED"
+    assert db.owned("tracks", track["id"], "admin")["operation_state"] == "STOPPED"
     assert not processor.downloader.circuit_status()["open"]
     assert processor.downloader.circuit_status()["failures"] == 0
     assert audio.read_bytes() == b"existing-playable-audio"
@@ -507,3 +507,66 @@ def test_metadata_actions_reject_provided_stale_revision(db, track, environment,
     db.queue_track(track["id"], "admin", {"mode": mode, "revision": correction_revision(current)})
     assert db.claim()
     assert audio.read_bytes() == b"existing-playable-audio"
+
+
+@pytest.mark.parametrize("payload", [
+    {"mode": "refresh_suggestions"},
+    {"mode": "resume", "action": "refresh_suggestions"},
+    {"mode": "resume", "action": "restore_source"},
+    {"mode": "resume", "action": "ingest", "reviewed_correction": True},
+])
+def test_disabling_network_source_does_not_cancel_existing_audio_review(db, track, environment, payload):
+    track, origin, audio = activate(db, track, environment)
+    payload = {**payload, "origin_id": origin["id"]}
+    db.enqueue("track", track["id"], "admin", payload)
+    job = db.claim()
+    db.job_checkpoint(job["id"], "identifying")
+    before = db.dashboard_tracks("admin", 1, 50)["tracks"][0]
+    assert not before["can_stop_download"]
+    assert not db.track_details(track["id"], "admin")["can_stop_download"]
+    result = db.disable_origin(track["id"], origin["id"], "admin")
+    assert not result["cancelled"] and not result["cancellation_pending"]
+    assert not db.one("SELECT cancel_requested FROM jobs WHERE id=?", (job["id"],))["cancel_requested"]
+    db.job_checkpoint(job["id"], "applying")
+    assert audio.read_bytes() == b"existing-playable-audio"
+
+
+@pytest.mark.parametrize("mode", ["retag", "refresh_suggestions"])
+@pytest.mark.parametrize("action", ["replace_source", "reprocess"])
+def test_current_audio_actions_cannot_steal_another_origins_candidate(db, track, environment, mode, action):
+    track, origin, audio = activate(db, track, environment)
+    replacement = db.queue_replacement(track["id"], "admin", ALTERNATIVE)
+    job = db.claim()
+    candidate = environment[0] / "candidate.opus"
+    candidate.write_bytes(b"unreviewed-other-audio")
+    pending = {"action": action, "origin_id": replacement["origin_id"], "operation": "pending",
+               "candidate_sha256": sha256_file(candidate)}
+    db.pause_for_approval(track["id"], [{"mbid": OTHER_MBID}], pending, str(candidate))
+    db.finish_job(job["id"])
+    before = db.owned("tracks", track["id"], "admin")
+    with pytest.raises(ValueError, match="pending alternative-audio review"):
+        db.queue_track(track["id"], "admin", {"mode": mode})
+    after = db.owned("tracks", track["id"], "admin")
+    assert after["pending_operation"] == before["pending_operation"]
+    assert after["current_origin_id"] == origin["id"]
+    assert candidate.read_bytes() == b"unreviewed-other-audio"
+    assert audio.read_bytes() == b"existing-playable-audio"
+
+
+def test_explicit_retry_can_choose_another_enabled_associated_origin(db, track):
+    old_origin = db.one("SELECT * FROM track_origins")
+    replacement = db.queue_replacement(track["id"], "admin", ALTERNATIVE)
+    association_job = db.claim()
+    db.finish_job(association_job["id"])
+    db.complete_operation(track["id"])
+    original = queue_ingest(db, track, old_origin)
+    original_operation = json.loads(original["payload"])["operation"]
+    db.disable_origin(track["id"], old_origin["id"], "admin")
+    db.finish_cancelled_job(original["id"])
+    db.queue_track(track["id"], "admin", {"mode": "retry"})
+    new_job = db.claim()
+    payload = json.loads(new_job["payload"])
+    assert payload["origin_id"] == replacement["origin_id"]
+    assert payload["operation"] != original_operation
+    assert not payload.get("selected")
+    assert db.owned("track_origins", old_origin["id"], "admin")["download_enabled"] == 0
