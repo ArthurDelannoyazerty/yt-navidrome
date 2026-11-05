@@ -243,6 +243,7 @@ CREATE TABLE IF NOT EXISTS quota (
 """
 
 DROP_ORDER = [
+    "metadata_artist_aliases",
     "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
     "assets", "memberships", "track_origins", "tracks", "operation_receipts",
     "jobs", "sources",

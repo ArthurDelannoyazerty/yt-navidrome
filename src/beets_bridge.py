@@ -10,7 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from audio_tags import loudness_values, write_loudness_tags
-from source_metadata import clear_descriptive_tags, clear_release_tags
+from source_metadata import clear_descriptive_tags, clear_release_tags, identification_hints
+from metadata_hints import evidence_for_candidate, search_hints
 from common import LIBRARY, ROOT, STATE, atomic_copy, atomic_json, discovery_comment, user_name
 from http_policy import ApiDeferred, HttpPolicy
 from store import Store
@@ -157,7 +158,7 @@ class Bridge:
         item.store()
         return self.result(item)
 
-    def identify(self, path, title):
+    def identify(self, path, title, hints=None):
         from beets import config, plugins
         from beets.autotag import Recommendation, Source, tag_item
         from beets.importer import SingletonImportTask
@@ -165,15 +166,28 @@ class Bridge:
 
         item = Item.from_path(str(path))
         self.seed(item, title)
+        seeded_from_source = hints is not None
+        hints = hints or search_hints({"source_title": title,
+            "tags": {"title": [item.title or title], "artist": [item.artist] if item.artist else []},
+            "basis": "original_download_tags"})
+        # Hints affect only the in-memory lookup. Never rewrite retained/source tags.
+        if hints.get("title"):
+            item.title = hints["title"]
+        if hints.get("artist") or seeded_from_source:
+            item.artist = hints.get("artist") or ""
+            item.artists = [item.artist] if item.artist else []
         # Never let an embedded, previously assigned MBID short-circuit a fresh
         # candidate search. Fingerprinting and title/artist search start anew.
         ignored_mbid = item.mb_trackid or None
-        item.mb_trackid = ""
-        item.mb_albumid = ""
-        item.acoustid_id = ""
-        item.acoustid_fingerprint = ""
+        for field in ("mb_trackid", "mb_albumid", "mb_artistid", "mb_albumartistid",
+                      "mb_releasegroupid", "mb_releasetrackid", "acoustid_id", "acoustid_fingerprint"):
+            setattr(item, field, "")
+        item.mb_artistids = []
+        item.mb_albumartistids = []
         seed = {"title": item.title, "artist": item.artist, "length_seconds": item.length,
-                "ignored_embedded_mbid": ignored_mbid}
+                "ignored_embedded_mbid": ignored_mbid, "raw_source_title": title,
+                "artist_hint_basis": hints.get("artist_basis", "unknown"),
+                "artist_id_hint": hints.get("artist_id"), "version_clues": hints.get("version_clues", [])}
         task = SingletonImportTask(None, item)
         session = SimpleNamespace(config=config["import"])
         plugins.send("import_task_start", session=session, task=task)
@@ -182,6 +196,9 @@ class Bridge:
         if self.http.failures:
             raise RuntimeError("; ".join(self.http.failures))
         plugins.send("import_task_apply", session=session, task=task)
+        from beetsplug import chroma
+        fingerprint_matches = getattr(chroma, "_matches", {}).get(item.path)
+        fingerprint_ids = set(fingerprint_matches[0]) if fingerprint_matches else set()
         choices = [
             {
                 "title": candidate.info.title,
@@ -189,6 +206,9 @@ class Bridge:
                 "album": candidate.info.album or "",
                 "mbid": candidate.info.track_id,
                 "similarity": round(100 * (1 - float(candidate.distance)), 1),
+                "match_score": round(100 * (1 - float(candidate.distance)), 1),
+                "evidence": {**evidence_for_candidate(item, candidate, title),
+                             "fingerprint_support": candidate.info.track_id in fingerprint_ids if fingerprint_ids else None},
                 "description": candidate.disambig_string,
                 "tags": candidate.info.item_data,
                 "kind": "candidate",
@@ -209,7 +229,14 @@ class Bridge:
             "diagnostics": {"search_seed": seed,
                             "fingerprint_generated": bool(item.get("acoustid_fingerprint")),
                             "acoustid_id_present": bool(item.get("acoustid_id")),
-                            "candidate_count": len(choices)},
+                            "candidate_count": len(choices),
+                            "fingerprint_status": "matched_recordings" if fingerprint_ids else
+                                "no_usable_recording_link" if item.get("acoustid_id") else
+                                "no_usable_lookup_match" if item.get("acoustid_fingerprint") else "not_generated",
+                            "fingerprint_recording_ids": sorted(fingerprint_ids),
+                            "top_score_gap": round(choices[0]["match_score"] - choices[1]["match_score"], 1) if len(choices) > 1 else None,
+                            "score_note": "Weighted beets match score, not probability",
+                            "search_hints": hints},
         }
 
     def raise_if_deferred(self):
@@ -580,7 +607,19 @@ def main(request):
                 }
         return {"found": False}
     if mode == "identify":
-        return bridge.identify(path, track["title"])
+        hints = track.get("search_hints")
+        if hints is None and track.get("origin_id"):
+            origin = bridge.store.one("SELECT * FROM track_origins WHERE id=? AND user_id=?",
+                                      (track["origin_id"], track["user_id"]))
+            if origin:
+                hints = identification_hints(bridge.store, origin)
+        if hints is None and ("source_channel" in track or "source_tags" in track):
+            hints = search_hints({
+                "source_title": track.get("source_title") or track["title"],
+                "tags": track.get("source_tags") or {},
+                "basis": track.get("source_basis") or "provider_title_only",
+            }, {"channel": track.get("source_channel")})
+        return bridge.identify(path, track["title"], hints)
     if mode == "temporary":
         return bridge.publish_temporary(track, path, request["source"])
 
