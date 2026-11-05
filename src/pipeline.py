@@ -20,7 +20,8 @@ from common import (
 )
 from http_policy import ApiDeferred, HttpPolicy
 from providers import PROVIDERS
-from runtime import DeferredOperation, DownloaderRuntime, ProcessError, run_process
+from runtime import DeferredOperation, DownloaderRuntime, ProcessError, SourceAccessError, run_process
+from store import JobCancelled
 
 
 class ReplacementIdentityMismatch(RuntimeError):
@@ -63,6 +64,23 @@ class Pipeline:
         self.downloader = DownloaderRuntime(store)
         self.stopping = asyncio.Event()
         self.children: set[asyncio.Task] = set()
+        self.job_tasks: dict[int, asyncio.Task] = {}
+
+    def cancel_job(self, job_id: int):
+        """Interrupt only the selected job; its worker remains available."""
+        job = self.store.one("SELECT * FROM jobs WHERE id=?", (job_id,))
+        task = self.job_tasks.get(job_id)
+        if (job and job["cancel_requested"] and task and not task.done()
+                and job["stage"] not in {"applying", "publishing"}):
+            task.cancel()
+            return True
+        return False
+
+    def checkpoint(self, job, stage=None):
+        # Helpers are also used directly for non-queued verification. Worker
+        # entry points always require a real durable job before invoking them.
+        if job.get("id") is not None:
+            self.store.job_checkpoint(job["id"], stage)
 
     def report(self, job):
         return lambda level, message: self.store.event(level, message, job["user_id"], job["target"])
@@ -366,34 +384,114 @@ class Pipeline:
         display = track.get("matched_title") or track["title"]
         self.report(job)("INFO", f"Deleted{suffix}: {display}")
 
-    async def _download_candidate(self, job, track, origin, directory, operation):
+    async def _download_candidate(self, job, track, origin, directory, operation, *, reuse_only=False):
+        self.checkpoint(job, "downloading")
         receipt_path = directory / "download-complete.json"
         candidate = directory / f"temp_{track['id']}.opus"
         if candidate.is_file() and receipt_path.is_file():
             receipt = json.loads(receipt_path.read_text())
             if receipt.get("source_url") == origin["url"]:
                 return candidate, receipt
+        if operation == "refresh_suggestions" or reuse_only:
+            raise ValueError("The existing audio for this review is missing; refresh suggestions again")
+        current_origin = self.store.owned("track_origins", origin["id"], track["user_id"])
+        if not current_origin["download_enabled"]:
+            raise ValueError("This video is disabled. Enable it or choose another video.")
         candidate.unlink(missing_ok=True)
         receipt_path.unlink(missing_ok=True)
         try:
             candidate, receipt = await self.downloader.download(origin["url"], track["id"], directory, self.report(job))
+            # A stop can race the final downloader output. It must win before
+            # anything is published or this candidate is offered for approval.
+            self.checkpoint(job, "identifying")
+        except SourceAccessError as exc:
+            self.checkpoint(job)
+            self.store.update("track_origins", origin["id"], availability="UNAVAILABLE",
+                              download_enabled=0, disabled_at=utcnow(),
+                              disabled_reason=str(exc), last_error=str(exc))
+            raise
         except DeferredOperation as exc:
+            self.checkpoint(job)
             self.store.update("track_origins", origin["id"], availability="DEFERRED", last_error=str(exc))
             raise
+        except JobCancelled:
+            raise
         except Exception as exc:
+            self.checkpoint(job)
             self.store.update("track_origins", origin["id"], availability="UNAVAILABLE", last_error=str(exc))
             raise
+        if job.get("id") is not None:
+            self.store.update("jobs", job["id"], download_failures=0)
         self.store.update("track_origins", origin["id"], availability="AVAILABLE", last_error=None, last_download_at=utcnow())
         self.store.update("tracks", track["id"], temp_path=str(candidate))
         self.report(job)("INFO", f"Downloaded candidate from {origin['provider']} for {operation}")
         return candidate, receipt
+
+    async def _retain_review_audio(self, job, track, origin, directory):
+        """Keep a pristine staged download, otherwise copy verified current audio."""
+        self.checkpoint(job, "identifying")
+        candidate = directory / f"temp_{track['id']}.opus"
+        receipt_path = directory / "download-complete.json"
+        receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
+        if not candidate.is_file() or receipt.get("source_url") != origin["url"]:
+            asset = self.store.current_asset(track["id"])
+            if not asset or not await self.usable_asset(track, asset):
+                raise ValueError("Verified existing audio is required to refresh suggestions")
+            candidate = Path(asset["path"])
+            receipt = {"source_url": origin["url"], "downloader_name": asset.get("downloader_name"),
+                       "downloader_version": asset.get("downloader_version")}
+        retained = directory.parent / f"{track['id']}-review-{job['id']}.opus"
+        try:
+            before = await asyncio.to_thread(sha256_file, candidate)
+            await asyncio.to_thread(atomic_copy, candidate, retained)
+            if await asyncio.to_thread(sha256_file, retained) != before:
+                raise ValueError("The existing audio changed while preparing review; try again")
+            self.checkpoint(job)
+            return retained, receipt
+        except BaseException:
+            retained.unlink(missing_ok=True)
+            raise
+
+    async def _resolve_replacement(self, job, origin, directory):
+        marker = directory / "replacement-source.json"
+        if marker.is_file():
+            saved = json.loads(marker.read_text())
+            if saved.get("origin_id") == origin["id"]:
+                return self.store.owned("track_origins", origin["id"], origin["user_id"])
+        self.checkpoint(job, "resolving")
+        source = {"provider": origin["provider"], "source_key": "video:" + origin["media_key"],
+                  "url": origin["url"], "is_playlist": False}
+        http = HttpPolicy(self.store, self.report(job))
+        try:
+            resolved = await asyncio.to_thread(PROVIDERS[origin["provider"]].resolve, source, http)
+        except ApiDeferred as exc:
+            self.checkpoint(job)
+            if str(exc).startswith("Video is missing, private, or unavailable to the API"):
+                message = "This replacement video is unavailable. Choose another video."
+                self.store.update("track_origins", origin["id"], download_enabled=0, disabled_at=utcnow(),
+                                  disabled_reason=message, availability="UNAVAILABLE", last_error=message)
+                raise SourceAccessError(message) from exc
+            raise
+        self.checkpoint(job)
+        if len(resolved.entries) != 1 or resolved.entries[0].key != origin["media_key"]:
+            raise ValueError("The replacement URL did not resolve to the selected video")
+        entry = resolved.entries[0]
+        self.store.update("track_origins", origin["id"], title=entry.title, channel=entry.channel)
+        atomic_json(marker, {"origin_id": origin["id"]})
+        return self.store.owned("track_origins", origin["id"], origin["user_id"])
 
     async def _identification_choices(self, job, track, directory, candidate, origin=None):
         origin = origin or self.store.one(
             "SELECT * FROM track_origins WHERE track_id=? ORDER BY id LIMIT 1", (track["id"],)
         )
         # The selected audio origin is the seed, never an unrelated canonical title.
-        seed = {**track, "title": origin["title"]} if origin else track
+        seed = dict(track)
+        if origin:
+            original = snapshot(self.store, origin)
+            seed.update({"title": origin["title"], "source_title": original["source_title"],
+                         "source_channel": origin.get("channel"), "source_tags": original["tags"],
+                         "source_basis": original["basis"], "origin_id": origin["id"]})
+        self.checkpoint(job, "identifying")
         identified = await self.bridge(job, seed, directory, "identify", path=str(candidate))
         rejected = {row["mbid"] for row in self.store.rows(
             "SELECT mbid FROM origin_identity_rejections WHERE origin_id=?", (origin["id"],)
@@ -425,10 +523,17 @@ class Pipeline:
         return identified, choices
 
     def _select_automatic(self, action: str, track: dict, identified: dict):
-        if action == "ingest" or track.get("temporary_candidate_sha256"):
+        if action in {"ingest", "refresh_suggestions"} or track.get("temporary_candidate_sha256"):
             return None
         choices = identified["choices"]
         top = choices[0] if choices else None
+        if action == "replace_source":
+            # An alternative URL is an association chosen by the user. Only a
+            # strong match to the confirmed recording may bypass fresh review.
+            if (track.get("mbid") and identified["automatic"] and top
+                    and top.get("mbid") == track["mbid"]):
+                return top
+            return None
         if action == "redownload" and track.get("mbid"):
             if not identified["automatic"] or not top or top.get("mbid") != track["mbid"]:
                 raise ReplacementIdentityMismatch(
@@ -453,6 +558,7 @@ class Pipeline:
         if (track.get("temporary_candidate_sha256") != digest
                 or track.get("current_origin_id") != origin["id"]
                 or not await self.usable_asset(track, asset)):
+            self.checkpoint(job, "publishing")
             result = await self.bridge(job, track, directory, "temporary", path=str(candidate),
                                        source=snapshot(self.store, origin))
             final = Path(result["file_path"]).resolve()
@@ -471,6 +577,23 @@ class Pipeline:
     async def _apply_candidate(self, job, source_track, origin, selected, candidate,
                                receipt, action, operation_id, directory,
                                overrides=None, persisted_plan=None):
+        self.checkpoint(job, "applying")
+        if action == "replace_source":
+            chosen_mbid = (selected or {}).get("mbid") or (selected or {}).get("tags", {}).get("mb_trackid")
+            if source_track.get("mbid") and chosen_mbid != source_track["mbid"]:
+                raise ReplacementIdentityMismatch(
+                    "The alternative video must match the confirmed recording. Existing audio was retained. "
+                    "Review the current track's identity separately before replacing its source."
+                )
+            existing = self.store.one(
+                "SELECT id FROM tracks WHERE user_id=? AND mbid=? AND id<>?",
+                (source_track["user_id"], chosen_mbid, source_track["id"]),
+            ) if chosen_mbid else None
+            if existing:
+                raise ReplacementIdentityMismatch(
+                    "This recording already exists in the library. The alternative URL was retained on "
+                    "this track, but its audio was not activated. Review the two tracks before merging them."
+                )
         # Old approval lists offered "keep current/source tags" before there
         # was a temporary beets item. Do not accidentally approve its placeholder
         # album when resuming such a list after an upgrade.
@@ -582,6 +705,7 @@ class Pipeline:
         self.report(job)("INFO", "Repaired discovery and loudness tags without redownloading or changing identity")
 
     async def process_track(self, job):
+        self.store.job_checkpoint(job["id"])
         payload = json.loads(job["payload"])
         mode = payload.get("mode", "ingest")
         operation = payload.get("operation", str(job["id"]))
@@ -592,6 +716,7 @@ class Pipeline:
             return
         completed = self.store.operation_receipt(operation)
         if completed:
+            self.checkpoint(job, "applying")
             await self.finish_operation_receipt(job, completed, directory)
             return
         track = self.store.owned("tracks", job["target"], job["user_id"])
@@ -615,9 +740,32 @@ class Pipeline:
         previous_plan = json.loads(plan_file.read_text()) if plan_file.exists() else {}
         first_attempt = previous_plan.get("operation") != operation
         if first_attempt:
-            shutil.rmtree(directory, ignore_errors=True)
-            directory.mkdir(parents=True, exist_ok=True)
-            atomic_json(plan_file, {"operation": operation, "action": action, "origin_id": payload.get("origin_id")})
+            if mode in {"refresh_suggestions", "replace_source"} and (directory / "apply-request.json").exists():
+                raise ValueError("Retry the previous metadata application before starting a new operation")
+            if mode == "replace_source" and (
+                payload.get("expected_mbid") != track["mbid"]
+                or payload.get("expected_asset_id") != track["current_asset_id"]
+            ):
+                raise ValueError("The current audio or identity changed; review the track before replacing its source")
+            retained = None
+            if mode == "refresh_suggestions":
+                origin = self.store.owned("track_origins", payload["origin_id"], track["user_id"])
+                if origin["track_id"] != track["id"]:
+                    raise ValueError("The current audio origin no longer belongs to this track")
+                retained, retained_receipt = await self._retain_review_audio(job, track, origin, directory)
+            try:
+                self.checkpoint(job)
+                shutil.rmtree(directory, ignore_errors=True)
+                directory.mkdir(parents=True, exist_ok=True)
+                atomic_json(plan_file, {"operation": operation, "action": action, "origin_id": payload.get("origin_id")})
+                if retained:
+                    candidate = directory / f"temp_{track['id']}.opus"
+                    await asyncio.to_thread(atomic_copy, retained, candidate)
+                    atomic_json(directory / "download-complete.json", retained_receipt)
+                    self.store.update("tracks", track["id"], temp_path=str(candidate))
+            finally:
+                if retained:
+                    retained.unlink(missing_ok=True)
         if mode == "repair":
             await self.repair_tags(job, track, directory, operation)
             return
@@ -638,6 +786,8 @@ class Pipeline:
                     raise ValueError("A previous metadata application needs recovery before a new selection")
                 (directory / "identity-plan.json").unlink(missing_ok=True)
                 atomic_json(selection_file, {"id": payload["selection_id"]})
+        if (directory / "apply-request.json").exists():
+            self.checkpoint(job, "applying")
         recovery = await self.recover_apply_state(job, track, directory, operation)
         if recovery:
             if recovery["completed"]:
@@ -670,10 +820,19 @@ class Pipeline:
         origin = self.store.owned("track_origins", payload["origin_id"], track["user_id"])
         if origin["track_id"] != track["id"]:
             raise ValueError("Selected origin no longer belongs to this track")
-        candidate, receipt = await self._download_candidate(job, track, origin, directory, action)
-        if not (directory / "apply-request.json").exists():
+        if action == "replace_source":
+            origin = await self._resolve_replacement(job, origin, directory)
+        candidate, receipt = await self._download_candidate(
+            job, track, origin, directory, action, reuse_only=bool(payload.get("reviewed_correction")),
+        )
+        self.checkpoint(job, "identifying")
+        if action != "refresh_suggestions" and not (directory / "apply-request.json").exists():
             await asyncio.to_thread(capture_source, self.store, origin, candidate)
-        track = await self.ensure_temporary_audio(job, track, origin, candidate, receipt, directory)
+        # A replacement is reviewed against the existing playable audio. Never
+        # replace an already playable temporary album before that review either.
+        if action != "refresh_suggestions" and not (action == "replace_source" and track.get("current_asset_id")):
+            track = await self.ensure_temporary_audio(job, track, origin, candidate, receipt, directory)
+        self.checkpoint(job, "identifying")
         selected = payload.get("selected") if mode == "resume" else None
         candidate_digest = await asyncio.to_thread(sha256_file, candidate)
         review_again = mode == "resume" and (
@@ -693,6 +852,7 @@ class Pipeline:
             if selected is None:
                 pending = {"action": action, "origin_id": origin["id"], "operation": operation,
                            "candidate_sha256": candidate_digest}
+                self.checkpoint(job)
                 self.store.pause_for_approval(track["id"], choices, pending, str(candidate))
                 self.report(job)("INFO", f"Metadata needs approval (beets: {identified['recommendation']})")
                 return
@@ -811,6 +971,17 @@ class Pipeline:
         shutil.rmtree(directory, ignore_errors=True)
         self.report(job)("INFO", f"Library verification finished: {len(issues)} issue(s)")
 
+    async def _run_job(self, job):
+        self.store.job_checkpoint(job["id"])
+        if job["kind"] == "sync":
+            await self.process_source(job)
+        elif job["kind"] == "track":
+            await self.process_track(job)
+        elif job["kind"] == "integrity":
+            await self.process_integrity(job)
+        else:
+            raise ValueError("Unknown job type")
+
     async def work(self):
         while not self.stopping.is_set():
             job = self.store.claim()
@@ -819,32 +990,46 @@ class Pipeline:
                 continue
             payload = json.loads(job["payload"])
             kind = payload.get("action") or payload.get("mode") or job["kind"]
+            task = asyncio.create_task(self._run_job(job))
+            self.job_tasks[job["id"]] = task
             try:
-                if job["kind"] == "sync":
-                    await self.process_source(job)
-                elif job["kind"] == "track":
-                    await self.process_track(job)
-                elif job["kind"] == "integrity":
-                    await self.process_integrity(job)
-                else:
-                    raise ValueError("Unknown job type")
-                self.store.update("jobs", job["id"], state="DONE", finished_at=utcnow(), error=None)
+                await task
+                self.store.finish_job(job["id"])
                 if job["kind"] == "track":
                     self.queue_receipt_followup(self.store.operation_receipt(payload.get("operation")))
             except asyncio.CancelledError:
-                raise
+                # Shutdown still cancels the worker. A user stop cancels only
+                # the child task and leaves this worker to claim the next job.
+                if asyncio.current_task().cancelling():
+                    raise
+                current = self.store.one("SELECT * FROM jobs WHERE id=?", (job["id"],))
+                if not current or not current["cancel_requested"]:
+                    raise
+                self.store.finish_cancelled_job(job["id"])
+                self.report(job)("INFO", "Stopped this source operation; existing audio was retained")
+            except JobCancelled:
+                self.store.finish_cancelled_job(job["id"])
+                self.report(job)("INFO", "Stopped this source operation; existing audio was retained")
+            except SourceAccessError as exc:
+                self.store.fail_job(job, str(kind), str(exc), stopped=True)
+                self.report(job)("WARNING", f"Source stopped: {exc}")
             except (DeferredOperation, ApiDeferred) as exc:
-                retry_at = self.store.defer_job(job["id"], str(exc), retry_at=getattr(exc, "retry_at", None))
-                when = datetime.fromtimestamp(retry_at, UTC).isoformat()
-                self.report(job)("WARNING", f"{str(kind).upper()} deferred until {when}: {exc}")
+                retry_at = self.store.defer_job(
+                    job["id"], str(exc), retry_at=getattr(exc, "retry_at", None),
+                    download_failure=getattr(exc, "download_failure", False),
+                )
+                if retry_at is not None:
+                    when = datetime.fromtimestamp(retry_at, UTC).isoformat()
+                    self.report(job)("WARNING", f"{str(kind).upper()} deferred until {when}: {exc}")
+                else:
+                    current = self.store.one("SELECT state,error FROM jobs WHERE id=?", (job["id"],))
+                    if current and current["state"] == "FAILED":
+                        self.report(job)("ERROR", current["error"])
             except Exception as exc:
                 self.report(job)("ERROR", traceback.format_exc())
-                self.store.update("jobs", job["id"], state="FAILED", error=str(exc), finished_at=utcnow())
-                if job["kind"] == "sync":
-                    self.store.update("sources", job["target"], status="FAILED", error=str(exc))
-                elif job["kind"] == "track":
-                    self.store.fail_operation(job["target"], str(kind), str(exc))
+                self.store.fail_job(job, str(kind), str(exc))
             finally:
+                self.job_tasks.pop(job["id"], None)
                 if job["kind"] == "sync":
                     interval = float(os.getenv("SYNC_INTERVAL_HOURS", "6"))
                     next_sync = time.time() + interval * 3600 if interval > 0 else 0

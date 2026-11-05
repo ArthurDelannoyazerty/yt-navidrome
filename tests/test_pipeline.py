@@ -63,6 +63,10 @@ def test_redownload_refuses_identity_change_without_touching_old_file(db, track,
             }
         raise AssertionError(mode)
 
+    async def current_metadata(*args, **kwargs):
+        return {"mbid": track["mbid"], "tags": {}, "title": "Song", "artist": "Artist", "kind": "current"}
+
+    monkeypatch.setattr(pipeline, "metadata_for_recording", current_metadata)
     monkeypatch.setattr(pipeline, "bridge", bridge)
     identified = asyncio.run(pipeline._identification_choices(
         {"user_id": "admin", "target": track["id"]}, track,
@@ -98,6 +102,10 @@ def test_reprocess_different_strong_identity_requires_approval(db, track, enviro
             return {"mbid": track["mbid"], "tags": {}, "title": "Song", "artist": "Artist", "kind": "current"}
         raise AssertionError(mode)
 
+    async def current_metadata(*args, **kwargs):
+        return {"mbid": track["mbid"], "tags": {}, "title": "Song", "artist": "Artist", "kind": "current"}
+
+    monkeypatch.setattr(pipeline, "metadata_for_recording", current_metadata)
     monkeypatch.setattr(pipeline, "bridge", bridge)
     db.queue_track(track["id"], "admin", {"mode": "reprocess", "origin_id": origin["id"], "operation": "op"})
     job = db.claim()

@@ -22,9 +22,17 @@ class ProcessError(RuntimeError):
 
 
 class DeferredOperation(RuntimeError):
-    def __init__(self, message: str, *, retry_at: float | None = None):
+    def __init__(self, message: str, *, retry_at: float | None = None,
+                 download_failure: bool = False):
         super().__init__(message)
         self.retry_at = retry_at
+        # Provider cooldown waits and metadata retries do not consume a video's
+        # download-attempt budget. Only an actual failed download sets this.
+        self.download_failure = download_failure
+
+
+class SourceAccessError(RuntimeError):
+    """An individual video requires intervention, not an automatic retry."""
 
 
 async def run_process(args, report, *, cwd=None, timeout=1800):
@@ -223,13 +231,18 @@ class DownloaderRuntime:
                             f"YouTube download blocked ({state['failures']} recent failure(s)); "
                             "this track will retry later.",
                         )
-                    raise DeferredOperation(reason, retry_at=retry_at) from exc
+                    raise DeferredOperation(reason, retry_at=retry_at, download_failure=True) from exc
+                if exc.returncode == 24:
+                    raise SourceAccessError(
+                        "This video requires age/login/region access. Its URL was disabled; "
+                        "choose another video or enable it after fixing access."
+                    ) from exc
                 if exc.returncode == 21:
-                    raise RuntimeError("Video unavailable, private, or removed.") from exc
+                    raise SourceAccessError("Video unavailable, private, or removed. Choose another video.") from exc
                 if exc.returncode == 22:
                     raise DeferredOperation(
                         "YouTube download failed with a transient network error.",
-                        retry_at=time.time() + 60,
+                        retry_at=time.time() + 60, download_failure=True,
                     ) from exc
                 raise
 
