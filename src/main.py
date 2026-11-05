@@ -22,6 +22,7 @@ from audio_tags import inspect_tags
 from common import LIBRARY, ROOT, utcnow
 from pipeline import Pipeline, write_playlist
 from metadata_routes import install_metadata_routes
+from review_routes import install_review_routes
 from providers import parse_source
 from store import SCHEMA_VERSION, Store
 
@@ -124,6 +125,7 @@ def create_app(store=None, start_workers=True):
     app.state.store = store
     app.state.pipeline = pipeline
     install_metadata_routes(app, store)
+    install_review_routes(app, store)
     app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 
     @app.middleware("http")
