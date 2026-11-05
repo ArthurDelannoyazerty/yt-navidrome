@@ -15,3 +15,20 @@ Sources consulted:
 
 - [Nielsen Norman Group: Progressive Disclosure](https://www.nngroup.com/articles/progressive-disclosure/)
 - [GOV.UK Design System: Pagination](https://design-system.service.gov.uk/components/pagination/)
+
+
+## Focused music controls
+
+Music includes an **Ignored music** view beside the usual quick filters. It has
+search and pagination, and keeps separate controls for allowing a recording,
+restoring one URL, or restoring all rules. Library totals count active music.
+
+The track **More → Remove…** dialog explains removal and ignore scope. It shows
+only distinct scopes supported by the selected entry; blocking a recording is
+explicit. **Review metadata → Original source metadata** remains the single place
+to restore retained original tags. Advanced editing and audio tools remain in More.
+
+Activity follows the latest message by default, including when logs arrive before
+the tab is opened. Scrolling up pauses following; **Jump to latest** resumes it.
+The Help guide separates the usual workflow from temporary failures and includes
+an expandable table of every documented operation transition.

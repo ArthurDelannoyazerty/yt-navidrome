@@ -139,24 +139,54 @@ test('Maintenance can unblock a MusicBrainz identity without restoring ignored s
   assert.match(b.get('notice').textContent, /Identity allowed/);
 });
 
-test('delete controls distinguish source-only ignore from recording-wide block', () => {
+test('Remove dialog offers unique honest scopes and a single menu entry', () => {
   const b = browser(); b.app.state.user = 'admin';
-  const make = (mbid,asset,origins) => ({
-    id:'song',user_id:'admin',title:'Full album',matched_title:'Music',mbid,
-    current_asset_id:asset,file_path:asset ? '/library/song.opus' : null,
-    origins,playlists:[],discovered_at:'2021-01-01T00:00:00Z',
-    discovery_basis:'first_seen',health:asset?'AVAILABLE':'MISSING',
-    operation_state:'IDLE',choices:[],issue_count:0,
+  const origin = {provider:'youtube',url:'https://youtu.be/abc',downloadable:true};
+  const make = (mbid,origins) => ({id:'song',user_id:'admin',title:'Song',mbid,
+    health:'AVAILABLE',operation_state:'IDLE',origins,playlists:[],choices:[]});
+  const show = vm.runInContext('showRemoval', b.context);
+  show(make(null,[origin]));
+  assert.deepEqual(b.get('removeChoices').children.map(c=>c.children[0].value), ['delete','delete_ignore_urls']);
+  show(make('recording-id',[origin]));
+  assert.deepEqual(b.get('removeChoices').children.map(c=>c.children[0].value), ['delete','delete_ignore_urls','delete_ignore']);
+  show(make('recording-id',[origin,{...origin,url:'https://youtu.be/def'}]));
+  assert.deepEqual(b.get('removeChoices').children.map(c=>c.children[0].value), ['delete','delete_ignore']);
+  const row = vm.runInContext('renderTrack', b.context)(make(null,[origin]));
+  const menu = row.children[3].children[0].children.at(-1).children[1];
+  assert.equal(menu.children.filter(c=>c.textContent==='Remove…').length,1);
+  assert.equal(menu.children.some(c=>c.textContent==='Restore source metadata'),false);
+});
+
+test('Activity follows after a hidden load, pauses for reading and resumes on demand', async () => {
+  const b = browser(); b.app.state.user='admin';
+  const activity=b.get('activityPanel'); activity.dataset.panel='activity'; activity.hidden=true;
+  b.context.document.querySelectorAll = selector => selector==='[data-panel]' ? [activity] : [];
+  const logs=b.get('logs'); let position=0;
+  Object.defineProperties(logs, {
+    clientHeight:{get:()=>activity.hidden?0:480},
+    scrollHeight:{get:()=>activity.hidden?0:Math.max(480,logs.children.length*20)},
+    scrollTop:{get:()=>position,set:value=>{position=Math.min(Math.max(0,value),Math.max(0,logs.scrollHeight-logs.clientHeight));}},
   });
-  const menu = row => row.children[3].children[0].children.at(-1).children[1];
-  const detached = menu(vm.runInContext('renderTrack', b.context)(make(null,null,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true}])));
-  assert.ok(detached.children.some(c => c.textContent === 'Delete & ignore this URL only'));
-  assert.ok(detached.children.some(c => c.textContent === 'Delete & ignore source URLs'));
-  const available = menu(vm.runInContext('renderTrack', b.context)(make('recording-id',123,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true}])));
-  assert.ok(available.children.some(c => c.textContent === 'Delete & block recording + URLs'));
-  assert.equal(available.children.some(child=>child.textContent==='Delete & ignore this URL only'),true);
-  const combined = menu(vm.runInContext('renderTrack', b.context)(make('recording-id',123,[{provider:'youtube',url:'https://youtu.be/abc',downloadable:true},{provider:'youtube',url:'https://youtu.be/def',downloadable:true}])));
-  assert.equal(combined.children.some(child=>child.textContent==='Delete & ignore this URL only'),false);
+  const events=Array.from({length:100},(_,i)=>({id:i+1,at:'now',level:'INFO',message:'event'}));
+  let pending=b.app.loadEvents(); b.requests.at(-1).resolve(events); await pending;
+  vm.runInContext("setTab('activity')", b.context);
+  assert.equal(logs.scrollTop,1520);
+  logs.scrollTop=100; logs.listeners.scroll();
+  pending=b.app.loadEvents(); b.requests.at(-1).resolve([{...events[0],id:101}]); await pending;
+  assert.equal(logs.scrollTop,100); assert.equal(b.app.state.unseenEvents,1);
+  assert.equal(b.get('jumpLatest').hidden,false);
+  b.get('jumpLatest').listeners.click();
+  assert.equal(logs.scrollTop,1540); assert.equal(b.app.state.followLogs,true);
+});
+
+test('Ignored music is a Music view and leaves the active track filter intact', async () => {
+  const b=browser(); b.app.state.user='admin'; b.get('filter').value='NEEDS_APPROVAL';
+  vm.runInContext('updateKeyedChildren=()=>{};',b.context);
+  vm.runInContext("setFilter('IGNORED')",b.context);
+  assert.equal(b.get('musicResults').hidden,true);
+  assert.equal(b.get('ignoredMusicPanel').hidden,false);
+  assert.equal(b.get('filter').value,'NEEDS_APPROVAL');
+  b.requests.at(-1).resolve([]); await new Promise(resolve=>setImmediate(resolve));
 });
 
 test('ignored-source restore targets only one URL without changing identity block', async () => {
@@ -227,4 +257,90 @@ test('YouTube channel prefixes the title without adding rows or changing sources
   const unmatched = render({...track, matched_title:null, current_origin_id:null}).children[0];
   assert.equal(unmatched.children[0].textContent, `Other channel | ${track.title}`);
   assert.equal(unmatched.children.length, 2);
+});
+
+
+test('Stop retrying disables the active job URL, not the source of playing audio', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  const track={id:'song',user_id:'admin',title:'Song',health:'AVAILABLE',operation_state:'DEFERRED',
+    current_origin_id:'playing',active_origin_id:'replacement',can_stop_download:true,playlists:[],choices:[],
+    origins:[{id:'playing',provider:'youtube',title:'Old audio',url:'https://youtu.be/playing',downloadable:true},
+      {id:'replacement',provider:'youtube',title:'New audio',url:'https://youtu.be/replacement',downloadable:true}]};
+  const row=vm.runInContext('renderTrack',b.context)(track);
+  const stop=row.children[3].children[0].children.find(c=>c.textContent==='Stop retrying this URL');
+  assert.ok(stop); assert.equal(stop.disabled,false);
+  const pending=stop.listeners.click();
+  assert.equal(b.requests[0].url,'/api/tracks/song/origins/replacement/disable');
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin'});
+  b.requests[0].resolve({message:'URL disabled',cancellation_pending:true});
+  await pending;
+  assert.match(b.get('notice').textContent,/Stopping the current download/);
+  const unknown=vm.runInContext('renderTrack',b.context)({...track,active_origin_id:null});
+  assert.equal(unknown.children[3].children[0].children.some(c=>c.textContent==='Stop retrying this URL'),false);
+});
+
+test('disabled origins cannot be selected for a new download and can be enabled without retrying', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  const track={id:'song',user_id:'admin',title:'Song',origins:[
+    {id:'bad',provider:'youtube',title:'Restricted',downloadable:true,download_enabled:0},
+    {id:'good',provider:'youtube',title:'Available',downloadable:true,download_enabled:1}]};
+  vm.runInContext('openOperation',b.context)(track,'redownload');
+  assert.deepEqual(b.get('operationOrigin').children.map(c=>c.value),['good']);
+  const pending=vm.runInContext('setOriginDownload',b.context)(track,track.origins[0],true);
+  assert.equal(b.requests[0].url,'/api/tracks/song/origins/bad/enable');
+  b.requests[0].resolve({message:'URL enabled. Retry explicitly when ready.'});
+  await pending;
+  assert.equal(b.requests.length,1);
+  b.app.state.user='guest';
+  await assert.rejects(()=>vm.runInContext('setOriginDownload',b.context)(track,track.origins[0],false),/Library changed/);
+  assert.equal(b.requests.length,1);
+});
+
+test('stopped tracks keep audio availability and offer another URL', () => {
+  const b=browser(); b.app.state.user='admin';
+  const track={id:'song',user_id:'admin',title:'Song',health:'AVAILABLE',operation_state:'STOPPED',
+    playlists:[],choices:[],origins:[{id:'bad',downloadable:true,download_enabled:0}]};
+  const row=vm.runInContext('renderTrack',b.context)(track);
+  assert.equal(row.children[2].children[0].textContent,'Downloads stopped');
+  assert.equal(row.children[2].children[1].textContent,'Current audio is playable');
+  const controls=row.children[3].children[0].children;
+  assert.ok(controls.some(c=>c.textContent==='Use another URL…' && !c.disabled));
+  assert.equal(controls.some(c=>c.textContent==='Retry'),false);
+});
+
+test('replacement URL submission is scoped, resists double clicks and keeps errors visible', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  vm.runInContext('openReplacement',b.context)({id:'song',user_id:'admin',title:'Song'});
+  b.get('replacementUrl').value='https://youtu.be/newvideo';
+  const event={preventDefault(){}};
+  const pending=b.get('replacementForm').listeners.submit(event);
+  await b.get('replacementForm').listeners.submit(event);
+  assert.equal(b.requests.length,1);
+  assert.equal(b.requests[0].url,'/api/tracks/song/replacement');
+  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin',url:'https://youtu.be/newvideo'});
+  b.requests[0].resolve({error:'Stop the current download first'},409);
+  await pending;
+  assert.match(b.get('replacementStatus').textContent,/Stop the current download first/);
+  assert.equal(b.get('replacementSubmit').disabled,false);
+  assert.ok(b.app.state.replacementTrack);
+  const second=b.get('replacementForm').listeners.submit(event);
+  b.app.state.user='guest';
+  b.get('replacementStatus').textContent='New library';
+  b.requests[1].resolve({message:'Queued'});
+  await second;
+  assert.equal(b.get('replacementStatus').textContent,'New library');
+});
+
+test('disabled-source responses and removal cancellation do not retain stale library state', async () => {
+  const b=browser(); b.app.state.user='admin';
+  const pending=vm.runInContext('loadDisabledOrigins',b.context)();
+  b.app.state.user='guest'; b.app.state.generation++;
+  b.requests[0].resolve(null); await pending;
+  assert.equal(b.get('disabledSources').children.length,0);
+  b.app.state.removeTrack={id:'old'};
+  b.get('removeDialog').listeners.cancel();
+  assert.equal(b.app.state.removeTrack,null);
 });
