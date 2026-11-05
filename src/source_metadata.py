@@ -14,6 +14,7 @@ from pathlib import Path
 from mutagen.oggopus import OggOpus
 
 from common import utcnow
+from metadata_hints import alias_key, search_hints
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS origin_metadata (
@@ -22,6 +23,15 @@ CREATE TABLE IF NOT EXISTS origin_metadata (
  tags TEXT NOT NULL,
  basis TEXT NOT NULL,
  captured_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metadata_artist_aliases (
+ user_id TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE,
+ alias_key TEXT NOT NULL,
+ alias TEXT NOT NULL,
+ artist_id TEXT NOT NULL,
+ artist_name TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ PRIMARY KEY(user_id, alias_key)
 );
 CREATE TABLE IF NOT EXISTS identification_reports (
  origin_id TEXT PRIMARY KEY REFERENCES track_origins(id) ON DELETE CASCADE,
@@ -59,6 +69,22 @@ def source_snapshot(con, origin: dict) -> dict:
 def snapshot(store, origin: dict) -> dict:
     with store.db() as con:
         return source_snapshot(con, origin)
+
+
+
+def identification_hints(store, origin: dict) -> dict:
+    """Query-only hints and explicitly confirmed, user-scoped artist aliases."""
+    value = snapshot(store, origin)
+    hints = search_hints(value, origin)
+    row = store.one("SELECT * FROM metadata_artist_aliases WHERE user_id=? AND alias_key=?",
+                    (origin["user_id"], alias_key(hints["artist"]))) if hints["artist"] else None
+    return search_hints(value, origin, row)
+
+
+def artist_alias(store, origin: dict) -> dict | None:
+    hints = search_hints(snapshot(store, origin), origin)
+    return store.one("SELECT alias,artist_id,artist_name,updated_at FROM metadata_artist_aliases "
+                     "WHERE user_id=? AND alias_key=?", (origin["user_id"], alias_key(hints["artist"]))) if hints["artist"] else None
 
 
 def capture_source(store, origin: dict, path: Path) -> dict:
@@ -187,7 +213,7 @@ def save_identification_report(store, origin, track, identified, digest):
               "automatic": bool(identified.get("automatic")),
               "diagnostics": identified.get("diagnostics", {}),
               "candidate_count": len(identified.get("choices", [])),
-              "candidates": [{k: c.get(k) for k in ("mbid", "title", "artist", "similarity", "description")}
+              "candidates": [{k: c.get(k) for k in ("mbid", "title", "artist", "similarity", "match_score", "description", "evidence")}
                              for c in identified.get("choices", [])[:20]]}
     store.execute(
         "INSERT INTO identification_reports VALUES (?,?,?) ON CONFLICT(origin_id) "
