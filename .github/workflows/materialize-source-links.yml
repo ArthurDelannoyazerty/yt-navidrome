@@ -1,0 +1,29 @@
+name: Materialize reviewed source-link changes
+on:
+  push:
+    branches: [feat/source-links-and-provenance-20261109]
+    paths: ['tools/.apply-source-links.py', '.github/workflows/materialize-source-links.yml']
+permissions:
+  contents: write
+jobs:
+  materialize:
+    if: github.repository == 'ArthurDelannoyazerty/yt-navidrome' && github.ref == 'refs/heads/feat/source-links-and-provenance-20261109'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/source-links-and-provenance-20261109
+      - name: Apply the locally tested changes and verify the exact resulting tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object tools/.apply-source-links.py)" = cf7f158e28ca31be292febe65c5a26af13a92920
+          python tools/.apply-source-links.py
+          python -m compileall -q src tests
+          node --check src/static/app.js
+          git rm -- tools/.apply-source-links.py .github/workflows/materialize-source-links.yml
+          git add -- src docs/source-links-and-playlists.md tests/test_file_provenance.py
+          test "$(git write-tree)" = 09ffd0095c79913935101c58a202eadacf0027d7
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Embed source links, preserve metadata provenance and support playlist monitoring pause'
+          git push origin HEAD:refs/heads/feat/source-links-and-provenance-20261109
