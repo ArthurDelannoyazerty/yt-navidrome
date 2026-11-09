@@ -34,6 +34,11 @@ for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "meta
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
 
+class SourceMonitoringInput(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    monitored: bool
+
+
 class UserInput(BaseModel):
     name: str
 
@@ -236,6 +241,20 @@ def create_app(store=None, start_workers=True):
         store.update("sources", source["id"], status="PENDING", error=None)
         return {"message": "Source sync queued"}
 
+    @app.post("/api/sources/{source_id}/monitoring")
+    def source_monitoring(source_id: str, data: SourceMonitoringInput):
+        with store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            source = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?", (source_id, data.user_id)).fetchone()
+            if not source:
+                raise LookupError("Source not found for this user")
+            if not source["is_playlist"] or source["provider"] == "legacy":
+                raise ValueError("Monitoring is available for provider playlists and collections")
+            con.execute("UPDATE sources SET monitored=? WHERE id=?", (int(data.monitored), source_id))
+            if data.monitored:
+                store.enqueue("sync", source_id, data.user_id, con=con)
+        return {"message": "Monitoring resumed; sync queued" if data.monitored else "Monitoring paused; music and playlist history retained. A sync already running may finish."}
+
     @app.delete("/api/sources/{source_id}")
     def delete_source(source_id: str, user_id: str):
         source = store.owned("sources", source_id, user_id)
@@ -331,7 +350,7 @@ def create_app(store=None, start_workers=True):
                 details["file_tags"] = {"issues": ["PATH_OUTSIDE_LIBRARY"],
                                         "error": "Refusing to inspect another library"}
             else:
-                details["file_tags"] = inspect_tags(path, details.get("discovered_at"))
+                details["file_tags"] = inspect_tags(path, details.get("discovered_at"), [o["url"] for o in details["origins"]])
         else:
             details["file_tags"] = {"issues": ["NO_CURRENT_ASSET"],
                                     "error": "There is no current audio file"}

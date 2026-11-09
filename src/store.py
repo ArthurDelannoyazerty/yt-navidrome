@@ -18,7 +18,7 @@ from library_query import track_where
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, correction_revision, prepare_correction
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class JobCancelled(RuntimeError):
@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS tracks (
  current_origin_id TEXT,
  current_asset_id INTEGER,
  temporary_candidate_sha256 TEXT,
+ metadata_source TEXT NOT NULL DEFAULT 'unknown',
+ metadata_edited INTEGER NOT NULL DEFAULT 0,
+ metadata_reviewed_at TEXT,
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL
 );
@@ -339,7 +342,7 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
@@ -392,6 +395,29 @@ class Store:
                         if name not in columns:
                             con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
                 con.execute("PRAGMA user_version=5")
+                con.commit()
+
+            if version in (1, 2, 3, 4, 5):
+                self.backup_database("schema-v5")
+                con.execute("BEGIN IMMEDIATE")
+                columns = {row["name"] for row in con.execute("PRAGMA table_info(tracks)")}
+                for name, definition in (
+                    ("metadata_source", "TEXT NOT NULL DEFAULT 'unknown'"),
+                    ("metadata_edited", "INTEGER NOT NULL DEFAULT 0"),
+                    ("metadata_reviewed_at", "TEXT"),
+                ):
+                    if name not in columns:
+                        con.execute(f"ALTER TABLE tracks ADD COLUMN {name} {definition}")
+                # Missing identity alone is not proof that source metadata was chosen.
+                con.execute("UPDATE tracks SET metadata_source='musicbrainz' WHERE mbid IS NOT NULL AND mbid<>'' AND metadata_source='unknown'")
+                con.execute("UPDATE tracks SET metadata_source='pending' WHERE temporary_candidate_sha256 IS NOT NULL AND metadata_source='unknown'")
+                con.execute("""UPDATE tracks SET metadata_source='source' WHERE metadata_source='unknown'
+                    AND EXISTS(SELECT 1 FROM operation_receipts r WHERE r.target_track_id=tracks.id
+                        AND r.action='RESTORE_SOURCE' AND r.finalized_at IS NOT NULL
+                        AND NOT EXISTS(SELECT 1 FROM operation_receipts newer
+                            WHERE newer.target_track_id=tracks.id AND newer.rowid>r.rowid
+                            AND newer.action NOT IN ('COMMENT','REPAIR','SOURCE_LINKS','ARTWORK')))""")
+                con.execute("PRAGMA user_version=6")
                 con.commit()
 
             con.executescript(SCHEMA + METADATA_SCHEMA)
@@ -1090,7 +1116,7 @@ class Store:
                 else:
                     origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
                 payload["origin_id"] = origin["id"]
-            elif mode == "repair":
+            elif mode in {"repair", "source_links"}:
                 if track["health"] != "AVAILABLE" or not track["file_path"]:
                     raise ValueError("Tag/loudness repair requires an available audio file")
                 if track["operation_state"] != "IDLE":
@@ -1141,9 +1167,11 @@ class Store:
     def queue_bulk(self, user: str, mode: str):
         """Global to one library user, never limited to the visible page."""
         self.require_user(user)
-        if mode not in {"retry", "repair", "best", "original"}:
+        if mode not in {"retry", "repair", "source_links", "best", "original"}:
             raise ValueError("Unsupported batch action")
-        if mode == "repair":
+        if mode == "source_links":
+            tracks = self.rows("SELECT id FROM tracks WHERE user_id=? AND health='AVAILABLE' AND operation_state='IDLE'", (user,))
+        elif mode == "repair":
             tracks = self.repair_candidates(user)
         else:
             state = "FAILED" if mode == "retry" else "NEEDS_APPROVAL"
@@ -1166,7 +1194,7 @@ class Store:
         return {"message": f"Queued {queued} tracks", "queued": queued, "skipped": skipped,
                 "scope": "library_user", "user_id": user}
 
-    def commit_repair(self, track_id, asset_id, fingerprint, beets_id, operation_id):
+    def commit_repair(self, track_id, asset_id, fingerprint, beets_id, operation_id, action="repair"):
         """Commit updated file provenance and a replay-safe completion receipt."""
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -1183,13 +1211,14 @@ class Store:
                    choices='[]',selected=NULL,temp_path=NULL,updated_at=? WHERE id=?""",
                 (beets_id, utcnow(), track_id),
             )
-            placeholders = ",".join("?" for _ in REPAIRABLE_ISSUES)
+            resolved_kinds = REPAIRABLE_ISSUES if action == "repair" else ("DISCOVERY_COMMENT_MISMATCH", "SOURCE_COMMENT_MISMATCH")
+            placeholders = ",".join("?" for _ in resolved_kinds)
             con.execute(
                 f"UPDATE integrity_issues SET resolved_at=? WHERE track_id=? AND resolved_at IS NULL AND kind IN ({placeholders})",
-                (utcnow(), track_id, *REPAIRABLE_ISSUES),
+                (utcnow(), track_id, *resolved_kinds),
             )
             self._record_receipt_locked(con, operation_id, track["user_id"], track_id, track_id,
-                                        "repair", {"kind": "REPAIRED", "target_id": track_id}, finalized=True)
+                                        action, {"kind": "REPAIRED", "target_id": track_id}, finalized=True)
 
     def set_operation(self, track_id: str, state: str, kind: str | None = None,
                       error: str | None = None):
@@ -1238,7 +1267,7 @@ class Store:
                 ).lastrowid
             con.execute(
                 """UPDATE tracks SET file_path=?,beets_id=?,current_asset_id=?,current_origin_id=?,
-                   temporary_candidate_sha256=?,health='AVAILABLE',updated_at=? WHERE id=?""",
+                   temporary_candidate_sha256=?,health='AVAILABLE',metadata_source='pending',updated_at=? WHERE id=?""",
                 (asset["path"], result.get("beets_id"), asset_id, origin_id, candidate_digest, now, track_id),
             )
 
@@ -1413,6 +1442,9 @@ class Store:
                  result.get("beets_id"), result.get("matched_title"), result.get("mbid"), result.get("release_id"),
                  origin_id, asset_id, now, target_id),
             )
+            metadata_source = plan.get("metadata_source") or ("musicbrainz" if result.get("mbid") else "source" if reason == "restore_source" else plan["working_track"].get("metadata_source", "unknown"))
+            con.execute("UPDATE tracks SET metadata_source=?,metadata_edited=?,metadata_reviewed_at=? WHERE id=?",
+                        (metadata_source, int(plan.get("metadata_edited", False)), now, target_id))
             if reason not in {"retag", "restore_source"}:
                 con.execute("UPDATE track_origins SET availability='AVAILABLE',last_download_at=?,last_error=NULL WHERE id=?", (now, origin_id))
             self._insert_history_locked(con, plan, result, reason)
@@ -1739,7 +1771,7 @@ class Store:
             # Update the encoded file's discovery tag through the ordinary job
             # worker, which refreshes its stored fingerprint afterwards.
             comment_queued = False
-            if changed and track["health"] == "AVAILABLE" and track["current_asset_id"]:
+            if track["health"] == "AVAILABLE" and track["current_asset_id"]:
                 comment_queued = self.enqueue(
                     "track", track_id, user, {"mode": "comment"}, con=con,
                 )

@@ -25,6 +25,9 @@ def track_where(user: str, status: str = "ALL", query: str = ""):
         "STOPPED": "t.operation_state='STOPPED'",
         "ATTENTION": "(t.health='MISSING' OR t.operation_state IN ('FAILED','STOPPED'))",
         "UNMATCHED": "(t.mbid IS NULL OR t.mbid='')",
+        "SOURCE_METADATA": "t.metadata_source='source'",
+        "MANUAL_METADATA": "t.metadata_edited=1",
+        "UNKNOWN_METADATA": "t.metadata_source='unknown'",
         "NEEDS_AUDIO": (
             "t.current_asset_id IS NULL AND EXISTS(SELECT 1 FROM track_origins o "
             "WHERE o.track_id=t.id AND o.provider='spotify') AND NOT EXISTS("

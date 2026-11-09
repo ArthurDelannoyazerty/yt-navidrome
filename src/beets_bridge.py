@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from audio_tags import loudness_values, write_loudness_tags
 from source_metadata import clear_descriptive_tags, clear_release_tags, identification_hints
 from metadata_hints import evidence_for_candidate, search_hints
-from common import LIBRARY, ROOT, STATE, atomic_copy, atomic_json, discovery_comment, user_name
+from common import LIBRARY, ROOT, STATE, atomic_copy, atomic_json, music_comment, canonical_source_urls, user_name
 from http_policy import ApiDeferred, HttpPolicy
 from store import Store
 
@@ -84,16 +84,22 @@ class Bridge:
         ).get()
 
     @staticmethod
-    def write_discovery_tags(path: str | Path, value: str | None):
+    def write_discovery_tags(path: str | Path, value: str | None, source_urls=()):
         """Write both common Opus spellings; MediaFile alone uses DESCRIPTION."""
         from mutagen.oggopus import OggOpus
 
-        comment = discovery_comment(value)
+        comment = music_comment(value, source_urls)
         audio = OggOpus(str(path))
         audio["COMMENT"] = [comment]
         audio["DESCRIPTION"] = [comment]
         audio.save()
         return comment
+
+    def source_urls(self, track):
+        if "source_urls" in track:
+            return canonical_source_urls(track["source_urls"])
+        origins = self.store.origins_for_track(track["id"], track["user_id"]) if hasattr(self, "store") else []
+        return canonical_source_urls([origin["url"] for origin in origins] + [track.get("source_url", "")])
 
     def delete(self, track, *, delete_file=True):
         item = self.find_existing(track)
@@ -139,7 +145,7 @@ class Bridge:
             audio.pop(key, None)
         audio.save()
         loudness = self.measure_loudness(Item.from_path(str(staged)))
-        self.write_discovery_tags(staged, track.get("discovered_at"))
+        self.write_discovery_tags(staged, track.get("discovered_at"), self.source_urls(track))
         write_loudness_tags(staged, loudness)
         destination = (self.directory / "Waiting for approval" / f"{track['id']}.opus").resolve()
         if not destination.is_relative_to(self.directory):
@@ -365,7 +371,7 @@ class Bridge:
         item = Item.from_path(str(path))
         values = self.measure_loudness(item)
         item.write()
-        self.write_discovery_tags(path, track.get("discovered_at"))
+        self.write_discovery_tags(path, track.get("discovered_at"), self.source_urls(track))
         write_loudness_tags(path, values)
         return {"file_path": str(path), "loudness": values}
 
@@ -403,8 +409,8 @@ class Bridge:
                 raise ValueError("Beets path differs from the current asset; audit before changing tags")
             # A discovery-only update must not rewrite unrelated tags from the
             # beets row (including empty legacy identity/album/lyrics fields).
-            existing.comments = discovery_comment(track.get("discovered_at"))
-            self.write_discovery_tags(os.fsdecode(existing.path), track.get("discovered_at"))
+            existing.comments = music_comment(track.get("discovered_at"), self.source_urls(track))
+            self.write_discovery_tags(os.fsdecode(existing.path), track.get("discovered_at"), self.source_urls(track))
             existing.store()
             return self.result(existing)
 
@@ -477,7 +483,7 @@ class Bridge:
             item.albumartists = [overrides["artist"]]
 
         if track.get("discovered_at"):
-            item.comments = discovery_comment(track["discovered_at"])
+            item.comments = music_comment(track["discovered_at"], self.source_urls(track))
         item.pipeline_id = track["id"]
         item.source_url = track.get("source_url", "")
         item.discovered_at = track.get("discovered_at") or ""
@@ -550,7 +556,7 @@ class Bridge:
             # Do not let beets republish an incompatible edition's raw tags.
             clear_release_tags(final_path, overrides.get("album"))
         # Plugins may write the file again, so force the raw compatibility tags last.
-        self.write_discovery_tags(final_path, track.get("discovered_at"))
+        self.write_discovery_tags(final_path, track.get("discovered_at"), self.source_urls(track))
         write_loudness_tags(final_path, loudness)
         if source_reset or release_warning:
             # Synchronize beets with the actual Opus fields after selective tag
@@ -591,6 +597,9 @@ def main(request):
     path = request.get("path", "")
     if mode in {"delete", "forget"}:
         return bridge.delete(track, delete_file=mode == "delete")
+    if mode == "source_links":
+        bridge.write_discovery_tags(path, track.get("discovered_at"), bridge.source_urls(track))
+        return {}
     if mode == "repair":
         return bridge.repair_file(track, path)
     if mode == "refresh":

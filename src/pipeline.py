@@ -16,7 +16,7 @@ from audio_tags import inspect_tags
 from source_metadata import capture_source, snapshot, source_choice, save_identification_report
 from common import (
     LIBRARY, ROOT, STATE, atomic_copy, atomic_json, atomic_text,
-    discovery_comment, next_nightly, safe_name, sha256_file, utcnow,
+    discovery_comment, canonical_source_urls, next_nightly, safe_name, sha256_file, utcnow,
 )
 from http_policy import ApiDeferred, HttpPolicy
 from providers import PROVIDERS
@@ -115,6 +115,10 @@ class Pipeline:
         return json.loads(result_path.read_text())
 
     async def bridge(self, job, track, directory, mode, **kwargs):
+        if "source_urls" not in track:
+            track = {**track, "source_urls": canonical_source_urls([
+                origin["url"] for origin in self.store.origins_for_track(track["id"], track["user_id"])
+            ] + [track.get("source_url", "")])}
         return await self.bridge_request(job, directory, mode,
                                          {"track": track, "user": track["user_id"], "mode": mode, **kwargs})
 
@@ -254,6 +258,14 @@ class Pipeline:
                 comment_dir.mkdir(parents=True, exist_ok=True)
                 await self.bridge(job, current, comment_dir, "comment", path=current["file_path"])
                 await self.refresh_asset_fingerprint(target_id)
+                shutil.rmtree(comment_dir, ignore_errors=True)
+        if source_id and source_id != target_id and not result.get("source_orphan"):
+            remaining = self.store.one("SELECT * FROM tracks WHERE id=?", (source_id,))
+            if remaining and remaining.get("file_path") and Path(remaining["file_path"]).is_file():
+                comment_dir = STATE / "staging" / f"comment-{source_id}"
+                comment_dir.mkdir(parents=True, exist_ok=True)
+                await self.bridge(job, remaining, comment_dir, "comment", path=remaining["file_path"])
+                await self.refresh_asset_fingerprint(source_id)
                 shutil.rmtree(comment_dir, ignore_errors=True)
         old_assets = list(result.get("old_assets") or [])
         if result.get("old_asset"):
@@ -612,6 +624,13 @@ class Pipeline:
         if plan is None:
             plan = self.store.identity_plan(source_track["id"], origin["id"], selected, action)
             plan["action"] = action
+            if selected and selected.get("kind") == "source":
+                plan["metadata_source"], plan["metadata_edited"] = "source", bool(overrides)
+            elif selected and not selected.get("asis"):
+                plan["metadata_source"], plan["metadata_edited"] = "musicbrainz", bool(set(overrides or {}) & {"artist", "title", "album"})
+            else:
+                plan["metadata_source"] = source_track.get("metadata_source", "unknown")
+                plan["metadata_edited"] = bool(source_track.get("metadata_edited") or overrides)
             atomic_json(plan_path, {"operation": operation_id, "plan": plan})
         # An earlier rejected attempt may have persisted identity-plan.json.
         # Re-read the DB on EVERY attempt: selective unblocking must take effect
@@ -629,6 +648,10 @@ class Pipeline:
             raise ValueError("The selected identity is in this user's ignored-music list")
         target_track = dict(plan["working_track"])
         target_track["source_url"] = origin["url"]
+        target_track["source_urls"] = canonical_source_urls(
+            ([o["url"] for o in self.store.origins_for_track(target_track["id"], target_track["user_id"])]
+             if plan["route"] != "split" else []) + [origin["url"]]
+        )
         target_asset = self.store.current_asset(target_track["id"])
         if plan["route"] == "existing" and await self.usable_asset(target_track, target_asset):
             self.store.commit_existing_identity(plan, action, operation_id)
@@ -662,7 +685,7 @@ class Pipeline:
                 await self.restore_current(backup)
             raise
 
-    async def repair_tags(self, job, track, directory, operation):
+    async def repair_tags(self, job, track, directory, operation, mode="repair"):
         """Repair a staged copy, then swap atomically; retry never re-downloads."""
         asset = self.store.current_asset(track["id"])
         if not asset:
@@ -681,7 +704,7 @@ class Pipeline:
                 raise ValueError("Audio hash changed externally; review or redownload it before tag repair")
             staged = directory / "repaired.opus"
             await asyncio.to_thread(shutil.copy2, path, staged)
-            await self.bridge(job, track, directory, "repair", path=str(staged))
+            await self.bridge(job, track, directory, mode, path=str(staged))
             manifest = {"asset_id": asset["id"], "path": str(path), "staged": str(staged),
                         "before": before, "after": await asyncio.to_thread(sha256_file, staged)}
             atomic_json(manifest_file, manifest)
@@ -700,9 +723,9 @@ class Pipeline:
             raise ValueError("Audio changed during beets synchronization")
         self.store.commit_repair(track["id"], asset["id"],
                                  {"sha256": digest, "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns},
-                                 refreshed.get("beets_id"), operation)
+                                 refreshed.get("beets_id"), operation, action=mode)
         shutil.rmtree(directory, ignore_errors=True)
-        self.report(job)("INFO", "Repaired discovery and loudness tags without redownloading or changing identity")
+        self.report(job)("INFO", "Updated source links without downloading or re-encoding" if mode == "source_links" else "Repaired discovery and loudness tags without redownloading or changing identity")
 
     async def process_track(self, job):
         self.store.job_checkpoint(job["id"])
@@ -766,8 +789,8 @@ class Pipeline:
             finally:
                 if retained:
                     retained.unlink(missing_ok=True)
-        if mode == "repair":
-            await self.repair_tags(job, track, directory, operation)
+        if mode in {"repair", "source_links"}:
+            await self.repair_tags(job, track, directory, operation, mode)
             return
         if mode == "comment":
             asset = self.store.current_asset(track["id"])
@@ -914,9 +937,10 @@ class Pipeline:
                 self.store.update("tracks", track["id"], health="MISSING")
                 continue
             stat = path.stat()
-            tags = await asyncio.to_thread(inspect_tags, path, track.get("discovered_at"))
+            tags = await asyncio.to_thread(inspect_tags, path, track.get("discovered_at"), [o["url"] for o in self.store.origins_for_track(track["id"], user)])
             messages = {
                 "DISCOVERY_COMMENT_MISMATCH": "COMMENT or DESCRIPTION differs from the expected discovery date.",
+                "SOURCE_COMMENT_MISMATCH": "COMMENT or DESCRIPTION needs the current source URLs.",
                 "LOUDNESS_MISSING": "Opus gain or playback peak is missing; Navidrome may skip normalization.",
                 "LOUDNESS_INVALID": "Loudness metadata contains invalid gain or peak values.",
                 "LOUDNESS_POLICY_UNKNOWN": "Loudness reference has not been verified by the current pipeline.",

@@ -338,6 +338,16 @@ function renderSource(source) {
       await loadSources(state.generation, false);
     }));
   }
+  if (source.is_playlist && source.provider !== "legacy") {
+    const monitor = button(source.monitored ? "Pause monitoring" : "Resume monitoring", async () => {
+      const user = state.user;
+      await api(`/api/sources/${encodeURIComponent(source.id)}/monitoring`, {user_id: user, monitored: !source.monitored});
+      if (user !== state.user) return;
+      notice(source.monitored ? "Monitoring paused. Music and playlist history kept." : "Monitoring resumed.");
+      await loadSources(state.generation, false);
+    }, "secondary");
+    controls.append(monitor);
+  }
   controls.append(button("Remove", async () => {
     if (!confirm("Remove this source and exported playlist? Music files are retained.")) return;
     await api(`/api/sources/${encodeURIComponent(source.id)}?user_id=${encodeURIComponent(state.user)}`, null, "DELETE");
@@ -648,7 +658,7 @@ async function showDetails(track) {
   tags.append(node("h3", "Actual file tags"));
   const values = details.file_tags || {};
   for (const [label, value] of [
-    ["Expected discovery", values.expected_discovery],
+    ["Expected comment", values.expected_comment || values.expected_discovery],
     ["COMMENT", values.comment], ["DESCRIPTION", values.description],
     ["R128 gain (Q7.8)", values.r128_track_gain],
     ["Navidrome track gain (dB)", values.navidrome_gain_db],
@@ -1337,6 +1347,7 @@ for (const [id, mode, message] of [
   ["approveAll", "best", () => `Approve the first suggestion for EVERY waiting track in "${state.user}", across all pages and filters? This bypasses individual review. Use Approve selected to limit the operation.`],
   ["approveOriginal", "original", () => `Keep current/source metadata for all waiting tracks for "${state.user}"?`],
   ["retryAll", "retry", () => `Retry ALL failed tracks for "${state.user}", across every page? Search and filters do not limit this action. Deferred, queued and approval tracks are not changed.`],
+  ["updateSourceLinks", "source_links", () => `Write source URLs into COMMENT and DESCRIPTION for idle playable tracks in "${state.user}"? Discovery dates, audio, artwork and metadata are preserved. No downloads or loudness analysis.`],
   ["repairAll", "repair", () => `Repair discovery and loudness tags on ${state.repairable} eligible existing files for "${state.user}"? This uses the latest audit across all pages. No downloads, identity changes or audio re-encoding. Files with unexplained hash changes are excluded.`],
 ]) {
   const element = $(id);

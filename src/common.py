@@ -10,6 +10,7 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 STATE = Path(os.getenv("INGESTOR_STATE_DIR", os.getenv("STATE_DIR", "/data/state")))
@@ -33,6 +34,44 @@ def discovery_comment(value: str | None) -> str:
         return "Discovery Date: unknown"
     dt = datetime.fromisoformat(timestamp(value).replace("Z", "+00:00"))
     return "Discovery Date: " + dt.strftime("%Y-%m-%d--%H-%M-%S") + " UTC"
+
+
+def canonical_source_urls(urls) -> list[str]:
+    """Stable public track URLs only; discard credentials and tracking queries."""
+    result = set()
+    for value in urls or []:
+        try:
+            parts = urlsplit(str(value))
+            if parts.scheme not in {"https", "http"} or parts.username or parts.password:
+                continue
+            if parts.port not in {None, 80, 443}:
+                continue
+            host, identity = (parts.hostname or "").lower(), None
+            if host in {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com", "youtu.be"}:
+                if host == "youtu.be":
+                    identity = parts.path.strip("/")
+                elif parts.path.startswith(("/shorts/", "/embed/", "/live/")):
+                    identity = parts.path.split("/")[2]
+                elif parts.path == "/watch":
+                    identity = parse_qs(parts.query).get("v", [""])[0]
+                if identity and re.fullmatch(r"[A-Za-z0-9_-]{11}", identity):
+                    result.add("https://www.youtube.com/watch?v=" + identity)
+            elif host == "open.spotify.com":
+                match = re.fullmatch(r"/(?:intl-[A-Za-z-]+/)?track/([A-Za-z0-9]{22})/?", parts.path)
+                if match:
+                    result.add("https://open.spotify.com/track/" + match[1])
+        except (ValueError, TypeError, IndexError):
+            continue
+    return sorted(result, key=lambda url: ("spotify.com" in url, url))
+
+
+def music_comment(value: str | None, source_urls=()) -> str:
+    """Preserve the discovery line and append the portable source provenance."""
+    comment = discovery_comment(value)
+    urls = canonical_source_urls(source_urls)
+    if urls:
+        comment += "\n\nSources:\n" + "\n".join(urls)
+    return comment
 
 
 def user_name(value: str) -> str:
