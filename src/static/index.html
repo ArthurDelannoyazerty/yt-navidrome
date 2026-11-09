@@ -60,6 +60,9 @@
           <option value="QUEUED">Queued</option>
           <option value="RUNNING">Processing</option>
           <option value="UNMATCHED">Unmatched identity</option>
+          <option value="SOURCE_METADATA">Source metadata applied</option>
+          <option value="MANUAL_METADATA">Manually edited metadata</option>
+          <option value="UNKNOWN_METADATA">Metadata origin unknown (older imports)</option>
           <option value="INTEGRITY">Integrity issues</option>
           <option value="DEFERRED">Deferred retry</option>
           <option value="FAILED">Last operation failed</option>
@@ -151,6 +154,7 @@
         <div class="panel-heading compact"><h3>Library integrity</h3><button id="verify" class="secondary">Verify now</button></div>
         <div id="integritySummary" class="maintenance-summary"></div>
         <div class="maintenance-controls">
+          <button id="updateSourceLinks" type="button" class="secondary">Update file source links</button>
           <button id="repairAll" type="button" disabled>Repair eligible tags (0)</button>
           <a id="exportFailures" class="button-link secondary" href="/api/failures/export" download>Export failed report</a>
         </div>

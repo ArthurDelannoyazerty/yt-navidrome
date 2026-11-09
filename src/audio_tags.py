@@ -11,11 +11,11 @@ from pathlib import Path
 
 from mutagen.oggopus import OggOpus
 
-from common import discovery_comment
+from common import discovery_comment, music_comment
 
 LOUDNESS_POLICY = "r128-minus23-truepeak-v1"
 REPAIRABLE_ISSUES = (
-    "DISCOVERY_COMMENT_MISMATCH", "LOUDNESS_MISSING", "LOUDNESS_INVALID",
+    "DISCOVERY_COMMENT_MISMATCH", "SOURCE_COMMENT_MISMATCH", "LOUDNESS_MISSING", "LOUDNESS_INVALID",
     "LOUDNESS_POLICY_UNKNOWN", "LOUDNESS_CONFLICT",
 )
 
@@ -53,11 +53,12 @@ def write_loudness_tags(path: str | Path, values: dict) -> None:
     audio.save()
 
 
-def inspect_tags(path: str | Path, discovered_at: str | None) -> dict:
+def inspect_tags(path: str | Path, discovered_at: str | None, source_urls=None) -> dict:
     """Read actual on-disk values, not just what the database expects to find."""
     expected = discovery_comment(discovered_at)
     result = {
-        "expected_discovery": expected, "comment": None, "description": None,
+        "expected_discovery": expected, "expected_comment": music_comment(discovered_at, source_urls),
+        "comment": None, "description": None,
         "r128_track_gain": None, "navidrome_gain_db": None,
         "replaygain_track_peak": None, "policy": None, "issues": [],
     }
@@ -76,8 +77,11 @@ def inspect_tags(path: str | Path, discovered_at: str | None) -> dict:
         has_lyrics=any(key.startswith("lyrics") and bool(value)
                        for key, value in audio.items()),
     )
-    if result["comment"] != expected or result["description"] != expected:
+    first_line = lambda value: (value or "").split("\n", 1)[0]
+    if any(first_line(result[key]) != expected for key in ("comment", "description")):
         result["issues"].append("DISCOVERY_COMMENT_MISMATCH")
+    if source_urls is not None and any(result[key] != result["expected_comment"] for key in ("comment", "description")):
+        result["issues"].append("SOURCE_COMMENT_MISMATCH")
     raw_gain, raw_peak = first("r128_track_gain"), first("replaygain_track_peak")
     if raw_gain is None or raw_peak is None:
         result["issues"].append("LOUDNESS_MISSING")
