@@ -1,0 +1,44 @@
+name: Refine verified Approval layout
+on:
+  push:
+    branches: [fix/approval-page-20261109]
+    paths: ['.github/workflows/refine-approval-layout.yml']
+permissions:
+  contents: write
+jobs:
+  refine:
+    if: github.repository == 'ArthurDelannoyazerty/yt-navidrome' && github.ref == 'refs/heads/fix/approval-page-20261109'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/approval-page-20261109
+      - name: Widen laptop search inputs and verify rendered metadata on mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/static/style.css')
+          s = p.read_text()
+          old = '.approval-search-form { grid-template-columns: 105px minmax(0, 1fr); }'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, '.approval-search-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }'))
+          p = Path('tests/browser_ui.test.cjs')
+          s = p.read_text()
+          old = '  await chrome.screenshot("approval-page-laptop");'
+          new = '  await chrome.until("document.querySelectorAll(\'#mbResults tbody tr\').length===1");\n  assert.equal(await chrome.evaluate("document.querySelector(\'#mbArtist\').getBoundingClientRect().width >= 160"),true);\n' + old
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          old = '  await chrome.screenshot("approval-page-mobile");'
+          new = old + '\n  await chrome.evaluate("document.querySelector(\'#approvalMetadata\').scrollIntoView({block:\'start\'})");\n  await chrome.screenshot("approval-page-mobile-metadata");'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new))
+          PY
+          node --check tests/browser_ui.test.cjs
+          git rm -- .github/workflows/refine-approval-layout.yml
+          git add -- src/static/style.css tests/browser_ui.test.cjs
+          test "$(git write-tree)" = 1411864f614e7332577a3884c28ee821fcdfe5df
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Keep artist search readable at laptop widths'
+          git push origin HEAD:refs/heads/fix/approval-page-20261109
