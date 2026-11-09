@@ -1,0 +1,30 @@
+name: Materialize verified Approval page
+on:
+  push:
+    branches: [fix/approval-page-20261109]
+    paths: ['tools/.approval-upload-*', 'tools/.apply-approval.py', '.github/workflows/materialize-approval.yml']
+permissions:
+  contents: write
+jobs:
+  materialize:
+    if: github.repository == 'ArthurDelannoyazerty/yt-navidrome' && github.ref == 'refs/heads/fix/approval-page-20261109'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/approval-page-20261109
+      - name: Apply and verify the exact locally tested tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/.apply-approval.py
+          python -m compileall -q src tests
+          node --check src/static/app.js
+          node --check src/static/metadata-ui.js
+          node --check tests/browser_ui.test.cjs
+          git rm -- tools/.approval-upload-* tools/.apply-approval.py .github/workflows/materialize-approval.yml
+          git add -- README.md docs/continuous-review.md docs/interface.md docs/metadata-review.md src/metadata_routes.py src/review_routes.py src/static/app.js src/static/index.html src/static/metadata-ui.js src/static/style.css tests/browser_ui.test.cjs tests/frontend_harness.cjs tests/frontend_runtime.test.cjs tests/metadata_frontend.test.cjs tests/test_frontend.py tests/test_review_queue.py
+          test "$(git write-tree)" = 50e9d7a4d3dfd941538d3ffad9ef091ab2bd7dfa
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Replace modal metadata review with a two-column Approval page'
+          git push origin HEAD:refs/heads/fix/approval-page-20261109
