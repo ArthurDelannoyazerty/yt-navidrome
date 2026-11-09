@@ -359,10 +359,14 @@ test("real browser: Approval is a two-column page with automatic search and one-
   assert.deepEqual(data.writes[0].body,{user_id:"admin",mode:"approve",index:0,approval_token:"a".repeat(64)});
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:1024,height:900,deviceScaleFactor:1,mobile:false});
   assert.equal(await chrome.evaluate("document.querySelector('#approvalInfo').getBoundingClientRect().right < document.querySelector('#approvalMetadata').getBoundingClientRect().left"),true);
+  await chrome.until("document.querySelectorAll('#mbResults tbody tr').length===1");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbArtist').getBoundingClientRect().width >= 160"),true);
   await chrome.screenshot("approval-page-laptop");
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:true});
   assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
   await chrome.screenshot("approval-page-mobile");
+  await chrome.evaluate("document.querySelector('#approvalMetadata').scrollIntoView({block:'start'})");
+  await chrome.screenshot("approval-page-mobile-metadata");
   await chrome.evaluate("document.querySelector('#sourceMetadataApply').click()");
   await chrome.until("!document.querySelector('#approvalEmpty').hidden");
   assert.deepEqual(data.writes[1].body,{user_id:"admin",mode:"restore_source",revision:"b".repeat(64)});
