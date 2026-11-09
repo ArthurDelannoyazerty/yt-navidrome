@@ -1,0 +1,31 @@
+name: Materialize per-track artwork integration
+on:
+  push:
+    branches: [feat/per-track-artwork-20261109]
+    paths: ['tools/.integrate-artwork.py', 'tools/.artwork-ui-checks.py', '.github/workflows/materialize-artwork.yml']
+permissions:
+  contents: write
+jobs:
+  materialize:
+    if: github.repository == 'ArthurDelannoyazerty/yt-navidrome' && github.ref == 'refs/heads/feat/per-track-artwork-20261109'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/per-track-artwork-20261109
+      - name: Apply assertion-checked integration and remove preparation files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object tools/.integrate-artwork.py)" = 09c6b54b8f9ffc548f43c21ae73c990019019a96
+          test "$(git hash-object tools/.artwork-ui-checks.py)" = 45bc9f32ebe8cdb11c62dfca5f73051a1e379aee
+          python tools/.integrate-artwork.py
+          python tools/.artwork-ui-checks.py
+          python -m compileall -q src tests
+          node --check src/static/artwork-ui.js
+          node --check tests/browser_ui.test.cjs
+          git rm tools/.integrate-artwork.py tools/.artwork-ui-checks.py .github/workflows/materialize-artwork.yml
+          git add src tests docs README.md .github/workflows/docker.yml
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Integrate per-track artwork gallery, thumbnail fallback and recovery tests'
+          git push origin HEAD:refs/heads/feat/per-track-artwork-20261109
