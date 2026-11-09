@@ -354,6 +354,8 @@ class Pipeline:
     def queue_receipt_followup(self, receipt: dict | None):
         if not receipt:
             return False
+        from artwork_jobs import queue_merge_followup
+        queue_merge_followup(self.store, receipt)
         result = receipt.get("result") or {}
         source_id = result.get("source_id")
         origin_id = result.get("reingest_origin_id")
@@ -648,6 +650,11 @@ class Pipeline:
             raise ValueError("The selected identity is in this user's ignored-music list")
         target_track = dict(plan["working_track"])
         target_track["source_url"] = origin["url"]
+        target_track["artwork_origin_id"] = origin["id"]
+        target_track["artwork_extra_origin_id"] = origin["id"]
+        if plan["route"] == "split":
+            target_track["artwork_track_id"] = source_track["id"]
+            target_track["artwork_split"] = True
         target_track["source_urls"] = canonical_source_urls(
             ([o["url"] for o in self.store.origins_for_track(target_track["id"], target_track["user_id"])]
              if plan["route"] != "split" else []) + [origin["url"]]
@@ -731,6 +738,10 @@ class Pipeline:
         self.store.job_checkpoint(job["id"])
         payload = json.loads(job["payload"])
         mode = payload.get("mode", "ingest")
+        if mode == "artwork":
+            from artwork_jobs import process
+            await process(self, job)
+            return
         operation = payload.get("operation", str(job["id"]))
         directory = STATE / "staging" / job["target"]
         if mode in {"spotify_link", "spotify_audio"}:

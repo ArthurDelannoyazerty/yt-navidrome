@@ -90,12 +90,14 @@ def artist_alias(store, origin: dict) -> dict | None:
 def capture_source(store, origin: dict, path: Path) -> dict:
     """Archive the first pre-beets download, never overwrite it on reprocessing."""
     tags = {}
+    pristine = False
     basis = "provider_title_only"
     try:
         raw = OggOpus(path)
         # This is a guard against accidentally archiving an already-processed file.
         processed = any(k.startswith(("musicbrainz", "ingestor_")) for k in raw)
         if not processed:
+            pristine = True
             for key in SOURCE_TAGS:
                 values = [str(v)[:1024] for v in raw.get(key, [])[:16] if str(v).strip()]
                 if values:
@@ -105,6 +107,12 @@ def capture_source(store, origin: dict, path: Path) -> dict:
     except Exception:
         # Identification will report an unreadable audio file. Do not invent tags.
         pass
+    if pristine:
+        try:
+            from artwork import Artwork
+            Artwork(store).capture({"id": origin["track_id"], "user_id": origin["user_id"], "mbid": None}, path, origin=origin)
+        except Exception:
+            pass  # Optional source artwork cannot prevent retaining source metadata.
     fallback = title_tags(origin["title"])
     for key, value in fallback.items():
         tags.setdefault(key, value)

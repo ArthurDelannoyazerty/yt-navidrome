@@ -23,13 +23,14 @@ from common import LIBRARY, ROOT, utcnow
 from pipeline import Pipeline, write_playlist
 from metadata_routes import install_metadata_routes
 from review_routes import install_review_routes
+from artwork_routes import install_artwork_routes
 from providers import parse_source
 from store import SCHEMA_VERSION, Store
 
 STATIC_ROOT = ROOT / "static"
 INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
 _asset_digest = hashlib.sha256()
-for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js"):
+for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js"):
     _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
@@ -142,6 +143,7 @@ def create_app(store=None, start_workers=True):
     app.state.pipeline = pipeline
     install_metadata_routes(app, store)
     install_review_routes(app, store)
+    install_artwork_routes(app, store)
     app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 
     @app.middleware("http")

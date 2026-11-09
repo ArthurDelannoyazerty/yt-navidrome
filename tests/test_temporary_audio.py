@@ -22,6 +22,8 @@ MBID = '11111111-1111-4111-8111-111111111111'
 
 @pytest.fixture
 def listening(db, track, environment, monkeypatch):
+    # Offline lifecycle test: no live thumbnail traffic.
+    monkeypatch.setenv("YT_API_KEY", "")
     fixture = environment[0] / 'source.opus'
     subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
                     'sine=frequency=440:duration=2', '-c:a', 'libopus', str(fixture)], check=True)
