@@ -22,10 +22,13 @@ jobs:
           test "$(git hash-object tools/.artwork-ui-checks.py)" = 45bc9f32ebe8cdb11c62dfca5f73051a1e379aee
           python tools/.integrate-artwork.py
           python tools/.artwork-ui-checks.py
+          # Leave the existing CI workflow unchanged. The browser tests execute
+          # the new script, and this preparation also checks its syntax.
+          git restore -- .github/workflows/docker.yml
           python -m compileall -q src tests
           node --check src/static/artwork-ui.js
           node --check tests/browser_ui.test.cjs
           git rm tools/.integrate-artwork.py tools/.artwork-ui-checks.py .github/workflows/materialize-artwork.yml
-          git add src tests docs README.md .github/workflows/docker.yml
+          git add src tests docs README.md
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Integrate per-track artwork gallery, thumbnail fallback and recovery tests'
           git push origin HEAD:refs/heads/feat/per-track-artwork-20261109
