@@ -555,6 +555,23 @@ class Bridge:
             # A release lookup can fail after the recording was identified.
             # Do not let beets republish an incompatible edition's raw tags.
             clear_release_tags(final_path, overrides.get("album"))
+        artwork_result = None
+        from artwork import Artwork
+        service = Artwork(self.store)
+        artwork_track = {**track, "id": track.get("artwork_track_id", track["id"]),
+                         "mbid": item.mb_trackid or None, "release_id": item.mb_albumid or None}
+        try:
+            if album and not source_reset:
+                origin = self.store.one("SELECT * FROM track_origins WHERE id=? AND user_id=?",
+                                        (track.get("artwork_origin_id"), track["user_id"]))
+                service.capture(artwork_track, final_path, source_type="coverart", origin=origin)
+            artwork_result = service.apply(artwork_track, final_path, source_reset=source_reset)
+            warnings.extend(artwork_result.get("warnings", []))
+        except Exception as exc:
+            preference = service.preference(artwork_track)
+            if preference and preference["mode"] == "manual":
+                raise ValueError("Pinned artwork could not be restored; existing audio was retained. Repair the artwork selection before retrying.") from exc
+            warnings.append(f"Track artwork: {exc}")
         # Plugins may write the file again, so force the raw compatibility tags last.
         self.write_discovery_tags(final_path, track.get("discovered_at"), self.source_urls(track))
         write_loudness_tags(final_path, loudness)
@@ -562,6 +579,7 @@ class Bridge:
             # Synchronize beets with the actual Opus fields after selective tag
             # cleanup so a later discovery-comment update cannot resurrect them.
             item.read()
+        item.pipeline_artwork = json.dumps(artwork_result) if artwork_result else ""
         item.pipeline_complete = "yes"
         item.store()
         warnings.extend(self.http.failures)
@@ -581,6 +599,7 @@ class Bridge:
             "matched_title": f"{item.artist} - {item.title}" if item.artist else item.title,
             "mbid": item.mb_trackid or None,
             "release_id": item.mb_albumid or None,
+            "artwork": json.loads(item.get("pipeline_artwork") or "null"),
         }
 
 
@@ -597,6 +616,10 @@ def main(request):
     path = request.get("path", "")
     if mode in {"delete", "forget"}:
         return bridge.delete(track, delete_file=mode == "delete")
+    if mode == "artwork":
+        from artwork import Artwork
+        return Artwork(bridge.store).apply(track, path, selection=request.get("selection"),
+            framing=request.get("framing", "original"), refresh=bool(request.get("refresh")))
     if mode == "source_links":
         bridge.write_discovery_tags(path, track.get("discovered_at"), bridge.source_urls(track))
         return {}

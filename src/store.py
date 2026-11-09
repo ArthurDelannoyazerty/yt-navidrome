@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from audio_tags import REPAIRABLE_ISSUES
+from artwork import SCHEMA as ARTWORK_SCHEMA, Artwork, transfer_origin
 from library_query import track_where
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, correction_revision, prepare_correction
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class JobCancelled(RuntimeError):
@@ -257,6 +258,7 @@ CREATE TABLE IF NOT EXISTS quota (
 """
 
 DROP_ORDER = [
+    "artwork_preferences", "artwork_candidates",
     "metadata_artist_aliases",
     "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
     "assets", "memberships", "track_origins", "tracks", "operation_receipts",
@@ -342,7 +344,7 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, 1, 2, 3, 4, 5, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, 6, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
@@ -420,8 +422,10 @@ class Store:
                 con.execute("PRAGMA user_version=6")
                 con.commit()
 
-            con.executescript(SCHEMA + METADATA_SCHEMA)
-            con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            if version == 6:
+                self.backup_database("schema-v6")
+            con.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + METADATA_SCHEMA + ARTWORK_SCHEMA
+                              + f"\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;")
             con.executemany(
                 "INSERT OR IGNORE INTO users VALUES (?)",
                 [("admin",), ("guest",)],
@@ -831,7 +835,7 @@ class Store:
         result = []
         for row in rows:
             row["result"] = json.loads(row["result"] or "{}")
-            if row["result"].get("reingest_origin_id"):
+            if row["result"].get("reingest_origin_id") or row["result"].get("artwork_pending"):
                 result.append(row)
         return result
 
@@ -1145,7 +1149,7 @@ class Store:
                 raise ValueError("This track already has an active job")
             con.execute(
                 """UPDATE tracks SET operation_state='QUEUED',operation_kind=?,operation_error=NULL,
-                   pending_operation=CASE WHEN ?='approve' THEN pending_operation ELSE NULL END,
+                   pending_operation=CASE WHEN ? IN ('approve','artwork') THEN pending_operation ELSE NULL END,
                    updated_at=? WHERE id=?""",
                 (mode.upper(), payload.get("mode"), utcnow(), track_id),
             )
@@ -1386,6 +1390,7 @@ class Store:
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             con.execute("UPDATE track_origins SET track_id=?,last_error=NULL WHERE id=?", (target_id, origin_id))
+            transfer_origin(con, source_id, target_id, origin_id)
             detached = self._detach_origin_assets_locked(con, source_id, target_id, origin_id, utcnow())
             self._recompute_discovery_locked(con, source_id)
             self._recompute_discovery_locked(con, target_id)
@@ -1393,6 +1398,7 @@ class Store:
             self._insert_history_locked(con, plan, result, reason)
             orphan = not con.execute("SELECT 1 FROM track_origins WHERE track_id=?", (source_id,)).fetchone()
             receipt = {"kind": "DEDUPLICATED", "source_id": source_id, "target_id": target_id,
+                       "artwork_pending": True,
                        "source_orphan": bool(orphan), "old_assets": detached["old_assets"],
                        "reingest_origin_id": detached["reingest_origin_id"], "new_path": plan["working_track"].get("file_path")}
             self._record_receipt_locked(con, operation_id, plan["source_track"]["user_id"], source_id, target_id, reason, receipt)
@@ -1419,6 +1425,7 @@ class Store:
             detached = {"old_assets": [], "reingest_origin_id": None}
             if plan["route"] in {"split", "existing"}:
                 con.execute("UPDATE track_origins SET track_id=? WHERE id=?", (target_id, origin_id))
+                transfer_origin(con, source_id, target_id, origin_id)
                 detached = self._detach_origin_assets_locked(con, source_id, target_id, origin_id, now)
             self._recompute_discovery_locked(con, source_id)
             self._recompute_discovery_locked(con, target_id)
@@ -1442,6 +1449,8 @@ class Store:
                  result.get("beets_id"), result.get("matched_title"), result.get("mbid"), result.get("release_id"),
                  origin_id, asset_id, now, target_id),
             )
+            if result.get("artwork"):
+                Artwork.record(con, {"id": target_id, "user_id": plan["working_track"]["user_id"]}, result["artwork"])
             metadata_source = plan.get("metadata_source") or ("musicbrainz" if result.get("mbid") else "source" if reason == "restore_source" else plan["working_track"].get("metadata_source", "unknown"))
             con.execute("UPDATE tracks SET metadata_source=?,metadata_edited=?,metadata_reviewed_at=? WHERE id=?",
                         (metadata_source, int(plan.get("metadata_edited", False)), now, target_id))
@@ -1714,6 +1723,7 @@ class Store:
                      "MISSING" if origin["downloadable"] else "UNAVAILABLE", now, now),
                 )
                 con.execute("UPDATE track_origins SET track_id=? WHERE id=?", (new_id, origin_id))
+                transfer_origin(con, track_id, new_id, origin_id)
                 if track["mbid"]:
                     con.execute("INSERT OR IGNORE INTO origin_identity_rejections VALUES (?,?,?)",
                                 (origin_id, track["mbid"], now))

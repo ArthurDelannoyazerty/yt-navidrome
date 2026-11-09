@@ -9,6 +9,7 @@
   <script src="/static/app.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/spotify-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/metadata-ui.js?v=__STATIC_VERSION__" defer></script>
+<script src="/static/artwork-ui.js?v=__STATIC_VERSION__" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -154,6 +155,7 @@
         <div class="panel-heading compact"><h3>Library integrity</h3><button id="verify" class="secondary">Verify now</button></div>
         <div id="integritySummary" class="maintenance-summary"></div>
         <div class="maintenance-controls">
+          <button id="fillMissingCovers" type="button" class="secondary">Fill missing covers</button>
           <button id="updateSourceLinks" type="button" class="secondary">Update file source links</button>
           <button id="repairAll" type="button" disabled>Repair eligible tags (0)</button>
           <a id="exportFailures" class="button-link secondary" href="/api/failures/export" download>Export failed report</a>
@@ -419,6 +421,20 @@
     <span class="hint">Alt + ← Back · Alt + → Skip · Alt + Enter Save &amp; next</span>
     <div class="row"><button id="metadataQueueBack" type="button" class="secondary">Back</button><button id="metadataQueueSkip" type="button" class="secondary">Skip</button><button id="metadataSaveNext" type="button" disabled>Save &amp; next</button></div>
   </div>
+</dialog>
+
+<dialog id="artworkDialog" class="artwork-dialog" aria-labelledby="artworkHeading">
+  <div class="dialog-header"><h2 id="artworkHeading">Track artwork</h2><button id="artworkClose" type="button" class="secondary">Close</button></div>
+  <p id="artworkTitle" class="dialog-track"></p>
+  <div class="artwork-current"><img id="artworkCurrent" alt="Current embedded cover"><span id="artworkCurrentEmpty">No artwork embedded</span><p id="artworkMode" class="hint"></p></div>
+  <p class="hint">Each song can have its own cover, even within the same album. Images are never stretched. A manual selection stays pinned until you choose Auto-select.</p>
+  <div class="row artwork-tools"><button id="artworkRefresh" type="button" class="secondary">Find covers</button><button id="artworkAuto" type="button" class="secondary">Auto-select</button><label class="artwork-upload">Upload cover<input id="artworkUpload" type="file" accept="image/jpeg,image/png,image/webp"></label></div>
+  <p id="artworkStatus" role="status" aria-live="polite"></p>
+  <div id="artworkCandidates" class="artwork-grid" role="group" aria-label="Available cover images"></div>
+  <section id="artworkPreviewPanel" class="artwork-preview" hidden>
+    <div><h3>Selected image preview</h3><p id="artworkPreviewCaption" class="hint"></p><label>Framing<select id="artworkFraming"><option value="original">Original proportions</option><option value="trim">Trim detected uniform border</option><option value="fit">Fit inside a square (no cropping)</option><option value="crop">Center crop to square</option></select></label><p class="hint">Framing affects this track only. The uncropped image remains cached.</p><button id="artworkApply" type="button" disabled>Use this image</button></div>
+    <img id="artworkPreview" alt="Selected image preview">
+  </section>
 </dialog>
 
 </body>

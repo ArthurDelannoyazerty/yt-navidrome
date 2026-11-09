@@ -156,7 +156,13 @@ async function fixtureServer(t, data) {
         result = {message: "Change queued", queued: 1, skipped: 0, results: []};
         const parts = url.pathname.split("/");
         const current = data.tracks.find(track => track.id === parts[3]);
-        if (url.pathname === "/api/review/approve") {
+        if (url.pathname.endsWith("/artwork") && data.artwork) {
+          data.artwork.preference = payload.selection === "auto"
+            ? {mode: "auto", candidate_id: "cover-square", framing: "original"}
+            : payload.selection ? {mode: "manual", candidate_id: payload.selection, framing: payload.framing}
+            : data.artwork.preference;
+          data.artwork.revision = String(data.writes.length % 10).repeat(64);
+        } else if (url.pathname === "/api/review/approve") {
           result.results = (payload.items || []).map(item => ({track_id: item.track_id, status: "queued"}));
           result.queued = result.results.length;
           for (const item of result.results) data.tracks.find(track => track.id === item.track_id).operation_state = "QUEUED";
@@ -178,6 +184,12 @@ async function fixtureServer(t, data) {
       } else if (url.pathname === "/api/users") result = ["admin", "guest"];
       else if (url.pathname === "/api/tracks") result = {tracks: data.tracks, total: data.tracks.length,
         page: 1, limit: 50, stats: {total: data.tracks.length, available: 1, approval: 1, working: 0, deferred: 0, failed: 0, attention: 0}};
+      else if (url.pathname.endsWith("/artwork") && data.artwork) result = data.artwork;
+      else if (/\/artwork\/[^/]+\/image$/.test(url.pathname)) {
+        response.setHeader("Content-Type", "image/png");
+        response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+        return;
+      }
       else if (url.pathname === "/api/sources") result = [];
       else if (url.pathname === "/api/disabled-origins") result = data.disabled;
       else if (url.pathname === "/api/ignored") result = data.ignored;
@@ -351,5 +363,46 @@ test("real browser: continuous review saves, resumes and approves only the expli
   const batches = data.writes.filter(write => write.path === "/api/review/approve");
   assert.equal(batches.length, 1);
   assert.deepEqual(batches[0].body, {user_id: "admin", items: [{track_id: "track-2", index: 0, approval_token: "c".repeat(64)}]});
+  assert.deepEqual(chrome.errors, []);
+});
+
+
+test("real browser: per-track cover comparison, pin, auto-selection and mobile layout", {timeout: 60000}, async t => {
+  const chrome = await browser(t);
+  if (!chrome) return;
+  const data = fixtures();
+  const image = id => `/api/tracks/track-1/artwork/${id}/image?user_id=admin`;
+  data.artwork = {track_id: "track-1", title: "Artwork review fixture", revision: "d".repeat(64),
+    preference: null, can_edit: true, working: false, current_image_url: image("current"), items: [
+      {id: "cover-square", label: "Square source cover", source_type: "youtube", width: 600, height: 600,
+        recommended_framing: "original", explanation: "Square artwork; 600 x 600", image_url: image("cover-square")},
+      {id: "cover-wide", label: "Landscape source cover", source_type: "youtube", width: 1280, height: 720,
+        recommended_framing: "original", explanation: "Original proportions; 1280 x 720", image_url: image("cover-wide")},
+    ]};
+  const origin = await fixtureServer(t, data);
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 1000, deviceScaleFactor: 1, mobile: false});
+  await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1 && window.ArtworkUI");
+  await chrome.evaluate("document.querySelector('#tracks .action-menu summary').click(); [...document.querySelectorAll('#tracks button')].find(b=>b.textContent==='Artwork...').click()");
+  await chrome.until("document.querySelector('#artworkDialog').open && document.querySelectorAll('#artworkCandidates input').length===2");
+  assert.equal(await chrome.evaluate("document.querySelector('#artworkApply').disabled"), true);
+  await chrome.evaluate("document.querySelector('#artworkCandidates input[value=cover-wide]').click(); document.querySelector('#artworkFraming').value='fit'; document.querySelector('#artworkFraming').dispatchEvent(new Event('change'))");
+  assert.equal(await chrome.evaluate("document.querySelector('#artworkPreview').src.includes('framing=fit')"), true);
+  await chrome.screenshot("artwork-gallery-desktop");
+  await chrome.evaluate("document.querySelector('#artworkApply').click(); document.querySelector('#artworkApply').click()");
+  await chrome.until("document.querySelector('#artworkMode').textContent.includes('Pinned') && !document.querySelector('#artworkAuto').disabled");
+  const saves = data.writes.filter(write => write.path.endsWith('/artwork'));
+  assert.equal(saves.length, 1); assert.equal(saves[0].body.selection, "cover-wide"); assert.equal(saves[0].body.framing, "fit");
+  assert.equal(data.tracks[0].operation_state, "NEEDS_APPROVAL");
+  await chrome.evaluate("document.querySelector('#artworkAuto').click()");
+  await chrome.until("document.querySelector('#artworkMode').textContent.includes('Automatic') && !document.querySelector('#artworkRefresh').disabled");
+  assert.equal(data.writes.at(-1).body.selection, "auto");
+  await chrome.evaluate("window.ArtworkUI.open({id:'track-1',title:'Fixture'})");
+  await chrome.until("document.querySelector('#artworkDialog').open && document.querySelectorAll('#artworkCandidates input').length===2 && !document.querySelector('#artworkRefresh').disabled");
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
+  assert.equal(await chrome.evaluate("(() => {const d=document.querySelector('#artworkDialog'),r=d.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth && d.scrollWidth<=d.clientWidth+1;})()"), true);
+  await chrome.screenshot("artwork-gallery-mobile");
+  await chrome.evaluate("document.querySelector('#artworkClose').click()");
+  await chrome.until("!document.querySelector('#artworkDialog').open");
   assert.deepEqual(chrome.errors, []);
 });

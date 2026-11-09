@@ -417,3 +417,26 @@ See [Metadata correction and recognition diagnostics](docs/metadata-corrections.
 for provenance, identity changes, API limits and why a recording on MusicBrainz
 may not appear as an automatic fingerprint candidate.
 
+
+
+## Portable source links and individual track covers
+
+COMMENT and DESCRIPTION retain the discovery date and list the associated
+canonical YouTube video and Spotify track URLs. **Maintenance > Update file source
+links** backfills idle playable files without downloading or re-encoding audio.
+**Source metadata applied** is a monitoring-database filter, not a new Navidrome tag.
+Older imports without reliable provenance remain explicitly unknown.
+
+**More > Artwork...** provides automatic YouTube fallback, cached alternatives,
+framing previews, uploaded covers, and persistent manual pins. Each song can have
+its own image, including songs in the same album. **Maintenance > Fill missing
+covers** queues eligible files with no embedded picture and keeps existing images.
+No Bandcamp metadata provider or new artist naming system is introduced.
+
+To replace tier playlists A/B with All, monitor All in the same library and wait
+for a successful complete sync first. The same video IDs are reused; only new
+videos need ingestion. Then pause A/B monitoring to keep historical local playlist
+exports, or remove those sources to remove the exports while retaining the music,
+origins and discovery history. Online playlists are never edited. Rescan Navidrome
+after file-tag or artwork changes. See [Source links and playlists](docs/source-links-and-playlists.md)
+and [Track artwork](docs/track-artwork.md).

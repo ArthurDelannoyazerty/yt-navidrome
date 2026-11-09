@@ -236,6 +236,7 @@ async function loadUsers(preferred) {
 function changeUser() {
   window.SpotifyUI?.reset();
   window.MetadataUI?.reset();
+  window.ArtworkUI?.reset();
   requestGate.reset();
   state.user = $("user").value;
   state.sources = [];
@@ -817,7 +818,9 @@ function renderTrack(track) {
   });
   refreshSuggestions.disabled = busy || track.health !== "AVAILABLE";
   refreshSuggestions.title = "Identify the existing audio again using its source hints. No new download.";
-  menuItems.append(editMetadata, technicalDetails, refreshSuggestions, repairTags, remove);
+  const artwork = button("Artwork...", () => window.ArtworkUI.open(track));
+  artwork.disabled = busy || track.health !== "AVAILABLE" || !window.ArtworkUI;
+  menuItems.append(editMetadata, artwork, technicalDetails, refreshSuggestions, repairTags, remove);
   const reprocess = button("Reprocess", () => openOperation(track, "reprocess"));
   const redownload = button("Redownload", () => openOperation(track, "redownload"));
   for (const operation of [reprocess, redownload]) {
@@ -835,6 +838,7 @@ function renderTrack(track) {
 function trackSignature(track) {
   return stable({
     metadata_tools: Boolean(window.MetadataUI),
+    artwork_tools: Boolean(window.ArtworkUI),
     spotify_tools: Boolean(window.SpotifyUI),
     title: track.title,
     matched_title: track.matched_title,

@@ -211,3 +211,27 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .manual-fields { grid-template-columns: 1fr; }
   .review-toolbar > button, .review-toolbar .review-sort { flex: 1 1 45%; }
 }
+
+/* Individual track covers; original proportions are retained throughout. */
+.artwork-dialog { width: min(900px, 94vw); max-height: 92vh; overflow: auto; }
+.artwork-current { display: flex; gap: 1rem; align-items: center; margin-block: 1rem; }
+.artwork-current img { width: 96px; height: 96px; object-fit: contain; border-radius: 6px; }
+.artwork-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; }
+.artwork-card { border: 1px solid var(--border, #d6dfda); border-radius: 8px; padding: .75rem; overflow-wrap: anywhere; min-width: 0; }
+.artwork-card label { cursor: pointer; display: block; }
+.artwork-card img { display: block; width: 100%; height: 160px; object-fit: contain; margin-bottom: .5rem; }
+.artwork-card input { width: auto; margin-right: .5rem; }
+.artwork-card small, .artwork-card a { display: block; margin-top: .4rem; }
+.artwork-preview { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; padding: 1rem; border-top: 1px solid var(--border, #d6dfda); }
+.artwork-preview img { max-width: 100%; max-height: 320px; object-fit: contain; justify-self: center; }
+.artwork-upload, .artwork-upload input { max-width: 100%; }
+.artwork-upload input { display: block; font-size: .85rem; }
+.artwork-tools { flex-wrap: wrap; align-items: end; }
+.artwork-preview[hidden], .artwork-current img[hidden], .artwork-current span[hidden] { display: none; }
+@media (max-width: 600px) {
+  .artwork-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+  .artwork-card { padding: .5rem; }
+  .artwork-card img { height: 120px; }
+  .artwork-preview { grid-template-columns: 1fr; padding: .5rem 0; }
+  .artwork-current { align-items: flex-start; }
+}
