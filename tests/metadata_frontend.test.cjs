@@ -1,350 +1,214 @@
-/* Run the actual correction dialog callbacks, including debounce and stale replies. */
-const {test} = require('node:test');
-const assert = require('node:assert/strict');
-const vm = require('node:vm');
-const {browser} = require('./frontend_harness.cjs');
-const MBID = '11111111-1111-4111-8111-111111111111';
-const result = {id: MBID, title: 'Right song', artist: 'Right artist', length_ms: 190000, score: 98,
-  disambiguation: 'studio', releases: [{id: '22222222-2222-4222-8222-222222222222', title: 'Correct album', date: '2020'}]};
-function setup() {
-  const b = browser(false, true); const timers = new Map(); let id = 0;
-  b.context.setTimeout = (fn, delay) => { timers.set(++id, {fn, delay}); return id; };
-  b.context.clearTimeout = key => timers.delete(key);
-  b.timers = timers; b.app.state.user = 'admin';
-  vm.runInContext('refreshTracks = async () => {};', b.context);
+/* Read-only search, explicit one-click decisions and scoped page navigation. */
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const vm=require('node:vm');
+const fs=require('node:fs');
+const {browser}=require('./frontend_harness.cjs');
+const MBID='11111111-1111-4111-8111-111111111111';
+const RID='22222222-2222-4222-8222-222222222222';
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+function setup(){
+  const b=browser(false,true),timers=new Map(),storage=new Map();let id=0;
+  b.context.setTimeout=(fn,delay)=>{timers.set(++id,{fn,delay});return id;};
+  b.context.clearTimeout=key=>timers.delete(key);
+  b.context.localStorage={getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value)};
+  b.timers=timers;b.storage=storage;b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{};',b.context);
+  b.fire=async delay=>{const [key,timer]=[...timers].find(([,t])=>t.delay===delay)||[];assert.ok(timer,`timer ${delay}`);timers.delete(key);return timer.fn();};
   return b;
 }
-async function open(b, pane='search', extra={}) {
-  const pending = b.metadata.open({id: 'track', title: 'Wrong artist - Wrong song'}, pane);
-  b.requests.at(-1).resolve({track_id: 'track', user_id: 'admin', revision: 'r'.repeat(64),
-    current_title: 'Wrong artist - Wrong song', current_mbid: MBID, can_correct: true, origin_count: 1,
-    source: {source_title: 'Right artist - Right song', tags: {artist: ['Right artist'], title: ['Right song']},
-      basis: 'provider_title_only', captured_at: null}, latest_identification: null, ...extra});
-  await pending;
+function context(id='one',extra={}){
+  return {track_id:id,user_id:'admin',revision:'r'.repeat(64),current_title:'Applied title',current_mbid:MBID,
+    state:'NEEDS_APPROVAL',health:'AVAILABLE',can_correct:true,origin_id:'origin-'+id,origin_count:1,
+    source_title:'Video '+id,source_channel:'Channel '+id,source_url:'https://www.youtube.com/watch?v=abcdefghijk',
+    source:{source_title:'Original artist - Original title',tags:{artist:['Original artist'],title:['Original title']},basis:'provider_title_only'},
+    current_tags:{artist:['Current artist'],title:['Current title'],album:['Album']},current_duration_seconds:198,
+    search_hints:{artist:'Original artist',title:'Original title'},approval_token:'a'.repeat(64),rejected_candidates:[],
+    choices:[{index:3,kind:'candidate',mbid:MBID,artist:'Detected artist',title:'Detected title',match_score:88,
+      evidence:{candidate_duration_seconds:199,duration_delta_seconds:1,fingerprint_support:true}},
+      {index:5,kind:'source',title:'Original title'}, {index:7,kind:'asis',title:'Current title',asis:true}],...extra};
 }
-async function searchResults(b, data = [result], total=1) {
-  const pending = b.metadata.search();
-  b.requests.at(-1).resolve({items: data, total, page: 1, limit: 20}); await pending;
+const summaries=(count=2)=>Array.from({length:count},(_,i)=>({id:i===0?'one':i===1?'two':String(i+1),title:'Canonical '+i,source_title:'Video '+i,channel:'Channel '+i}));
+async function open(b,{tracks=summaries(),data=context(),pane=''}={}){
+  const pending=b.metadata.open({id:data.track_id,title:'Song',operation_state:data.state},pane);
+  assert.match(b.requests.at(-1).url,/\/api\/review\/queue/);
+  b.requests.at(-1).resolve({ids:tracks.map(t=>t.id),tracks,total:tracks.length,excluded:0});await tick();
+  b.requests.at(-1).resolve(data);await pending;
 }
-
-test('opening defaults to retained source rather than bad applied metadata', async () => {
-  const b = setup(); await open(b);
-  assert.equal(b.get('mbTitle').value, 'Right song'); assert.equal(b.get('mbArtist').value, 'Right artist');
-  assert.match(b.get('sourceMetadataProvenance').textContent, /not archived/);
-  assert.equal(b.get('mbApply').disabled, true); assert.equal(b.requests.length, 1);
-});
-
-test('typing bursts coalesce to a single 500ms timer and clear previous selection', async () => {
-  const b = setup(); await open(b);
-  for (const q of ['A', 'Ar', 'Artist']) { b.get('mbArtist').value = q; b.get('mbArtist').listeners.input(); }
-  assert.equal(b.timers.size, 1); const timer = [...b.timers.values()][0]; assert.equal(timer.delay, 500);
-  assert.equal(b.requests.length, 1); const pending = timer.fn();
-  assert.match(b.requests.at(-1).url, /artist=Artist/);
-  b.requests.at(-1).resolve({items: [], total: 0, page: 1, limit: 20}); await pending;
-});
-
-test('searching and selecting never applies before an explicit confirmation', async () => {
-  const b = setup(); await open(b); await searchResults(b);
-  await b.get('mbResults').children[0].children[1].listeners.click();
-  assert.equal(b.get('mbApply').disabled, false); assert.equal(b.requests.length, 2);
-  b.context.confirm = () => false; await b.get('mbApply').listeners.click(); assert.equal(b.requests.length, 2);
-  b.context.confirm = () => true; b.get('mbRelease').value = result.releases[0].id;
-  const applying = b.get('mbApply').listeners.click();
-  const request = b.requests.at(-1); assert.match(request.url, /metadata-correction$/);
-  const payload = JSON.parse(request.options.body);
-  assert.equal(payload.mode, 'select_recording'); assert.equal(payload.mbid, MBID);
-  assert.equal(payload.release_id, result.releases[0].id); assert.equal(payload.revision, 'r'.repeat(64));
-  assert.equal(payload.user_id, 'admin'); assert.equal(payload.tags, undefined);
-  request.resolve({message: 'Queued'}); await applying;
-});
-
-test('source restore is explicit and sends no untrusted replacement tags', async () => {
-  const b = setup(); await open(b, 'source');
-  assert.equal(b.timers.size, 0);
-  const applying = b.get('sourceMetadataApply').listeners.click(); const request = b.requests.at(-1);
-  assert.deepEqual(JSON.parse(request.options.body), {user_id: 'admin', mode: 'restore_source', revision: 'r'.repeat(64)});
-  request.resolve({message: 'Queued'}); await applying;
-});
-
-test('editing during an in-flight search aborts it and discards delayed results', async () => {
-  const b = setup(); await open(b);
-  const first = b.metadata.search(); const old = b.requests.at(-1);
-  b.get('mbTitle').value = 'Different song'; b.get('mbTitle').listeners.input();
-  assert.equal(old.options.signal.aborted, true);
-  old.resolve({items: [result], total: 1, page: 1, limit: 20}); await first;
-  assert.equal(b.get('mbResults').children.length, 0); assert.equal(b.get('mbApply').disabled, true);
-});
-
-test('switching user cannot populate or apply another library context', async () => {
-  const b = setup(); await open(b); const pending = b.metadata.search(); const request = b.requests.at(-1);
-  b.app.state.user = 'guest'; b.metadata.reset();
-  request.resolve({items: [result], total: 1, page: 1, limit: 20}); await pending;
-  assert.equal(b.get('mbResults').children.length, 0);
-  await b.get('mbApply').listeners.click(); assert.equal(b.requests.length, 2);
-});
-
-test('artist result opens recordings by artist ID without the old title filter', async () => {
-  const b = setup(); await open(b); b.get('mbEntity').value = 'artist'; b.get('mbEntity').listeners.change();
-  await searchResults(b, [{id: MBID, name: 'Right artist', type: 'Group'}]);
-  await b.get('mbResults').children[0].children[1].listeners.click();
-  assert.equal(b.get('mbTitle').value, ''); assert.equal(b.get('mbEntity').value, 'recording');
-  const pending = b.metadata.search(); const request = b.requests.at(-1);
-  assert.match(request.url, new RegExp('artist_id=' + MBID));
-  request.resolve({items: [], total: 0, page: 1, limit: 20}); await pending;
-});
-
-test('search pagination invalidates the previously selected recording', async () => {
-  const b = setup(); await open(b); await searchResults(b, [result], 42);
-  await b.get('mbResults').children[0].children[1].listeners.click();
-  const next = b.get('mbNext').listeners.click(); const request = b.requests.at(-1);
-  assert.match(request.url, /page=2/); assert.equal(b.get('mbApply').disabled, true);
-  request.resolve({items: [], total: 42, page: 2, limit: 20}); await next;
-  assert.match(b.get('mbPage').textContent, /^2 \/ 3/);
-});
-
-test('Retry-After cooldown blocks immediate repeated searches', async () => {
-  const b = setup(); await open(b); const pending = b.metadata.search();
-  b.requests.at(-1).resolve({error: 'MusicBrainz cooldown', retry_after: 30}, 429); await pending;
-  await b.metadata.search(); assert.equal(b.requests.length, 2);
-  b.get('mbTitle').listeners.input();
-  assert.ok([...b.timers.values()][0].delay >= 29000);
-  b.metadata.reset(); assert.equal(b.timers.size, 0);
-});
-
-
-test('adding correction controls preserves per-action eligibility', () => {
-  const b = setup();
-  const make = (health, operation) => {
-    b.context.fixture = {id: 'x', title: 'Song', health, operation_state: operation,
-      discovered_at: null, discovery_basis: 'first_seen', origins: [], playlists: [], choices: []};
-    const row = vm.runInContext('renderTrack(fixture)', b.context);
-    const buttons = new Map();
-    function walk(node) {
-      if (!node || typeof node !== 'object') return;
-      if (node.tagName === 'button') buttons.set(node.textContent, node);
-      for (const child of node.children || []) walk(child);
-    }
-    walk(row); return buttons;
-  };
-  let buttons = make('UNAVAILABLE', 'NEEDS_APPROVAL');
-  assert.equal(buttons.has('Restore source metadata'), false);
-  assert.equal(buttons.get('Edit metadata').disabled, true);
-  assert.equal(buttons.get('Sources & details').disabled, false);
-  assert.equal(buttons.get('Repair tags / loudness').disabled, true);
-  buttons = make('AVAILABLE', 'RUNNING');
-  assert.equal(buttons.get('Review metadata').disabled, true);
-  assert.equal(buttons.get('Edit metadata').disabled, true);
-  assert.equal(buttons.get('Sources & details').disabled, false);
-  assert.equal(buttons.get('Remove…').disabled, true);
-  buttons = make('AVAILABLE', 'IDLE');
-  assert.equal(buttons.get('Repair tags / loudness').disabled, false);
-});
-
-test('row signature changes when correction script becomes available', () => {
-  const b = setup(); b.context.fixture = {id: 'x', title: 'Song'};
-  const ready = vm.runInContext('trackSignature(fixture)', b.context);
-  b.context.window.MetadataUI = undefined;
-  assert.notEqual(vm.runInContext('trackSignature(fixture)', b.context), ready);
-});
-
-
-function reviewContext(id='first', extra={}) {
-  return {track_id:id,user_id:'admin',revision:'r'.repeat(64),current_title:'Current '+id,
-    current_mbid:MBID,state:'NEEDS_APPROVAL',health:'AVAILABLE',can_correct:true,origin_count:1,
-    choices:[{index:3,kind:'recording',mbid:MBID,artist:'末廣健一郎',title:'誓いの旋律',match_score:85.7,
-      evidence:{local_duration_seconds:190,candidate_duration_seconds:192,duration_delta_seconds:2,artist_ids:[]}}],
-    approval_token:'token-'+id,current_tags:{artist:['Wrong artist'],title:['Wrong song'],album:['Current album']},
-    current_duration_seconds:190,candidate_duration_seconds:192,
-    source:{source_title:'Kenichiro Suehiro - 誓いの旋律',tags:{artist:['Kenichiro Suehiro'],title:['誓いの旋律']},basis:'provider_title_only'},
-    source_url:'https://youtu.be/abcdefghijk',latest_identification:null,...extra};
-}
-function storageFor(b) {
-  const storage=new Map();
-  b.context.localStorage={getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value)};
-  return storage;
-}
-async function requested(b,index) {
-  for(let i=0;i<40&&!b.requests[index];i++) await Promise.resolve();
-  assert.ok(b.requests[index], 'Expected request '+index);
-  return b.requests[index];
-}
-async function queue(b,ids=['first','second']) {
-  b.get('filter').value='NEEDS_APPROVAL';b.get('search').value='日本語';b.get('reviewSort').value='artist';
-  const pending=b.metadata.startQueue();
-  const request=b.requests.at(-1);
-  assert.match(request.url,/api\/review\/queue/);
-  assert.match(request.url,/status=NEEDS_APPROVAL/);
-  assert.match(request.url,/sort=artist/);
-  request.resolve({ids,total:ids.length,matching_total:ids.length,excluded:0});
-  const next=await requested(b,b.requests.indexOf(request)+1);
-  next.resolve(reviewContext(ids[0]));
-  await pending;
+function walk(node,fn){if(!node||typeof node!=='object')return;fn(node);for(const child of node.children||[])walk(child,fn);}
+function buttons(node,text){const out=[];walk(node,n=>{if(n.tagName==='button'&&(!text||n.textContent===text))out.push(n);});return out;}
+async function search(b,items=[{id:MBID,title:'Found',artist:'Artist',length_ms:198000,releases:[{id:RID,title:'Release'}]}],extra={}){
+  const pending=b.metadata.search();b.requests.at(-1).resolve({items,total:items.length,page:1,limit:20,...extra});await pending;
 }
 
-test('Save & next sends the displayed index/token once and advances the stable queue', async()=>{
-  const b=setup(), storage=storageFor(b); await queue(b);
-  assert.equal(b.get('metadataSaveNext').disabled,false);
-  assert.match(b.get('metadataAudio').src,/candidate=true/);
-  const pending=b.get('metadataSaveNext').listeners.click();
-  await b.get('metadataSaveNext').listeners.click();
-  assert.equal(b.requests.length,3);
-  assert.deepEqual(JSON.parse(b.requests[2].options.body),{user_id:'admin',mode:'approve',index:3,approval_token:'token-first'});
-  b.requests[2].resolve({message:'Queued'});
-  const second=await requested(b,3); assert.match(second.url,/tracks\/second\/metadata-context/);
-  second.resolve(reviewContext('second')); await pending;
-  assert.equal(b.get('metadataQueueProgress').textContent,'Track 2 of 2');
-  const saved=JSON.parse(storage.get('music-review-queue-v1:admin'));
-  assert.equal(saved.index,1); assert.deepEqual(saved.completed,['first']);
+test('opening uses a real tab and independent Waiting for approval filter',async()=>{
+  const b=setup();b.get('filter').value='ALL';await open(b);
+  assert.equal(b.app.state.tab,'approval');assert.equal(b.get('approvalFilter').value,'NEEDS_APPROVAL');
+  assert.equal(b.get('filter').value,'ALL');assert.equal(b.get('approvalWorkspace').hidden,false);
+  assert.equal(b.get('metadataCurrent').textContent,'Video one');assert.equal(b.get('metadataOrigin').textContent,'Channel one');
+  assert.equal(b.get('approvalPosition').textContent,'1 / 2');
+  assert.equal(b.get('mbTitle').value,'Original title');assert.equal(b.get('mbArtist').value,'Original artist');
+  assert.match(b.requests[0].url,/status=NEEDS_APPROVAL/);
+  assert.equal(b.timers.size,1);assert.equal([...b.timers.values()][0].delay,500);
 });
-
-test('Skip, close, resume and Back preserve one queue per library and apply nothing', async()=>{
-  const b=setup(),storage=storageFor(b);await queue(b);
-  const skip=b.get('metadataQueueSkip').listeners.click();
-  (await requested(b,2)).resolve(reviewContext('second'));await skip;
-  assert.deepEqual(JSON.parse(storage.get('music-review-queue-v1:admin')).skipped,['first']);
-  b.metadata.reset();
-  const resume=b.metadata.startQueue();
-  assert.match(b.requests[3].url,/tracks\/second\/metadata-context/);
-  b.requests[3].resolve(reviewContext('second'));await resume;
-  const back=b.get('metadataQueueBack').listeners.click();
-  b.requests[4].resolve(reviewContext('first'));await back;
-  assert.equal(b.get('metadataQueueProgress').textContent,'Track 1 of 2');
-  assert.equal(b.requests.some(request=>request.options.method==='POST'),false);
-  assert.equal(storage.size,1);
+test('MusicBrainz starts automatically after loading a track without a submenu or write',async()=>{
+  const b=setup();await open(b);const pending=b.fire(500);
+  assert.match(b.requests.at(-1).url,/musicbrainz\/search/);
+  b.requests.at(-1).resolve({items:[],total:0,page:1,limit:20});await pending;
+  assert.equal(b.requests.some(r=>r.options?.method==='POST'),false);
 });
-
-test('an old save response cannot advance a closed and reopened review session', async()=>{
-  const b=setup(),storage=storageFor(b);await queue(b);
-  const save=b.get('metadataSaveNext').listeners.click(), old=b.requests[2];
-  b.metadata.reset();
-  const openNew=b.metadata.open({id:'other',title:'Other'},'search');
-  b.requests[3].resolve(reviewContext('other'));await openNew;
-  old.resolve({message:'Queued'});await save;
-  assert.equal(b.requests.length,4);
-  assert.equal(b.get('metadataCurrent').textContent,'Current other');
-  assert.equal(b.get('metadataQueueBar').hidden,true);
-  assert.equal(JSON.parse(storage.get('music-review-queue-v1:admin')).index,0);
-});
-
-test('switching library during a save leaves the new library review untouched', async()=>{
-  const b=setup();storageFor(b);await queue(b);
-  const save=b.get('metadataSaveNext').listeners.click(),old=b.requests[2];
-  b.app.state.user='guest';b.metadata.reset();
-  const next=b.metadata.open({id:'guest-track',title:'Guest'},'search');
-  b.requests[3].resolve(reviewContext('guest-track',{user_id:'guest'}));await next;
-  old.resolve({message:'Queued'});await save;
-  assert.equal(b.requests.length,4);assert.equal(b.get('metadataCurrent').textContent,'Current guest-track');
-  assert.match(b.get('metadataAudio').src,/user_id=guest/);
-});
-
-test('rejecting a candidate replaces the revision/token and requires another choice', async()=>{
-  const b=setup();
-  const pending=b.metadata.open({id:'first'},'suggestions');b.requests[0].resolve(reviewContext());await pending;
-  const audio=b.get('metadataAudio');audio.currentTime=42;audio.paused=true;audio.duration=190;
-  const entry=b.get('metadataSuggestions').children[0];
-  const reject=entry.children.find(child=>child.textContent==='Wrong recording');
-  const rejected=reject.listeners.click();
-  assert.deepEqual(JSON.parse(b.requests[1].options.body),{user_id:'admin',revision:'r'.repeat(64),mbid:MBID,reject:true});
-  b.requests[1].resolve(reviewContext('first',{revision:'s'.repeat(64),approval_token:'fresh-token',
-    choices:[{index:0,kind:'source',title:'誓いの旋律',artist:'Kenichiro Suehiro'}]}));
-  await rejected;
-  assert.match(audio.src,/approval_token=fresh-token/);
-  audio.currentTime=0;audio.listeners.loadedmetadata();assert.equal(audio.currentTime,42);
-  assert.equal(b.get('metadataSuggestionApply').disabled,true);
-  const radio=b.get('metadataSuggestions').children[0].children[0].children[0];
-  radio.checked=true;radio.listeners.change();
-  const applying=b.get('metadataSuggestionApply').listeners.click();
-  assert.deepEqual(JSON.parse(b.requests[2].options.body),{user_id:'admin',mode:'approve',index:0,approval_token:'fresh-token'});
-  b.requests[2].resolve({message:'Queued'});await applying;
-});
-
-test('manual editing starts with actual tags and sends only changed fields with its revision', async()=>{
-  const b=setup();
-  const pending=b.metadata.open({id:'first'},'manual');
-  b.requests[0].resolve(reviewContext('first',{state:'IDLE',current_release_id:result.releases[0].id}));await pending;
-  assert.equal(b.get('metadataManualArtist').value,'Wrong artist');
-  assert.equal(b.get('metadataManualRelease').value,result.releases[0].id);
-  b.get('metadataManualTitle').value='Corrected title';b.get('metadataManualTitle').listeners.input();
-  const applying=b.get('metadataManualApply').listeners.click();
-  assert.deepEqual(JSON.parse(b.requests[1].options.body),{user_id:'admin',mode:'retag',revision:'r'.repeat(64),overrides:{title:'Corrected title'}});
-  b.requests[1].resolve({error:'This track changed; review it again'},409);await applying;
-  assert.match(b.get('metadataNotice').textContent,/track changed/);
-  assert.equal(b.get('metadataReload').hidden,false);
-});
-
-test('broadened search explains its query and keeps the same query on later pages', async()=>{
+test('Beets shows candidate rows, source and keep-current choices remain separate',async()=>{
   const b=setup();await open(b);
-  const pending=b.metadata.search();
-  b.requests[1].resolve({items:[result],total:42,page:1,limit:20,query_used:{title:'Right song',artist:'',artist_id:null},
-    query_strategy:'title_only',query_note:'Artist constraint removed. Verify the artist.'});await pending;
-  assert.match(b.get('mbStatus').textContent,/Artist constraint removed/);
-  const next=b.get('mbNext').listeners.click();
-  assert.match(b.requests[2].url,/artist=&page=2/);
-  b.requests[2].resolve({items:[],total:42,page:2,limit:20});await next;
+  assert.equal(b.get('metadataSuggestions').children.length,1);
+  assert.equal(b.get('metadataSuggestions').children[0].tagName,'tr');
+  assert.equal(buttons(b.get('metadataSuggestions'),'Use').length,1);
+  assert.equal(b.get('sourceMetadataApply').disabled,false);
+  assert.equal(b.get('metadataKeepCurrent').hidden,false);
 });
-
-test('artist aliases require explicit confirmation and replace the correction revision', async()=>{
-  const b=setup();await open(b,'search',{search_hints:{title:'誓いの旋律',artist:'Kenichiro Suehiro',notes:[]}});
-  b.get('mbEntity').value='artist';b.get('mbEntity').listeners.change();
-  await searchResults(b,[{id:MBID,name:'末廣健一郎',aliases:[{name:'Kenichiro Suehiro',locale:'en'}]}]);
-  const remember=b.get('mbResults').children[0].children.find(child=>child.textContent==='Remember artist: 末廣健一郎');
-  assert.ok(remember);
-  b.context.confirm=()=>false;await remember.listeners.click();assert.equal(b.requests.length,2);
-  b.context.confirm=()=>true;
-  const saving=remember.listeners.click();
-  assert.deepEqual(JSON.parse(b.requests[2].options.body),{user_id:'admin',revision:'r'.repeat(64),artist_id:MBID,forget:false});
-  b.requests[2].resolve(reviewContext('track',{revision:'s'.repeat(64),approved_artist_alias:{alias:'Kenichiro Suehiro',artist_id:MBID,artist_name:'末廣健一郎'},
-    search_hints:{title:'誓いの旋律',artist:'末廣健一郎',artist_id:MBID,notes:[]}}));await saving;
-  b.get('metadataSourceTab').listeners.click();
-  const restore=b.get('sourceMetadataApply').listeners.click();
-  assert.equal(JSON.parse(b.requests[3].options.body).revision,'s'.repeat(64));
-  b.requests[3].resolve({message:'Queued'});await restore;
+test('one-click use sends the displayed candidate index/token once then advances',async()=>{
+  const b=setup();await open(b);const use=buttons(b.get('metadataSuggestions'),'Use')[0];
+  const pending=use.listeners.click();await use.listeners.click();
+  const request=b.requests.at(-1);
+  assert.deepEqual(JSON.parse(request.options.body),{user_id:'admin',mode:'approve',index:3,approval_token:'a'.repeat(64)});
+  assert.equal(b.requests.filter(r=>r.options?.method==='POST').length,1);
+  request.resolve({message:'Queued'});await tick();
+  assert.match(b.requests.at(-1).url,/tracks\/two\/metadata-context/);
+  b.requests.at(-1).resolve(context('two'));await pending;
+  assert.equal(b.get('approvalPosition').textContent,'2 / 2');assert.equal(b.get('approvalNext').disabled,true);
 });
-
-test('storage quota errors do not prevent reviewing or saving the next track', async()=>{
-  const b=setup();
-  b.context.localStorage={getItem:()=>null,setItem:()=>{throw new Error('Quota exceeded');}};
-  await queue(b,['first']);
-  assert.equal(b.get('metadataSaveNext').disabled,false);
-  const pending=b.get('metadataSaveNext').listeners.click();
-  b.requests[2].resolve({message:'Queued'});await pending;
-  assert.equal(b.get('metadataQueueComplete').hidden,false);
-  assert.match(b.get('metadataQueueScope').textContent,/Resume unavailable/);
+test('original source is a single explicit revision-checked choice with no browser-supplied tags',async()=>{
+  const b=setup();await open(b,{tracks:summaries(1)});
+  const pending=b.get('sourceMetadataApply').listeners.click(),request=b.requests.at(-1);
+  assert.deepEqual(JSON.parse(request.options.body),{user_id:'admin',mode:'restore_source',revision:'r'.repeat(64)});
+  request.resolve({message:'Queued'});await pending;
+  assert.equal(b.get('approvalEmpty').hidden,false);assert.equal(b.get('approvalWorkspace').hidden,true);
+  assert.equal(b.get('approvalPrevious').disabled,false);
 });
-
-
-function treeText(element) {
-  return [element.textContent,...(element.children||[]).map(treeText)].filter(Boolean).join(' ');
-}
-test('review evidence uses backend fingerprint tri-state and diagnostic score gap', async()=>{
-  const b=setup();
-  const pending=b.metadata.open({id:'first'},'suggestions');
-  b.requests[0].resolve(reviewContext('first',{choices:[true,false,null].map((support,index)=>({
-    index,kind:'candidate',title:'Choice '+index,artist:'Artist',match_score:85-index,
-    evidence:{fingerprint_support:support,duration_delta_seconds:2.1,penalties:[{field:'artist',penalty:0.1}]}
-  })),latest_identification:{at:'now',source_title:'Song',recommendation:'medium',candidate_count:3,
-    diagnostics:{fingerprint_generated:true,acoustid_id_present:true,top_score_gap:3.4}}}));
-  await pending;
-  const suggestions=b.get('metadataSuggestions').children;
-  assert.match(treeText(suggestions[0]),/Fingerprint lookup supports this recording/);
-  assert.match(treeText(suggestions[1]),/Fingerprint lookup returned other recordings/);
-  assert.match(treeText(suggestions[2]),/Fingerprint support is unknown/);
-  assert.match(treeText(suggestions[0]),/Matching differences: artist/);
-  assert.match(treeText(b.get('metadataDiagnostic')),/top two match scores differed by 3.4 points out of 100/);
+test('Next and Previous never submit and use fresh context',async()=>{
+  const b=setup();await open(b);let pending=b.get('approvalNext').listeners.click();
+  b.requests.at(-1).resolve(context('two'));await pending;
+  assert.equal(b.get('approvalPosition').textContent,'2 / 2');
+  pending=b.get('approvalPrevious').listeners.click();b.requests.at(-1).resolve(context('one',{revision:'b'.repeat(64)}));await pending;
+  assert.equal(b.get('approvalPosition').textContent,'1 / 2');assert.equal(b.requests.some(r=>r.options?.method==='POST'),false);
 });
-
-test('missing actual tags remain unknown and alias confirmation names the original source text', async()=>{
-  const b=setup();
-  await open(b,'search',{current_tags:{},current_tags_error:'Current audio metadata could not be read.',
-    search_hints:{artist:'Already mapped canonical name',title:'Song',artist_id:MBID,notes:[]},
-    approved_artist_alias:{alias:'Kenichiro Suehiro',artist_name:'Already mapped canonical name',artist_id:MBID}});
-  assert.equal(b.get('metadataCurrentValues').children[3].textContent,'Not available');
-  b.get('mbEntity').value='artist';b.get('mbEntity').listeners.change();
-  const different='33333333-3333-4333-8333-333333333333';
-  await searchResults(b,[{id:different,name:'Correct artist'}]);
-  let confirmation='';
-  b.context.confirm=message=>{confirmation=message;return false;};
-  const remember=b.get('mbResults').children[0].children.find(child=>child.textContent==='Remember artist: Correct artist');
-  await remember.listeners.click();
-  assert.match(confirmation,/Remember "Kenichiro Suehiro" as "Correct artist"/);
+test('failed or stale approval stays on this track with reload available',async()=>{
+  const b=setup();await open(b);const pending=buttons(b.get('metadataSuggestions'),'Use')[0].listeners.click();
+  b.requests.at(-1).resolve({error:'Approval candidates changed; reload'},400);await pending;
+  assert.equal(b.get('approvalPosition').textContent,'1 / 2');assert.match(b.get('metadataNotice').textContent,/changed/);
+  assert.equal(b.get('metadataReload').hidden,false);assert.equal(b.get('sourceMetadataApply').disabled,false);
+});
+test('a save response from an abandoned page cannot advance a new page',async()=>{
+  const b=setup();await open(b);const save=buttons(b.get('metadataSuggestions'),'Use')[0].listeners.click(),old=b.requests.at(-1);
+  b.metadata.leave();b.app.state.tab='music';await open(b,{data:context('two')});
+  old.resolve({message:'Queued old'});await save;
+  assert.equal(b.get('metadataCurrent').textContent,'Video two');assert.notEqual(b.get('metadataNotice').textContent,'Queued old');
+});
+test('user changes invalidate old metadata, search and save responses',async()=>{
+  const b=setup();await open(b);const searching=b.metadata.search(),oldSearch=b.requests.at(-1);
+  b.metadata.reset();b.app.state.user='guest';b.app.state.tab='approval';const entered=b.metadata.enter(),queue=b.requests.at(-1);
+  assert.match(queue.url,/user_id=guest/);queue.resolve({tracks:[],ids:[],total:0});await entered;
+  oldSearch.resolve({items:[{id:MBID,title:'Private old result'}],total:1,page:1,limit:20});await searching;
+  assert.equal(b.get('mbResults').children.length,0);assert.equal(b.get('sourceMetadataApply').disabled,true);
+});
+test('typing debounces search and aborts late results',async()=>{
+  const b=setup();await open(b);const pending=b.metadata.search(),old=b.requests.at(-1);
+  for(const title of ['N','Ne','New title']){b.get('mbTitle').value=title;b.get('mbTitle').listeners.input();}
+  assert.equal(old.options.signal.aborted,true);assert.equal(b.timers.size,1);
+  old.resolve({items:[{id:MBID,title:'Obsolete'}],total:1,page:1,limit:20});await pending;
+  assert.equal(b.get('mbResults').children.length,0);
+});
+test('leaving the page cancels automatic search and prevents hidden provider requests',async()=>{
+  const b=setup();await open(b);b.metadata.leave();b.app.state.tab='music';
+  assert.equal(b.timers.size,0);const count=b.requests.length;await b.metadata.search();assert.equal(b.requests.length,count);
+});
+test('MusicBrainz use can select a compatible edition without trusting result tags',async()=>{
+  const b=setup();await open(b,{tracks:summaries(1)});await search(b);
+  let edition;walk(b.get('mbResults'),n=>{if(n.tagName==='select')edition=n;});edition.value=RID;
+  const pending=buttons(b.get('mbResults'),'Use')[0].listeners.click();
+  const request=b.requests.at(-1);assert.match(request.url,/metadata-correction$/);
+  assert.deepEqual(JSON.parse(request.options.body),{user_id:'admin',mode:'select_recording',mbid:MBID,release_id:RID,revision:'r'.repeat(64)});
+  request.resolve({message:'Queued'});await pending;
+});
+test('broadened search explains its effective query and pagination retains it',async()=>{
+  const b=setup();await open(b);
+  await search(b,[],{total:40,query_used:{title:'Short',artist:'',artist_id:null},query_note:'Title-only search',query_strategy:'title_only'});
+  assert.match(b.get('mbStatus').textContent,/Title-only/);
+  const pending=b.get('mbNext').listeners.click();const request=b.requests.at(-1);
+  assert.match(request.url,/page=2/);assert.match(request.url,/title=Short&artist=&/);
+  request.resolve({items:[],total:40,page:2,limit:20});await pending;
+});
+test('artist browsing uses its identity and clears the previous song restriction',async()=>{
+  const b=setup();await open(b);b.get('mbEntity').value='artist';
+  await search(b,[{id:MBID,name:'Chosen artist',aliases:[]}]);
+  await buttons(b.get('mbResults'),'Tracks')[0].listeners.click();
+  assert.equal(b.get('mbTitle').value,'');assert.equal(b.get('mbArtist').value,'Chosen artist');
+  const pending=b.metadata.search();assert.match(b.requests.at(-1).url,new RegExp('artist_id='+MBID));
+  b.requests.at(-1).resolve({items:[],total:0,page:1,limit:20});await pending;
+});
+test('429 observes the shared cooldown and does not spam requests',async()=>{
+  const b=setup();await open(b);const pending=b.metadata.search(),request=b.requests.at(-1);
+  request.resolve({error:'Cooldown',retry_after:30},429);await pending;
+  const before=b.requests.length;await b.metadata.search();assert.equal(b.requests.length,before);
+  assert.ok([...b.timers.values()][0].delay>=29000);
+  b.metadata.leave();assert.equal(b.timers.size,0);
+});
+test('manual editing starts with actual tags and sends only changed nonempty values',async()=>{
+  const b=setup();await open(b,{tracks:summaries(1),pane:'manual'});
+  assert.equal(b.get('metadataManualPane').open,true);assert.equal(b.get('metadataManualArtist').value,'Current artist');
+  b.get('metadataManualTitle').value='Correct title';b.get('metadataManualTitle').listeners.input();
+  b.get('metadataManualAlbum').value='';const pending=b.get('metadataManualApply').listeners.click();
+  const request=b.requests.at(-1);assert.deepEqual(JSON.parse(request.options.body),{user_id:'admin',mode:'retag',overrides:{title:'Correct title'},revision:'r'.repeat(64)});
+  request.resolve({message:'Queued'});await pending;
+});
+test('rejecting a recording keeps the page and updates displayed candidate tokens',async()=>{
+  const b=setup();await open(b);const pending=buttons(b.get('metadataSuggestions'),'Wrong recording')[0].listeners.click(),request=b.requests.at(-1);
+  assert.equal(JSON.parse(request.options.body).mbid,MBID);
+  request.resolve({...context(),revision:'z'.repeat(64),approval_token:'b'.repeat(64),choices:[{index:4,kind:'candidate',title:'Other',mbid:RID}],message:'Rejected'});
+  await pending;assert.equal(b.get('approvalPosition').textContent,'1 / 2');
+  const apply=buttons(b.get('metadataSuggestions'),'Use')[0].listeners.click(),next=b.requests.at(-1);
+  assert.equal(JSON.parse(next.options.body).approval_token,'b'.repeat(64));next.resolve({error:'test failure'},400);await apply;
+});
+test('remembering an alias still requires explicit confirmation and uses current revision',async()=>{
+  const b=setup();await open(b);b.get('mbEntity').value='artist';await search(b,[{id:MBID,name:'Native artist'}]);
+  b.context.confirm=()=>false;const before=b.requests.length;await buttons(b.get('mbResults'),'Remember artist')[0].listeners.click();assert.equal(b.requests.length,before);
+  b.context.confirm=()=>true;const pending=buttons(b.get('mbResults'),'Remember artist')[0].listeners.click(),request=b.requests.at(-1);
+  assert.equal(JSON.parse(request.options.body).revision,'r'.repeat(64));
+  request.resolve({...context(),search_hints:{title:'Original title',artist:'Native artist',artist_id:MBID},revision:'z'.repeat(64)});await pending;
+  assert.equal(b.get('mbArtist').value,'Native artist');
+});
+test('a 4000-track chooser stays collapsed and renders at most one page of title/channel summaries',async()=>{
+  const b=setup();await open(b,{tracks:summaries(4000)});
+  assert.equal(b.get('approvalPickerList').children.length,0);
+  b.get('approvalPicker').open=true;b.get('approvalPicker').listeners.toggle();
+  assert.equal(b.get('approvalPickerList').children.length,30);
+  assert.equal(b.get('approvalPickerPage').textContent,'1 / 134');
+  assert.equal(b.get('approvalPickerList').children[0].children[0].textContent,'Video 0');
+  assert.equal(b.get('approvalPickerList').children[0].children[1].textContent,'Channel 0');
+  b.get('approvalPickerSearch').value='Channel 3999';b.get('approvalPickerSearch').listeners.input();await b.fire(150);
+  assert.equal(b.get('approvalPickerList').children.length,1);
+  const pending=b.get('approvalPickerList').children[0].listeners.click();
+  b.requests.at(-1).resolve(context('4000'));await pending;
+  assert.equal(b.get('approvalPosition').textContent,'4000 / 4000');assert.equal(b.get('approvalPicker').open,false);
+});
+test('storage failure never prevents next/previous or approval',async()=>{
+  const b=setup();b.context.localStorage={getItem(){throw new Error('Unavailable');},setItem(){throw new Error('Quota');}};
+  await open(b);const pending=b.get('approvalNext').listeners.click();b.requests.at(-1).resolve(context('two'));await pending;
+  assert.equal(b.get('metadataCurrent').textContent,'Video two');assert.equal(b.get('sourceMetadataApply').disabled,false);
+});
+test('re-entering restores the last track by ID, not a stale numeric position',async()=>{
+  const b=setup();await open(b);const next=b.get('approvalNext').listeners.click();b.requests.at(-1).resolve(context('two'));await next;
+  b.metadata.leave();const entering=b.metadata.enter();b.requests.at(-1).resolve({tracks:summaries().reverse(),ids:['two','one'],total:2});await tick();
+  assert.match(b.requests.at(-1).url,/tracks\/two\/metadata-context/);b.requests.at(-1).resolve(context('two'));await entering;
+  assert.equal(b.get('approvalPosition').textContent,'1 / 2');
+});
+test('another filter is independent of Music and failed list loads can be retried',async()=>{
+  const b=setup();await open(b);b.get('filter').value='AVAILABLE';b.get('approvalFilter').value='SOURCE_METADATA';
+  b.get('approvalFilter').listeners.change();const request=b.requests.at(-1);
+  assert.match(request.url,/status=SOURCE_METADATA/);request.resolve({error:'Network failed'},503);await tick();
+  assert.equal(b.get('filter').value,'AVAILABLE');assert.equal(b.get('approvalRefresh').disabled,false);
+  assert.equal(b.get('approvalNext').disabled,true);assert.match(b.get('metadataNotice').textContent,/Network failed/);
+});
+test('no shortcut listeners or modal calls remain in the approval implementation',()=>{
+  const js=fs.readFileSync(require.resolve('../src/static/metadata-ui.js'),'utf8');
+  assert.equal(js.includes('showModal'),false);assert.equal(js.includes('keydown'),false);
 });

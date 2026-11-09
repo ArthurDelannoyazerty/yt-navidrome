@@ -258,3 +258,40 @@ def test_stopped_tracks_remain_reviewable_when_existing_audio_is_playable(db, tr
     assert result["ids"] == [current["id"]]
     assert result["matching_total"] == 2
     assert result["excluded"] == 1
+
+
+def test_queue_picker_shows_source_title_and_channel_not_applied_identity(db, track, environment):
+    waiting(db, track, environment)
+    origin = db.origins_for_track(track["id"])[0]
+    db.update("tracks", track["id"], matched_title="Wrong applied title")
+    db.update("track_origins", origin["id"], title="Original video", channel="Original channel")
+    with client_for(db) as client:
+        item = client.get("/api/review/queue", params={"user_id": "admin"}).json()["tracks"][0]
+        data = client.get(f"/api/tracks/{track['id']}/metadata-context", params={"user_id": "admin"}).json()
+    assert item["title"] == "Wrong applied title"
+    assert item["source_title"] == data["source_title"] == "Original video"
+    assert item["channel"] == data["source_channel"] == "Original channel"
+    assert "pending_operation" not in item
+    assert "current_origin_id" not in item
+    assert "file_path" not in item
+
+
+def test_queue_picker_uses_pending_origin_when_another_file_is_playing(db, track, environment):
+    import uuid
+    current, original, _ = active_track(db, track, environment)
+    waiting(db, current, environment)
+    other_id = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO track_origins(id,track_id,user_id,provider,media_key,url,title,channel,first_seen_at,last_seen_at) "
+        "VALUES (?,?,?,'youtube','12345678901','https://youtu.be/12345678901',?,?,?,?)",
+        (other_id, track["id"], "admin", "Replacement video", "Replacement channel", "2020", "2020"),
+    )
+    current = db.owned("tracks", track["id"], "admin")
+    pending = json.loads(current["pending_operation"])
+    pending["origin_id"] = other_id
+    db.update("tracks", current["id"], pending_operation=json.dumps(pending))
+    with client_for(db) as client:
+        item = client.get("/api/review/queue", params={"user_id": "admin"}).json()["tracks"][0]
+        data = client.get(f"/api/tracks/{track['id']}/metadata-context", params={"user_id": "admin"}).json()
+    assert item["source_title"] == data["source_title"] == "Replacement video"
+    assert item["channel"] == data["source_channel"] == "Replacement channel"

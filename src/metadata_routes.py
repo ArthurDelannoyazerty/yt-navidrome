@@ -108,6 +108,8 @@ def metadata_context(store, track_id, user):
             "state": track["operation_state"], "health": track["health"],
             "can_correct": bool(mutable and origin and ((track["health"] == "AVAILABLE" and track["file_path"]) or (track["operation_state"] == "NEEDS_APPROVAL" and pending.get("origin_id")))),
             "source": source, "source_url": origin["url"] if origin else None,
+            "source_title": origin["title"] if origin else track["title"],
+            "source_channel": origin.get("channel") if origin else None,
             "origin_id": origin["id"] if origin else None, "origin_count": len(origins),
             "search_hints": identification_hints(store, origin) if origin else None,
             "approved_artist_alias": artist_alias(store, origin) if origin else None,

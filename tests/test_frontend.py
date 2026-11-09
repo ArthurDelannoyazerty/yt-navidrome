@@ -82,7 +82,7 @@ def test_music_view_exposes_current_user_approve_all():
     assert '>Approve all</button>' in html
     assert '["approveAll", "best"' in javascript
     assert 'across all pages and filters?' in javascript
-    assert 'Use Approve selected to limit the operation.' in javascript
+    assert 'Use the Approval tab to review individual tracks.' in javascript
     assert 'approveAll.disabled = !stats.approval;' in javascript
     assert 'Approve all (${stats.approval})' in javascript
     assert 'await api("/api/batch", {user_id: user, mode})' in javascript
@@ -102,20 +102,25 @@ def test_help_and_bulk_maintenance_have_accessible_dom_targets():
     assert html.index('/static/ui-state.js?v=') < html.index('/static/app.js?v=')
 
 
-def test_review_dialog_has_complete_accessible_controls_and_matching_dom_ids():
+def test_approval_is_a_page_between_music_and_sources_with_no_old_toolbar():
     html = (ROOT / "src/static/index.html").read_text()
-    javascript = (ROOT / "src/static/metadata-ui.js").read_text()
+    js = (ROOT / "src/static/metadata-ui.js").read_text()
     html_ids = set(re.findall(r'\bid="([^"]+)"', html))
-    referenced = set(re.findall(r'\$\("([^"]+)"\)', javascript))
+    referenced = set(re.findall(r'\$\("([^"]+)"\)', js))
     assert referenced <= html_ids, sorted(referenced - html_ids)
-    for target in (
-        "startReview", "reviewSort", "approveSelected", "selectReviewPage",
-        "metadataQueueBack", "metadataQueueSkip", "metadataSaveNext",
-        "metadataOriginalValues", "metadataCurrentValues", "metadataProposedValues",
-        "metadataAudio", "metadataSourceLink", "metadataManualPane", "metadataNotice",
-        "replacementDialog", "replacementStatus", "disabledSources",
-    ):
+    assert html.index('data-tab="music"') < html.index('data-tab="approval"') < html.index('data-tab="sources"')
+    assert '<section id="approvalPanel"' in html
+    assert 'data-panel="approval"' in html
+    for removed in ("startReview", "reviewSort", "selectReviewPage", "approveSelected", "metadataDialog", "metadataSaveNext"):
+        assert f'id="{removed}"' not in html
+    assert "showModal" not in js and "keydown" not in js
+    for target in ("approvalInfo", "approvalMetadata", "approvalPrevious", "approvalNext", "approvalPicker",
+                   "metadataSuggestions", "sourceMetadataApply", "mbResults", "metadataManualPane"):
         assert target in html_ids
-    assert 'aria-label="Source, current and selected metadata"' in html
-    assert 'aria-label="Metadata review actions"' in html
-    assert 'Alt + Enter Save &amp; next' in html
+    assert html.index('id="metadataSuggestions"') < html.index('id="sourceMetadataApply"') < html.index('id="mbSearchForm"')
+    filters = []
+    for target in ("filter", "approvalFilter"):
+        content = re.search(fr'<select id="{target}">(.*?)</select>', html, re.S).group(1)
+        filters.append(re.findall(r'<option value="([^"]+)"[^>]*>([^<]+)</option>', content))
+    assert filters[0] == filters[1]
+    assert '<option value="NEEDS_APPROVAL" selected>' in html
