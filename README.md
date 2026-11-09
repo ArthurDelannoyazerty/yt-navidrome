@@ -141,11 +141,14 @@ not silently delete or repair music.
 
 ## Interface layout
 
-The single-page interface is split into five tabs:
+The single-page interface is split into six tabs:
 
-- **Music** — search, status filters, continuous metadata review, explicit selected
-  approvals, pagination and an **Ignored music** view. Less frequent actions stay
+- **Music** — search, status filters, metadata actions and pagination and an **Ignored music** view. Less frequent actions stay
   in **More**, including sources, repair, reprocessing, redownload and removal.
+- **Approval** - one track at a time, with current music on the left and Beets
+  suggestions, original-source metadata and automatic MusicBrainz search on the right.
+  Defaults to Waiting for approval; Previous/Next and a searchable collapsed picker
+  navigate the queue. See [Approval](docs/continuous-review.md).
 - **Sources** — URL ingestion and monitored playlists.
 - **Activity** — persistent events, following the latest message by default.
   Scrolling up pauses following; **Jump to latest** resumes it. **Clear view**
@@ -310,22 +313,18 @@ YouTube separately if you also want the remote playlist cleaned.
 
 ## Managing a large library
 
-Choose a Music filter and search, then **Review this view**. The dialog keeps a
-stable queue and puts original source values, actual current tags, the selected
-change and audio playback together. **Save & next**, **Back** and **Skip** avoid
-reopening each row. **Review skipped tracks** makes another pass over undecided
-items. The latest queue for each library user resumes in the same browser.
+Use the **Approval** tab to review one track at a time. It defaults to Waiting
+for approval and has its own copy of Music's filter menu and search. Music
+information stays on the left; Beets matches, the original-source choice and
+automatic MusicBrainz search stay on the right. Click **Use** to queue a match
+and advance. **Previous**, **Next** and the collapsed **Choose music** list
+navigate without applying anything. The chooser searches titles/channels and
+renders at most 30 entries at once. No custom keyboard shortcuts are required.
 
-Use Alt + Enter to save and advance, Alt + Right to skip and Alt + Left to go back.
-**A–Z (artist / title)** sorts the stored display title; it can help group related
-entries. Queue membership is a snapshot of the current filter/search/order, with
-fresh metadata and approval tokens loaded as each track opens.
-
-For explicit batch approval, select waiting rows after checking their displayed
-choices, then **Approve selected**. Selection can span pages in the same view.
-The server receives those exact track IDs, candidate indexes and approval tokens;
-changed candidates are skipped for another review. Library-wide approval remains
-under **Advanced library actions** with its scope explained.
+Each displayed choice is bound to its current revision/approval token. A changed
+candidate is rejected rather than silently substituted. The last track is
+remembered per library/filter/search. Library-wide approval remains under
+**Advanced library actions** with its scope explained.
 
 Counters describe the **whole selected library user**. Search and status filters
 affect the table. Health and operation states overlap: playable audio can coexist
@@ -342,7 +341,7 @@ results. Repair works only on eligible, audited idle files and never approves
 identities or downloads audio. Hash mismatches, unreadable files and paths outside
 the library are excluded. Individual repair remains in the track's More menu.
 
-See [Continuous review and selected approvals](docs/continuous-review.md) and
+See [Approval page](docs/continuous-review.md) and
 [Metadata matching evidence and artist aliases](docs/metadata-review.md).
 
 ## Playback loudness and discovery tags
@@ -390,9 +389,10 @@ Tokens remain in protected server-side files; no client secret is needed.
 
 ## Correcting misidentified music
 
-Open **Review metadata** and choose **Suggested matches**, **Search MusicBrainz**,
-**Original source** or **Edit manually**. Source restoration has one entry point
-inside this dialog; **More → Edit metadata** opens its manual pane.
+Open **Approval**, or use **Review metadata** on a music row. Beets matches and
+MusicBrainz search are visible together beside the current music. The separate
+**Use original source metadata** button applies retained source tags.
+**More → Edit metadata** opens the same page with its manual editor expanded.
 
 Search starts from conservative source hints. Native Japanese names remain intact;
 query normalization removes video decorations without discarding version clues.

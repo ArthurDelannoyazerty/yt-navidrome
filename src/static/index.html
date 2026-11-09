@@ -23,6 +23,7 @@
 
 <nav class="tabs" aria-label="Application sections">
   <button type="button" class="tab active" data-tab="music">Music</button>
+  <button type="button" class="tab" data-tab="approval">Approval</button>
   <button type="button" class="tab" data-tab="sources">Sources</button>
   <button type="button" class="tab" data-tab="activity">Activity</button>
   <button type="button" class="tab" data-tab="maintenance">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></button>
@@ -84,14 +85,6 @@
       </nav>
     </div>
 
-    <div class="review-toolbar" role="group" aria-label="Metadata review actions">
-      <button id="startReview" type="button">Review this view</button>
-      <label class="review-sort">Review order<select id="reviewSort"><option value="updated">Recently updated</option><option value="artist">A–Z (artist / title)</option></select></label>
-      <button id="selectReviewPage" type="button" class="secondary">Select waiting on this page</button>
-      <button id="approveSelected" type="button" class="secondary" disabled>Approve selected (0)</button>
-      <button id="clearReviewSelection" type="button" class="secondary" hidden>Clear selection</button>
-      <span id="reviewSelectionStatus" class="hint" role="status" aria-live="polite"></span>
-    </div>
     <p id="resultsSummary" class="sr-only" role="status" aria-live="polite">Loading matching tracks...</p>
     <div class="table-scroll">
       <table>
@@ -111,6 +104,103 @@
       <h4>Ignore rules</h4><div id="ignored"></div>
       <h4>Disabled download URLs</h4><p class="hint">Enable a URL to allow it again, then choose Retry from the track. Use another URL if this upload cannot be downloaded.</p><div id="disabledSources"></div>
     </section>
+  </section>
+
+  <section id="approvalPanel" class="panel" data-panel="approval" aria-labelledby="approvalHeading" hidden>
+    <h2 id="approvalHeading">Approval</h2>
+    <div class="approval-toolbar">
+      <label>Show<select id="approvalFilter">
+          <option value="ALL">All music</option>
+          <optgroup label="Common filters">
+          <option value="NEEDS_APPROVAL" selected>Waiting for approval</option>
+          <option value="AVAILABLE">Playable</option>
+          <option value="WORKING">Working</option>
+          <option value="ATTENTION">Needs attention</option>
+          </optgroup>
+          <optgroup label="More filters">
+          <option value="QUEUED">Queued</option>
+          <option value="RUNNING">Processing</option>
+          <option value="UNMATCHED">Unmatched identity</option>
+          <option value="SOURCE_METADATA">Source metadata applied</option>
+          <option value="MANUAL_METADATA">Manually edited metadata</option>
+          <option value="UNKNOWN_METADATA">Metadata origin unknown (older imports)</option>
+          <option value="INTEGRITY">Integrity issues</option>
+          <option value="DEFERRED">Deferred retry</option>
+          <option value="FAILED">Last operation failed</option>
+          <option value="STOPPED">Downloads stopped</option>
+          <option value="MISSING">Missing audio</option>
+          <option value="NEEDS_AUDIO">Spotify: needs audio link</option>
+          <option value="UNAVAILABLE">No audio yet</option>
+          </optgroup>
+        </select></label>
+      <label>Search music<input id="approvalSearch" type="search" maxlength="200" placeholder="Title or channel" autocomplete="off"></label>
+      <nav class="pagination" aria-label="Approval navigation">
+        <button id="approvalPrevious" type="button" class="secondary" disabled>Previous</button>
+        <span id="approvalPosition" aria-live="polite">0 / 0</span>
+        <button id="approvalNext" type="button" class="secondary" disabled>Next</button>
+        <button id="approvalRefresh" type="button" class="secondary">Refresh</button>
+      </nav>
+      <details id="approvalPicker" class="approval-picker">
+        <summary>Choose music</summary>
+        <div class="approval-picker-body">
+          <label class="sr-only" for="approvalPickerSearch">Find a title or channel in this list</label>
+          <input id="approvalPickerSearch" type="search" placeholder="Title or channel" autocomplete="off">
+          <div id="approvalPickerList" class="approval-picker-list"></div>
+          <nav class="pagination" aria-label="Choose music pages"><button id="approvalPickerPrevious" type="button" class="secondary" disabled>Previous</button><span id="approvalPickerPage"></span><button id="approvalPickerNext" type="button" class="secondary" disabled>Next</button></nav>
+        </div>
+      </details>
+    </div>
+    <div class="row approval-feedback"><p id="metadataNotice" role="status" aria-live="polite"></p><button id="metadataReload" type="button" class="secondary" hidden>Reload track</button></div>
+    <p id="approvalEmpty" class="empty" hidden>No music waiting for approval.</p>
+    <div id="approvalWorkspace" class="approval-workspace" hidden>
+      <aside id="approvalInfo" class="subpanel approval-info" aria-label="Current music">
+        <img id="approvalCover" class="approval-cover" alt="Current track artwork" hidden>
+        <h3 id="metadataCurrent"></h3>
+        <p id="metadataOrigin" class="source-title"></p>
+        <div id="approvalState"></div>
+        <audio id="metadataAudio" controls preload="none" aria-label="Listen to the audio under review"></audio>
+        <p id="metadataAudioNote" class="hint"></p>
+        <dl id="metadataCurrentValues" class="metadata-values"></dl>
+        <div class="row"><a id="metadataSourceLink" target="_blank" rel="noopener noreferrer" hidden>Open source</a><button id="approvalArtwork" type="button" class="secondary">Artwork</button></div>
+        <details class="approval-details"><summary>Original source</summary><dl id="sourceMetadataValues" class="metadata-values"></dl><small id="sourceMetadataProvenance"></small></details>
+      </aside>
+      <div id="approvalMetadata" class="approval-metadata">
+        <section class="approval-matches" aria-labelledby="beetsHeading">
+          <h3 id="beetsHeading">Beets matches</h3>
+          <div class="table-scroll"><table class="approval-table"><thead><tr><th scope="col">Track</th><th scope="col">Artist</th><th scope="col">Duration</th><th scope="col" title="Beets similarity, not a probability">Match</th><th scope="col"><span class="sr-only">Action</span></th></tr></thead><tbody id="metadataSuggestions"></tbody></table></div>
+          <p id="beetsEmpty" class="hint" hidden>No detected matches.</p>
+        </section>
+        <button id="sourceMetadataApply" type="button" class="secondary approval-source" disabled>Use original source metadata</button>
+        <section class="approval-search" aria-labelledby="mbHeading">
+          <h3 id="mbHeading">MusicBrainz</h3>
+          <form id="mbSearchForm" class="approval-search-form">
+            <label>Search for<select id="mbEntity"><option value="recording">Recordings</option><option value="artist">Artists</option></select></label>
+            <label>Title<input id="mbTitle" maxlength="200" autocomplete="off"></label>
+            <label>Artist<input id="mbArtist" maxlength="200" autocomplete="off"></label>
+            <button id="mbSearchNow" type="submit" class="secondary">Search</button>
+          </form>
+          <p id="mbStatus" role="status" aria-live="polite"></p>
+          <div id="mbResults" class="approval-search-results"></div>
+          <nav class="pagination" aria-label="MusicBrainz result pages"><button id="mbPrev" type="button" class="secondary" disabled>Previous</button><span id="mbPage"></span><button id="mbNext" type="button" class="secondary" disabled>Next</button></nav>
+        </section>
+        <details id="metadataManualPane" class="approval-details"><summary>Edit metadata</summary>
+          <div class="manual-fields">
+            <label>Artist<input id="metadataManualArtist" maxlength="1000"></label>
+            <label>Title<input id="metadataManualTitle" maxlength="1000"></label>
+            <label>Album<input id="metadataManualAlbum" maxlength="1000"></label>
+            <label>MusicBrainz recording ID<input id="metadataManualMbid" maxlength="36"></label>
+            <label>MusicBrainz release ID<input id="metadataManualRelease" maxlength="36"></label>
+          </div>
+          <button id="metadataManualApply" type="button" disabled>Apply edits</button>
+        </details>
+        <details class="approval-details"><summary>More metadata options</summary>
+          <div class="row"><button id="metadataKeepCurrent" type="button" class="secondary" hidden>Keep current metadata</button><button id="mbUseSource" type="button" class="secondary">Reset search</button></div>
+          <div id="metadataAlias"></div>
+          <details id="metadataRejectedDetails" class="approval-details" hidden><summary>Rejected suggestions</summary><div id="metadataRejected"></div></details>
+          <details class="approval-details"><summary>Matching evidence</summary><div id="metadataDiagnostic"></div></details>
+        </details>
+      </div>
+    </div>
   </section>
 
   <section class="panel" data-panel="sources" hidden>
@@ -241,8 +331,7 @@
         <dt>Refresh suggestions</dt><dd>Identify existing audio again using source hints, without downloading it again. Review the new suggestions before applying them.</dd>
         <dt>Reprocess</dt><dd>Download and identify again. Changed identities require approval.</dd>
         <dt>Redownload</dt><dd>Replace audio while retaining the confirmed identity. A mismatched recording is refused.</dd>
-        <dt>Review this view</dt><dd>Review a stable queue from the current filter and search. Save &amp; next applies only the displayed choice, Skip leaves a track unchanged, and Back opens the previous item. Progress resumes for this library and view.</dd>
-        <dt>Approve selected</dt><dd>Apply the visible selected choices for explicitly selected waiting tracks, including selections on other pages of the same view. Changed suggestions are skipped and must be reviewed again.</dd>
+        <dt>Approval</dt><dd>Review one track at a time. Current music is on the left; Beets matches, original-source metadata and automatic MusicBrainz search are on the right. Use Previous, Next or Choose music to navigate.</dd>
         <dt>Advanced: Approve all</dt><dd>Accept the first suggestion for every waiting track in the selected library, across all pages and filters. Use reviewed selections when suggestions need checking.</dd>
         <dt>Retry all failed</dt><dd>Retry failed operations across this library. Other states are unchanged.</dd>
         <dt>Remove…</dt><dd>Choose whether to remove the local entry, ignore its URLs, or block a confirmed recording throughout this library. The dialog explains the exact scope. Undo ignore rules in Music → Ignored music.</dd>
@@ -345,83 +434,6 @@
   </details>
 </dialog>
 
-<dialog id="metadataDialog" class="metadata-dialog" aria-labelledby="metadataHeading">
-  <div class="panel-heading compact"><h2 id="metadataHeading">Review metadata</h2><button id="metadataClose" type="button" class="secondary">Close</button></div>
-  <section id="metadataQueueBar" class="review-queue-bar" hidden>
-    <div><strong id="metadataQueueProgress"></strong><p id="metadataQueueScope" class="hint"></p></div>
-    <button id="metadataQueueRestart" type="button" class="secondary">Restart this view</button>
-  </section>
-  <p id="metadataNotice" role="status" aria-live="polite"></p>
-  <button id="metadataReload" type="button" class="secondary" hidden>Reload this track</button>
-  <section id="metadataQueueComplete" hidden>
-    <h3>Review session finished</h3><p id="metadataQueueSummary"></p>
-    <button id="metadataReviewSkipped" type="button">Review skipped tracks</button>
-  </section>
-  <div id="metadataWorkspace">
-    <p id="metadataCurrent" class="dialog-track"></p><p id="metadataOrigin" class="hint"></p>
-    <div class="review-listening"><audio id="metadataAudio" controls preload="none" aria-label="Listen to the current local audio"></audio><a id="metadataSourceLink" target="_blank" rel="noopener noreferrer" hidden>Open source video</a><span id="metadataAudioNote" class="hint"></span></div>
-    <p id="metadataShared" class="warning-text" hidden>This recording has several origins. A correction may split or merge logical tracks; other origins may need reingestion. The selected audio is retained until success.</p>
-    <p id="metadataUnavailable" class="warning-text" hidden>This track needs downloaded audio and no active operation before changes can be applied. You can inspect it or skip to the next track.</p>
-    <div id="metadataComparison" class="metadata-comparison" aria-label="Source, current and selected metadata">
-      <section><h3>Original source</h3><dl id="metadataOriginalValues" class="metadata-values"></dl></section>
-      <section><h3>Current tags</h3><dl id="metadataCurrentValues" class="metadata-values"></dl></section>
-      <section><h3>Selected change</h3><dl id="metadataProposedValues" class="metadata-values"></dl></section>
-    </div>
-    <div class="row metadata-tabs" role="group" aria-label="Choose metadata">
-      <button id="metadataSuggestionsTab" type="button" class="secondary" aria-pressed="true">Suggested matches</button>
-      <button id="metadataSearchTab" type="button" class="secondary" aria-pressed="false">Search MusicBrainz</button>
-      <button id="metadataSourceTab" type="button" class="secondary" aria-pressed="false">Original source</button>
-      <button id="metadataManualTab" type="button" class="secondary" aria-pressed="false">Edit manually</button>
-    </div>
-    <section id="metadataSuggestionsPane">
-      <p class="hint">Match scores compare candidates; they are not a probability that the recording is correct. Check the title, artist, duration and version.</p>
-      <div id="metadataSuggestions" class="metadata-suggestions"></div>
-      <button id="metadataSuggestionApply" type="button" disabled>Apply selected suggestion</button>
-    </section>
-    <section id="metadataSearchPane" hidden>
-      <form id="mbSearchForm">
-        <div class="metadata-fields">
-          <label>Search for<select id="mbEntity"><option value="recording">Recordings</option><option value="artist">Artists</option></select></label>
-          <label>Song title<input id="mbTitle" maxlength="200" autocomplete="off" placeholder="Song title"></label>
-          <label>Artist<input id="mbArtist" maxlength="200" autocomplete="off" placeholder="Artist name"></label>
-        </div>
-        <div class="row"><button type="submit">Search now</button><button id="mbUseSource" type="button" class="secondary">Use source hints</button></div>
-      </form>
-      <p id="metadataSearchHint" class="hint"></p>
-      <p id="mbStatus" role="status" aria-live="polite"></p>
-      <div id="mbResults" class="mb-results"></div>
-      <div class="pagination"><button id="mbPrev" type="button" class="secondary" disabled>Previous</button><span id="mbPage"></span><button id="mbNext" type="button" class="secondary" disabled>Next</button></div>
-      <div class="metadata-selection"><p id="mbSelected">Select a recording to preview the change.</p><label id="mbReleaseField" hidden>Release / edition (returned by search)<select id="mbRelease"></select></label><div id="mbSelectedArtist"></div><button id="mbApply" type="button" disabled>Apply selected recording</button></div>
-    </section>
-    <section id="metadataSourcePane" hidden>
-      <h3>Restore source metadata</h3><p id="sourceMetadataProvenance" class="hint"></p>
-      <dl id="sourceMetadataValues" class="metadata-values"></dl>
-      <p>This removes the applied MusicBrainz identity and stale artwork/lyrics. The discovery date and measured loudness tags are retained/refreshed. Unknown fields are left empty. No audio re-encoding is performed.</p>
-      <button id="sourceMetadataApply" type="button" disabled>Restore source metadata</button>
-    </section>
-    <section id="metadataManualPane" hidden>
-      <p class="hint">Edit the current values. Blank fields keep their current tags; use Original source to remove an applied identity. Discovery and loudness are preserved.</p>
-      <div class="metadata-fields manual-fields">
-        <label>Artist<input id="metadataManualArtist" maxlength="1000"></label>
-        <label>Title<input id="metadataManualTitle" maxlength="1000"></label>
-        <label>Album<input id="metadataManualAlbum" maxlength="1000"></label>
-        <label>MusicBrainz recording ID<input id="metadataManualMbid" maxlength="36"></label>
-        <label>MusicBrainz release ID<input id="metadataManualRelease" maxlength="36"></label>
-      </div>
-      <button id="metadataManualApply" type="button" disabled>Apply edited metadata</button>
-    </section>
-    <div id="metadataAlias" class="metadata-alias"></div>
-    <details id="metadataRejectedDetails" class="metadata-evidence" hidden><summary>Rejected suggestions for this source</summary><div id="metadataRejected"></div></details>
-    <details class="metadata-evidence"><summary>How the suggestions were found</summary>
-      <p>The automatic shortlist combines source text and acoustic fingerprints. It is not an exhaustive MusicBrainz search. A recording can exist there without a matching fingerprint, or differ in duration or version. Search independently when a suggestion looks wrong.</p>
-      <div id="metadataDiagnostic"></div>
-    </details>
-  </div>
-  <div id="metadataQueueActions" class="review-queue-actions" hidden>
-    <span class="hint">Alt + ← Back · Alt + → Skip · Alt + Enter Save &amp; next</span>
-    <div class="row"><button id="metadataQueueBack" type="button" class="secondary">Back</button><button id="metadataQueueSkip" type="button" class="secondary">Skip</button><button id="metadataSaveNext" type="button" disabled>Save &amp; next</button></div>
-  </div>
-</dialog>
 
 <dialog id="artworkDialog" class="artwork-dialog" aria-labelledby="artworkHeading">
   <div class="dialog-header"><h2 id="artworkHeading">Track artwork</h2><button id="artworkClose" type="button" class="secondary">Close</button></div>

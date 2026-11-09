@@ -32,3 +32,13 @@ Activity follows the latest message by default, including when logs arrive befor
 the tab is opened. Scrolling up pauses following; **Jump to latest** resumes it.
 The Help guide separates the usual workflow from temporary failures and includes
 an expandable table of every documented operation transition.
+
+## Approval page
+
+Approval is a full-width application panel between Music and Sources. It is not
+a dialog. A desktop two-column grid keeps the current track on the left and
+matching controls on the right. Beets suggestions are table rows, the source-tag
+choice is a separate button, and MusicBrainz search is visible and automatic.
+Previous/Next and a collapsed, searchable, paginated title/channel picker replace
+the old Music review toolbar. The Show options match Music but default to
+Waiting for approval independently. No custom keyboard shortcuts are introduced.

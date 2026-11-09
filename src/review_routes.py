@@ -58,11 +58,26 @@ def review_queue(store, user, status="NEEDS_APPROVAL", query="", sort="updated")
         tracks = [
             dict(row) for row in con.execute(
                 f"""SELECT t.id,COALESCE(NULLIF(t.matched_title,''),t.title) AS title,
-                    t.operation_state,t.health FROM tracks t
+                    t.operation_state,t.health,t.current_origin_id,t.pending_operation FROM tracks t
                     WHERE {where} AND {eligible} ORDER BY {order} LIMIT ?""",
                 (*params, MAX_REVIEW_TRACKS),
             )
         ]
+        by_track = {}
+        for row in con.execute(
+            "SELECT o.id,o.track_id,o.title,o.channel FROM track_origins o "
+            "JOIN tracks t ON t.id=o.track_id WHERE t.user_id=? ORDER BY o.id", (user,),
+        ):
+            by_track.setdefault(row["track_id"], []).append(dict(row))
+        for track in tracks:
+            pending = json.loads(track.pop("pending_operation") or "{}")
+            origin_id = track.pop("current_origin_id")
+            if track["operation_state"] == "NEEDS_APPROVAL":
+                origin_id = pending.get("origin_id") or origin_id
+            origins = by_track.get(track["id"], [])
+            origin = next((o for o in origins if o["id"] == origin_id), origins[0] if origins else {})
+            track["source_title"] = origin.get("title") or track["title"]
+            track["channel"] = origin.get("channel") or ""
     return {
         "ids": [track["id"] for track in tracks], "tracks": tracks,
         "total": total, "matching_total": matching, "excluded": matching - total,

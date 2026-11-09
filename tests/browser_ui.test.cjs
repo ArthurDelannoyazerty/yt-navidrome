@@ -104,7 +104,7 @@ async function browser(t) {
       if (await evaluate(expression)) return;
       await delay(50);
     } while (Date.now() < deadline);
-    throw new Error("Timed out: " + description);
+    throw new Error("Timed out: " + description + "\nBrowser errors: " + errors.join("\n") + "\nPage: " + await evaluate("location.href + ' ' + document.body?.innerText.slice(0,1000)"));
   };
   const screenshot = async name => {
     mkdirSync(join(root, "validation"), {recursive: true});
@@ -147,6 +147,7 @@ async function fixtureServer(t, data) {
         return;
       }
       response.setHeader("Content-Type", "application/json");
+      (data.reads ||= []).push(url.pathname + url.search);
       let result;
       if (request.method !== "GET") {
         let body = "";
@@ -166,7 +167,7 @@ async function fixtureServer(t, data) {
           result.results = (payload.items || []).map(item => ({track_id: item.track_id, status: "queued"}));
           result.queued = result.results.length;
           for (const item of result.results) data.tracks.find(track => track.id === item.track_id).operation_state = "QUEUED";
-        } else if (current && url.pathname.endsWith("/action")) {
+        } else if (current && (url.pathname.endsWith("/action") || url.pathname.endsWith("/metadata-correction"))) {
           current.operation_state = "QUEUED";
         } else if (current && url.pathname.endsWith("/disable")) {
           const origin = current.origins.find(origin => origin.id === parts[5]);
@@ -182,7 +183,7 @@ async function fixtureServer(t, data) {
           current.operation_state = "QUEUED";
         }
       } else if (url.pathname === "/api/users") result = ["admin", "guest"];
-      else if (url.pathname === "/api/tracks") result = {tracks: data.tracks, total: data.tracks.length,
+      else if (url.pathname === "/api/tracks") result = {tracks: data.tracks.slice(0,50), total: data.tracks.length,
         page: 1, limit: 50, stats: {total: data.tracks.length, available: 1, approval: 1, working: 0, deferred: 0, failed: 0, attention: 0}};
       else if (url.pathname.endsWith("/artwork") && data.artwork) result = data.artwork;
       else if (/\/artwork\/[^/]+\/image$/.test(url.pathname)) {
@@ -199,14 +200,19 @@ async function fixtureServer(t, data) {
       else if (url.pathname === "/api/system") result = {schema: 5, beets: "2.14.1",
         downloader: {version: "fixture"}, youtube_circuit: {open: false, failures: 0}};
       else if (url.pathname === "/api/spotify/status") result = {configured: false, connected: false};
-      else if (url.pathname === "/api/review/queue") result = {ids: data.tracks.map(track => track.id),
-        tracks: data.tracks, total: data.tracks.length, matching_total: data.tracks.length, excluded: 0, truncated: false};
-      else if (url.pathname === "/api/musicbrainz/search") result = {entity: "recording", items: [], total: 0, page: 1, limit: 20};
+      else if (url.pathname === "/api/review/queue") {
+        const status = url.searchParams.get("status") || "NEEDS_APPROVAL", query = (url.searchParams.get("q") || "").toLowerCase();
+        const tracks = data.tracks.filter(t => (status === "ALL" || t.operation_state === status || status === "AVAILABLE") &&
+          (t.origins[0].title + " " + t.origins[0].channel).toLowerCase().includes(query))
+          .map(t => ({id:t.id, title:t.title, source_title:t.origins[0].title, channel:t.origins[0].channel}));
+        result = {ids:tracks.map(t=>t.id),tracks,total:tracks.length,matching_total:tracks.length,excluded:0,truncated:false};
+      }
+      else if (url.pathname === "/api/musicbrainz/search") result = {entity: "recording", items: data.searchResults || [], total: (data.searchResults || []).length, page: 1, limit: 20};
       else if (url.pathname.endsWith("/metadata-context")) {
         const track = data.tracks.find(track => track.id === url.pathname.split("/")[3]) || data.tracks[0];
         result = {track_id: track.id, user_id: "admin", revision: "b".repeat(64),
           current_title: track.title, current_mbid: null, state: track.operation_state, health: track.health,
-          can_correct: true, origin_id: track.current_origin_id, source_url: track.origins[0].url, origin_count: 1,
+          can_correct: !["QUEUED", "RUNNING"].includes(track.operation_state), source_title: track.origins[0].title, source_channel: track.origins[0].channel, origin_id: track.current_origin_id, source_url: track.origins[0].url, origin_count: 1,
           source: {tags: {title: [track.title], artist: ["Kenichiro Suehiro"]}, basis: "original_download"},
           current_tags: {title: [track.title], artist: ["Kenichiro Suehiro"]},
           search_hints: {title: track.title, artist: "Kenichiro Suehiro", artist_basis: "topic_channel", notes: [], version_clues: []},
@@ -317,55 +323,86 @@ test("real browser: stop the active source and queue another URL without removin
   assert.deepEqual(chrome.errors, []);
 });
 
-test("real browser: continuous review saves, resumes and approves only the explicit selection", {timeout: 60000}, async t => {
-  const chrome = await browser(t);
-  if (!chrome) return;
+test("real browser: Approval is a two-column page with automatic search and one-click choices", {timeout: 60000}, async t => {
+  const chrome = await browser(t); if (!chrome) return;
   const data = fixtures(), next = structuredClone(data.tracks[0]);
-  next.id = "track-2"; next.title = "第二の曲"; next.approval_token = "c".repeat(64);
-  next.origins[0].id = "origin-2"; next.current_origin_id = "origin-2";
-  next.choices.forEach(choice => { choice.title = next.title; });
+  next.id="track-2"; next.title="Second song"; next.origins[0].title="Second source title";
+  next.approval_token="c".repeat(64); next.origins[0].id="origin-2"; next.current_origin_id="origin-2";
   data.tracks.push(next);
-  const origin = await fixtureServer(t, data);
-  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 1000, deviceScaleFactor: 1, mobile: false});
-  await chrome.send("Page.navigate", {url: origin});
+  data.searchResults=[{id:"22222222-2222-4222-8222-222222222222",title:"Search candidate",artist:"Artist",length_ms:200000,releases:[]}];
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
+  await chrome.send("Page.navigate",{url:origin});
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
-  await chrome.evaluate("document.querySelector('#startReview').click()");
-  await chrome.until("document.querySelector('#metadataDialog').open && document.querySelector('#metadataQueueProgress').textContent==='Track 1 of 2' && !document.querySelector('#metadataSaveNext').disabled");
-  assert.equal(await chrome.evaluate("document.querySelector('#metadataAudio').src.includes('candidate=true') && document.querySelector('#metadataAudio').src.includes('approval_token=')"), true);
-  assert.equal(await chrome.evaluate("document.querySelector('#metadataProposedValues').textContent.includes('末廣健一郎')"), true);
-  await chrome.screenshot("metadata-review-desktop");
-
-  await chrome.send("Emulation.setDeviceMetricsOverride", {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
-  assert.equal(await chrome.evaluate("(() => {const d=document.querySelector('#metadataDialog'),r=d.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth && d.scrollWidth<=d.clientWidth+1;})()"), true);
-  await chrome.evaluate("document.querySelector('#metadataSaveNext').scrollIntoView({block:'nearest'})");
-  assert.equal(await chrome.evaluate("(() => {const r=document.querySelector('#metadataSaveNext').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})()"), true);
-  await chrome.screenshot("metadata-review-mobile");
-  await chrome.evaluate("document.querySelector('#metadataSaveNext').click(); document.querySelector('#metadataSaveNext').click()");
-  await chrome.until("document.querySelector('#metadataQueueProgress').textContent==='Track 2 of 2' && document.querySelector('#metadataCurrent').textContent==='第二の曲'");
-  const saves = data.writes.filter(write => write.path.endsWith("/action"));
-  assert.equal(saves.length, 1);
-  assert.deepEqual(saves[0].body, {user_id: "admin", mode: "approve", index: 0, approval_token: "a".repeat(64)});
-
-  await chrome.evaluate("document.querySelector('#metadataClose').click()");
-  await chrome.until("!document.querySelector('#metadataDialog').open && document.querySelector('#startReview').textContent.includes('Resume')");
-  await chrome.evaluate("document.querySelector('#startReview').click()");
-  await chrome.until("document.querySelector('#metadataCurrent').textContent==='第二の曲' && !document.querySelector('#metadataSaveNext').disabled");
-  await chrome.evaluate("document.querySelector('#metadataQueueSkip').click()");
-  await chrome.until("!document.querySelector('#metadataQueueComplete').hidden");
-  assert.equal(await chrome.evaluate("document.querySelector('#metadataQueueSummary').textContent.includes('1 track left unchanged')"), true);
-  await chrome.evaluate("document.querySelector('#metadataReviewSkipped').click()");
-  await chrome.until("document.querySelector('#metadataQueueProgress').textContent==='Track 1 of 1' && document.querySelector('#metadataCurrent').textContent==='第二の曲'");
-  await chrome.evaluate("document.querySelector('#metadataClose').click()");
-  await chrome.evaluate("document.querySelector('#selectReviewPage').click()");
-  await chrome.until("document.querySelector('#approveSelected').textContent==='Approve selected (1)'");
-  await chrome.evaluate("document.querySelector('#approveSelected').click()");
-  await chrome.until("document.querySelector('#approveSelected').textContent==='Approve selected (0)'");
-  const batches = data.writes.filter(write => write.path === "/api/review/approve");
-  assert.equal(batches.length, 1);
-  assert.deepEqual(batches[0].body, {user_id: "admin", items: [{track_id: "track-2", index: 0, approval_token: "c".repeat(64)}]});
-  assert.deepEqual(chrome.errors, []);
+  assert.equal(await chrome.evaluate("!!document.querySelector('.review-toolbar,#startReview,#approveSelected,#metadataDialog')"),false);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","sources","activity","maintenance","help"]);
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("!document.querySelector('#approvalWorkspace').hidden && document.querySelectorAll('#mbResults tbody tr').length===1");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalFilter').value"),"NEEDS_APPROVAL");
+  assert.equal(await chrome.evaluate("document.querySelector('#filter').value"),"ALL");
+  assert.equal(await chrome.evaluate("!!document.querySelector('dialog[open]')"),false);
+  assert.equal(await chrome.evaluate("(() => {const l=document.querySelector('#approvalInfo').getBoundingClientRect(), r=document.querySelector('#approvalMetadata').getBoundingClientRect();return l.right<r.left && Math.abs(l.top-r.top)<2;})()"),true);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataAudio').src.includes('candidate=true') && document.querySelector('#metadataAudio').src.includes('approval_token=')"),true);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('#metadataSuggestions > tr').length"),1);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('#metadataSuggestions select').length"),0);
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalPicker').open"),false);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataOrigin').textContent.includes('Topic')"),true);
+  await chrome.screenshot("approval-page-desktop");
+  await chrome.evaluate("document.querySelector('#approvalNext').click()");
+  await chrome.until("document.querySelector('#approvalPosition').textContent==='2 / 2' && !document.querySelector('#sourceMetadataApply').disabled");
+  assert.equal(data.writes.length,0);
+  await chrome.evaluate("document.querySelector('#approvalPrevious').click()");
+  await chrome.until("document.querySelector('#approvalPosition').textContent==='1 / 2' && !document.querySelector('#sourceMetadataApply').disabled");
+  await chrome.evaluate("document.querySelector('#metadataSuggestions > tr td:last-child button').click(); document.querySelector('#metadataSuggestions > tr td:last-child button').click()");
+  await chrome.until("document.querySelector('#approvalPosition').textContent==='2 / 2' && !document.querySelector('#sourceMetadataApply').disabled");
+  assert.equal(data.writes.length,1);
+  assert.deepEqual(data.writes[0].body,{user_id:"admin",mode:"approve",index:0,approval_token:"a".repeat(64)});
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:1024,height:900,deviceScaleFactor:1,mobile:false});
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalInfo').getBoundingClientRect().right < document.querySelector('#approvalMetadata').getBoundingClientRect().left"),true);
+  await chrome.until("document.querySelectorAll('#mbResults tbody tr').length===1");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbArtist').getBoundingClientRect().width >= 160"),true);
+  await chrome.screenshot("approval-page-laptop");
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:true});
+  assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
+  await chrome.screenshot("approval-page-mobile");
+  await chrome.evaluate("document.querySelector('#approvalMetadata').scrollIntoView({block:'start'})");
+  await chrome.screenshot("approval-page-mobile-metadata");
+  await chrome.evaluate("document.querySelector('#sourceMetadataApply').click()");
+  await chrome.until("!document.querySelector('#approvalEmpty').hidden");
+  assert.deepEqual(data.writes[1].body,{user_id:"admin",mode:"restore_source",revision:"b".repeat(64)});
+  assert.deepEqual(chrome.errors,[]);
 });
 
+test("real browser: the collapsed music picker is bounded, searchable and independent of Music filters", {timeout:60000},async t=>{
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures();
+  for(let n=2;n<=65;n++) {const track=structuredClone(data.tracks[0]);track.id="track-"+n;track.title="Song "+n;track.origins[0].title="Video "+n;track.origins[0].channel="Channel "+n;data.tracks.push(track);}
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===50");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("!document.querySelector('#approvalWorkspace').hidden");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalPickerList').childElementCount"),0);
+  await chrome.evaluate("document.querySelector('#approvalPicker').open=true");
+  await chrome.until("document.querySelectorAll('#approvalPickerList button').length===30");
+  await chrome.evaluate("document.querySelector('#approvalPickerNext').click()");
+  await chrome.until("document.querySelector('#approvalPickerPage').textContent==='2 / 3'");
+  await chrome.evaluate("document.querySelector('#approvalPickerSearch').value='Channel 65';document.querySelector('#approvalPickerSearch').dispatchEvent(new Event('input'))");
+  await chrome.until("document.querySelectorAll('#approvalPickerList button').length===1");
+  await chrome.evaluate("document.querySelector('#approvalPickerList button').click()");
+  await chrome.until("document.querySelector('#metadataCurrent').textContent==='Video 65'");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalPicker').open"),false);
+  assert.equal(data.writes.length,0);
+  await chrome.evaluate("document.querySelector('#approvalFilter').value='ALL';document.querySelector('#approvalFilter').dispatchEvent(new Event('change'))");
+  await chrome.until("!document.querySelector('#sourceMetadataApply').disabled");
+  assert.equal(await chrome.evaluate("document.querySelector('#filter').value"),"ALL");
+  await chrome.evaluate("document.querySelector('[data-tab=music]').click(); document.querySelector('#tracks tr button').focus()");
+  await chrome.evaluate("Array.from(document.querySelectorAll('#tracks tr button')).find(b=>b.textContent==='Review metadata').click()");
+  await chrome.until("state.tab==='approval' && !document.querySelector('#approvalWorkspace').hidden");
+  assert.equal(await chrome.evaluate("!!document.querySelector('dialog[open]')"),false);
+  assert.deepEqual(chrome.errors,[]);
+});
 
 test("real browser: per-track cover comparison, pin, auto-selection and mobile layout", {timeout: 60000}, async t => {
   const chrome = await browser(t);
