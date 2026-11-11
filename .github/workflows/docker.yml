@@ -14,20 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - name: Install audio tools
-        timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg libchromaprint-tools
-      - run: python -m pip install uv
-      - run: uv sync --frozen --extra test
-      - run: uv run python -m compileall -q src tools tests
-      - run: uv run pytest --junitxml=validation/pytest.xml
-        env:
-          REQUIRE_BEETS: '1'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -42,6 +28,20 @@ jobs:
         run: timeout 150s node --test tests/browser_ui.test.cjs
         env:
           REQUIRE_BROWSER: '1'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install audio tools
+        timeout-minutes: 5
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg libchromaprint-tools
+      - run: python -m pip install uv
+      - run: uv sync --frozen --extra test
+      - run: uv run python -m compileall -q src tools tests
+      - run: uv run pytest --junitxml=validation/pytest.xml
+        env:
+          REQUIRE_BEETS: '1'
       - name: Archive the exact reviewed source
         if: always()
         run: |
