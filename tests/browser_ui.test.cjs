@@ -327,6 +327,10 @@ test("real browser: stop the active source and queue another URL without removin
 
 test("real browser: Approval is a two-column page with automatic search and one-click choices", {timeout: 60000}, async t => {
   const chrome = await browser(t); if (!chrome) return;
+  const assertUseFits = async viewport => {
+    const geometry = await chrome.evaluate("(() => {const button=document.querySelector('#metadataSuggestions > tr td:first-child button'),cell=button.parentElement,range=document.createRange();range.selectNodeContents(button);const text=range.getBoundingClientRect(),bounds=button.getBoundingClientRect(),box=cell.getBoundingClientRect(),css=getComputedStyle(cell);return {lines:range.getClientRects().length,textFits:text.left>=bounds.left && text.right<=bounds.right,buttonFits:bounds.left>=box.left+parseFloat(css.paddingLeft)-1 && bounds.right<=box.right-parseFloat(css.paddingRight)+1};})()");
+    assert.deepEqual(geometry,{lines:1,textFits:true,buttonFits:true},`Beets Use stays on one line inside its action cell at ${viewport}`);
+  };
   const data = fixtures(), next = structuredClone(data.tracks[0]);
   next.id="track-2"; next.title="Second song"; next.origins[0].title="Second source title";
   next.approval_token="c".repeat(64); next.origins[0].id="origin-2"; next.current_origin_id="origin-2";
@@ -348,6 +352,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   assert.equal(await chrome.evaluate("document.querySelectorAll('#metadataSuggestions > tr').length"),1);
   assert.equal(await chrome.evaluate("document.querySelectorAll('#metadataSuggestions select').length"),0);
   assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions > tr td:first-child button').textContent"),"Use");
+  await assertUseFits("desktop");
   assert.equal(await chrome.evaluate("(() => {const fields=['mbEntity','mbTitle','mbArtist','mbSearchNow'].map(id=>document.getElementById(id).getBoundingClientRect());return fields.every(r=>Math.abs(r.top-fields[0].top)<1 && Math.abs(r.bottom-fields[0].bottom)<1 && Math.abs(r.height-42)<1);})()"),true,"MusicBrainz controls share their top and bottom alignment");
   await chrome.evaluate("document.querySelector('#metadataSuggestions > tr').click(); document.querySelector('#metadataSuggestions > tr td:nth-child(3)').click()");
   assert.equal(data.writes.length,0,"row and text clicks must not apply metadata");
@@ -367,9 +372,12 @@ test("real browser: Approval is a two-column page with automatic search and one-
   assert.equal(await chrome.evaluate("document.querySelector('#approvalInfo').getBoundingClientRect().right < document.querySelector('#approvalMetadata').getBoundingClientRect().left"),true);
   await chrome.until("document.querySelectorAll('#mbResults tbody tr').length===1");
   assert.equal(await chrome.evaluate("document.querySelector('#mbArtist').getBoundingClientRect().width >= 160"),true);
+  await assertUseFits("laptop");
   await chrome.screenshot("approval-page-laptop");
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:true});
   assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
+  await assertUseFits("mobile");
+  assert.equal(await chrome.evaluate("(() => {const heading=document.querySelector('.beets-table th:nth-child(4)'),range=document.createRange();range.selectNodeContents(heading);return range.getClientRects().length===1;})()"),true,"Beets Duration heading remains on one line on mobile");
   await chrome.screenshot("approval-page-mobile");
   await chrome.evaluate("document.querySelector('#approvalMetadata').scrollIntoView({block:'start'})");
   await chrome.screenshot("approval-page-mobile-metadata");
