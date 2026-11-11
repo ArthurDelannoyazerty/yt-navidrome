@@ -158,13 +158,13 @@ window.MetadataUI = (() => {
     const matches = choices().filter(item => item.kind !== "source" && item.kind !== "asis" && !item.asis);
     $("metadataSuggestions").replaceChildren(...matches.map(item => {
       const row = node("tr"); row.dataset.choice = String(item.index ?? choices().indexOf(item));
-      const title = node("td"); title.append(item.mbid ? mbLink("recording", item.mbid, item.title) : node("strong", item.title));
-      if (item.album) title.append(node("small", item.album));
+      const title = node("td", null, "approval-track"); title.append(item.mbid ? mbLink("recording", item.mbid, item.title) : node("strong", item.title));
       title.append(evidence(item));
-      const action = node("td"), use = control("Use", () => useChoice(item), ui.context.can_correct && Boolean(ui.context.state === "NEEDS_APPROVAL" || item.mbid));
+      const action = node("td", null, "approval-action"), use = control("Use", () => useChoice(item), ui.context.can_correct && Boolean(ui.context.state === "NEEDS_APPROVAL" || item.mbid));
       use.setAttribute("aria-label", `Use ${item.artist || ""} ${item.title}`); action.append(use);
-      row.append(action, title, node("td", item.artist || "\u2014"), node("td", duration(item.evidence?.candidate_duration_seconds)),
-        node("td", item.match_score ?? item.similarity ?? "\u2014"));
+      row.append(action, title, node("td", item.artist || "\u2014", "approval-artist"), node("td", item.album || "\u2014", "approval-album"),
+        node("td", duration(item.evidence?.candidate_duration_seconds), "approval-duration"),
+        node("td", item.match_score ?? item.similarity ?? "\u2014", "approval-score"));
       return row;
     }));
     $("beetsEmpty").hidden = matches.length > 0;
@@ -340,13 +340,19 @@ window.MetadataUI = (() => {
     status("Searching..."); ui.timer = setTimeout(search, Math.max(500, ui.retryUntil - Date.now()));
   }
   function resultTable(items, entity) {
-    const container = node("div", null, "table-scroll"), table = node("table", null, "approval-table");
+    const container = node("div", null, "table-scroll"), table = node("table", null, `approval-table mb-${entity}-table`);
     const head = node("thead"), headings = node("tr"), body = node("tbody");
-    const labels = entity === "artist" ? ["Artist", "Details", ""] : ["Track", "Artist", "Duration", ""];
-    for (const label of labels) { const th = node("th", label); th.setAttribute("scope", "col"); headings.append(th); }
+    const columns = entity === "artist"
+      ? [["Action", "action"], ["Artist", "artist"], ["Details", "artist-details"]]
+      : [["Action", "action"], ["Track", "track"], ["Artist", "artist"], ["Album", "album"], ["Duration", "duration"]];
+    for (const [label, name] of columns) {
+      const th = node("th", name === "action" ? null : label, `approval-${name}`); th.setAttribute("scope", "col");
+      if (name === "action") th.append(node("span", label, "sr-only"));
+      headings.append(th);
+    }
     head.append(headings);
     for (const item of items) {
-      const row = node("tr"), info = node("td"), action = node("td");
+      const row = node("tr"), info = node("td", null, entity === "artist" ? "approval-artist" : "approval-track"), action = node("td", null, "approval-action");
       if (entity === "artist") {
         info.append(mbLink("artist", item.id, item.name));
         if (aliasNames(item)) info.append(node("small", aliasNames(item)));
@@ -355,15 +361,26 @@ window.MetadataUI = (() => {
           ui.artistId = item.id; updateButtons(); scheduleSearch();
         }, true, "search"));
         const remember = rememberButton(item, "search"); if (remember) info.append(remember);
-        row.append(info, node("td", [item.type, item.country, item.disambiguation].filter(Boolean).join(" \u00b7 ")), action);
+        row.append(action, info, node("td", [item.type, item.country, item.disambiguation].filter(Boolean).join(" \u00b7 "), "approval-artist-details"));
       } else {
         info.append(mbLink("recording", item.id, item.title));
         const edition = node("select"); edition.setAttribute("aria-label", `Release for ${item.title}`);
+        const album = node("td", null, "approval-album"), releases = item.releases || [];
+        const showAlbums = () => {
+          const selected = releases.find(release => edition.value && release.id === edition.value);
+          const titles = [...new Set((selected ? [selected] : releases).map(release => release.title).filter(Boolean))];
+          album.replaceChildren(...(titles.length ? titles.slice(0, 2).map(title => node("div", title)) : [node("span", "\u2014")]));
+          if (titles.length > 2) {
+            const more = node("details"); more.append(node("summary", `+${titles.length - 2} more albums`));
+            more.append(...titles.slice(2).map(title => node("div", title))); album.append(more);
+          }
+        };
         const automatic = node("option", "Automatic release"); automatic.value = ""; edition.append(automatic);
-        for (const release of item.releases || []) {
+        for (const release of releases) {
           const option = node("option", [release.title, release.date, release.country].filter(Boolean).join(" \u00b7 "));
           option.value = release.id; edition.append(option);
         }
+        edition.addEventListener("change", showAlbums); showAlbums();
         if (item.disambiguation) info.append(node("small", item.disambiguation));
         const details = node("details"); details.append(node("summary", "Details"));
         if (item.score != null) details.append(node("p", `Search relevance: ${item.score}`));
@@ -372,7 +389,8 @@ window.MetadataUI = (() => {
         if (item.artists?.length === 1) { const remember = rememberButton(item.artists[0], "search"); if (remember) details.append(remember); }
         info.append(details);
         action.append(control("Use", () => submit("select_recording", {mbid: item.id, ...(edition.value ? {release_id: edition.value} : {})}), ui.context.can_correct, "search"));
-        row.append(info, node("td", item.artist || "\u2014"), node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null)), action);
+        row.append(action, info, node("td", item.artist || "\u2014", "approval-artist"), album,
+          node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null), "approval-duration"));
       }
       body.append(row);
     }

@@ -123,9 +123,9 @@ function fixtures() {
     current_origin_id: origin.id, current_asset_id: 1, mbid: null, file_path: "/library/admin/song.opus",
     temporary_candidate_sha256: "temporary", issue_count: 0, origins: [origin],
     approval_token: "a".repeat(64), playlists: [{title: "Music Anime", added_at: "2021-04-17T21:36:42Z"}],
-    choices: [{kind: "candidate", title: "誓いの旋律", artist: "末廣健一郎",
+    choices: [{kind: "candidate", title: "誓いの旋律", artist: "末廣健一郎", album: "Original Soundtrack",
       mbid: "11111111-1111-4111-8111-111111111111", similarity: 85.7, match_score: 85.7,
-      evidence: {duration_delta_seconds: 0.3, source_version_clues: [], version_clues: []}},
+      evidence: {candidate_duration_seconds: 200, duration_delta_seconds: 0.3, source_version_clues: [], version_clues: []}},
     {kind: "source", title: "誓いの旋律", artist: "Kenichiro Suehiro", similarity: 0}]};
   const event = id => ({id, at: "2026-11-05T14:00:00Z", level: "INFO", target: "track-1",
     message: "Fixture event " + id + " — downloaded music remains available while metadata is reviewed."});
@@ -335,7 +335,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   next.id="track-2"; next.title="Second song"; next.origins[0].title="Second source title";
   next.approval_token="c".repeat(64); next.origins[0].id="origin-2"; next.current_origin_id="origin-2";
   data.tracks.push(next);
-  data.searchResults=[{id:"22222222-2222-4222-8222-222222222222",title:"Search candidate",artist:"Artist",length_ms:200000,releases:[]}];
+  data.searchResults=[{id:"22222222-2222-4222-8222-222222222222",title:"Search candidate",artist:"Artist",length_ms:200000,releases:[{id:"33333333-3333-4333-8333-333333333333",title:"Original Soundtrack"}]}];
   const origin=await fixtureServer(t,data);
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
   await chrome.send("Page.navigate",{url:origin});
@@ -377,7 +377,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:true});
   assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
   await assertUseFits("mobile");
-  assert.equal(await chrome.evaluate("(() => {const heading=document.querySelector('.beets-table th:nth-child(4)'),range=document.createRange();range.selectNodeContents(heading);return range.getClientRects().length===1;})()"),true,"Beets Duration heading remains on one line on mobile");
+  assert.equal(await chrome.evaluate("(() => {const heading=document.querySelector('.beets-table th.approval-duration'),range=document.createRange();range.selectNodeContents(heading);return range.getClientRects().length===1;})()"),true,"Beets Duration heading remains on one line on mobile");
   await chrome.screenshot("approval-page-mobile");
   await chrome.evaluate("document.querySelector('#approvalMetadata').scrollIntoView({block:'start'})");
   await chrome.screenshot("approval-page-mobile-metadata");
