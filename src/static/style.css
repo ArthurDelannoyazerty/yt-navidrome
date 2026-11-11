@@ -205,7 +205,7 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 .approval-feedback { min-height: 0; margin-bottom: 12px; }
 .approval-feedback p { margin: 0; }
 .approval-feedback:has(p:empty):not(:has(button:not([hidden]))) { display: none; }
-.approval-workspace { display: grid; grid-template-columns: minmax(240px, .85fr) minmax(0, 1.65fr); gap: 28px; align-items: start; }
+.approval-workspace { display: grid; grid-template-columns: minmax(240px, .7fr) minmax(0, 1.8fr); gap: 24px; align-items: start; }
 .approval-info { min-width: 0; position: sticky; top: 20px; }
 .approval-info h3 { overflow-wrap: anywhere; margin-bottom: 6px; }
 .approval-info audio { display: block; width: 100%; height: 40px; margin: 14px 0 6px; }
@@ -215,17 +215,19 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 #metadataAudioNote { font-size: 11px; margin-bottom: 14px; }
 .approval-metadata { min-width: 0; }
 .approval-metadata h3 { font-size: 17px; margin-bottom: 12px; }
-.approval-table { table-layout: fixed; }
+.approval-table { table-layout: fixed; min-width: 640px; }
 .approval-table th, .approval-table td { padding: 10px 12px; min-width: 0; width: auto; overflow-wrap: anywhere; }
-.approval-table th:first-child, .approval-table td:first-child { width: 35%; }
-.approval-table th:nth-child(2), .approval-table td:nth-child(2) { width: 24%; }
-.approval-table th:last-child, .approval-table td:last-child { width: 72px; text-align: right; }
 .approval-table button { font-size: 12px; padding: 6px 10px; }
-.beets-table th:first-child, .beets-table td:first-child { width: 76px; text-align: left; }
-.beets-table td:first-child > button { min-width: 48px; white-space: nowrap; overflow-wrap: normal; }
-.beets-table th:nth-child(2), .beets-table td:nth-child(2) { width: 36%; }
-.beets-table th:nth-child(3), .beets-table td:nth-child(3) { width: 24%; }
-.beets-table th:last-child, .beets-table td:last-child { width: auto; text-align: left; }
+.approval-table .approval-action { width: 76px; text-align: left; position: sticky; left: 0; z-index: 1; background: var(--panel); }
+.approval-table th.approval-action { background: var(--sub); z-index: 2; }
+.approval-table .approval-action > button { min-width: 48px; white-space: nowrap; overflow-wrap: normal; }
+.approval-table .approval-track { width: 28%; }
+.approval-table .approval-artist { width: 21%; }
+.approval-table .approval-duration { width: 78px; white-space: nowrap; }
+.approval-table .approval-score { width: 64px; text-align: right; white-space: nowrap; }
+.mb-artist-table { min-width: 0; }
+.mb-artist-table .approval-action { width: 84px; }
+.mb-artist-table .approval-artist { width: 42%; }
 .approval-table small { display: block; margin-top: 4px; }
 .approval-table details { font-size: 11px; margin-top: 7px; }
 .approval-table details select { width: 100%; max-width: 100%; min-width: 0; font-size: 12px; }
@@ -240,7 +242,8 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 #mbStatus:empty { display: none; }
 .approval-search-results { max-height: 460px; overflow: auto; margin: 12px 0; }
 .approval-search-results:empty { display: none; }
-.approval-search-results .table-scroll { overflow: visible; }
+.approval-search-results .table-scroll { overflow: visible; min-width: 640px; }
+.approval-search-results .table-scroll:has(.mb-artist-table) { min-width: 0; }
 .approval-details { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }
 .approval-details > summary { color: var(--muted); font-size: 12px; }
 .approval-details[open] > summary { margin-bottom: 14px; }
@@ -276,12 +279,10 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .approval-picker-body { width: 100%; max-width: none; }
   .approval-table { font-size: 12px; }
   .approval-table th, .approval-table td { padding: 8px 5px; }
-  .approval-table th:last-child, .approval-table td:last-child { width: 60px; }
-  .approval-table th:first-child, .approval-table td:first-child { width: 30%; }
-  .beets-table th:first-child, .beets-table td:first-child { width: 64px; }
-  .beets-table th:nth-child(2), .beets-table td:nth-child(2), .beets-table th:nth-child(3), .beets-table td:nth-child(3) { width: auto; }
-  .beets-table th:nth-child(4), .beets-table td:nth-child(4) { width: 64px; white-space: nowrap; }
-  .beets-table th:last-child, .beets-table td:last-child { width: 48px; }
+  .approval-table .approval-action { width: 64px; }
+  .approval-table .approval-duration { width: 64px; }
+  .approval-table .approval-score { width: 48px; }
+  .mb-artist-table .approval-action { width: 72px; }
   .approval-details .manual-fields { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 420px) {
