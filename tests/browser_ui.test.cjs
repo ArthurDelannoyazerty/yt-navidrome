@@ -405,8 +405,13 @@ test("real browser: Help lazily renders the workflow with local Pele and fits na
   assert.equal(await chrome.evaluate("document.querySelectorAll('.transition-table tbody tr').length>=10"),true);
   await chrome.evaluate("document.querySelector('.workflow-diagram').scrollIntoView({block:'start'})");
   await chrome.screenshot("help-workflow-desktop");
+  await chrome.evaluate("document.fonts.ready.then(() => {window.helpResizeBaseline=document.querySelector('#workflowDiagram svg');})");
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:true});
-  await chrome.until("document.querySelector('#workflowDiagram svg').getBoundingClientRect().width<=document.querySelector('#workflowDiagram').clientWidth+1");
+  // CSS shrinks the old SVG immediately; Pele replaces it on the animation
+  // frame scheduled by ResizeObserver. Capture the zoom baseline only after
+  // that render, so reset is compared with the actual mobile layout.
+  await chrome.until("document.querySelector('#workflowDiagram svg')!==window.helpResizeBaseline && document.querySelector('#workflowDiagram svg').getBoundingClientRect().width<=document.querySelector('#workflowDiagram').clientWidth+1", "Pele renders the mobile layout after resize");
+  await chrome.evaluate("delete window.helpResizeBaseline");
   assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
   const originalBox=await chrome.evaluate("document.querySelector('#workflowDiagram svg').getAttribute('viewBox')");
   await chrome.evaluate("document.querySelector('#workflowZoomIn').click()");
