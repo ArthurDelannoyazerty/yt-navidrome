@@ -132,6 +132,17 @@ summary { cursor: pointer; }
 .diagram-waiting rect { fill: #fff1d5; stroke: #ecd49d; }.diagram-ready rect { fill: #e3f1e8; stroke: #badac6; }.diagram-failed rect { fill: #fae5e3; stroke: #e8bfbc; }
 figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 .help-detail { padding: 18px 0; border-top: 1px solid var(--border); }.help-detail summary { font-weight: 600; }.help-detail p:first-of-type, .help-definitions { margin-top: 18px; }.help-definitions { grid-template-columns: 210px 1fr; row-gap: 14px; }
+.workflow-diagram { margin: 0 0 18px; padding: 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+#workflowDiagram { width: 100%; min-width: 0; --pele-bg: var(--panel); --pele-fg: #242b2a; --pele-muted: var(--muted); --pele-line: #72877b; --pele-surface: var(--sub); --pele-surface-alt: var(--sub); --pele-border: #c5d3ca; --pele-accent: var(--accent); --pele-radius: 8px; }
+/* Pele 1.13 root defaults, externalized for the application's style-src CSP. */
+#workflowDiagram svg.pele { display: block; max-width: 100%; height: auto; --_bg: var(--pele-bg); --_fg: var(--pele-fg); --_m: var(--pele-muted); --_l: var(--pele-line); --_s: var(--pele-surface); --_a: var(--pele-surface-alt); --_b: var(--pele-border); --_c: var(--pele-accent); --_r: var(--pele-radius); --_fm: ui-monospace, monospace; color: var(--_fg); font: 14px sans-serif; font-family: inherit; letter-spacing: normal; word-spacing: normal; text-transform: none; direction: ltr; }
+.workflow-zoom { display: flex; gap: 6px; justify-content: flex-end; margin-top: 12px; }
+.workflow-zoom button { min-width: 38px; padding: 6px 10px; font-size: 12px; }
+#workflowDiagram .pele-node[data-id=review] > rect { fill: var(--warn); stroke: #ddbd79; }
+#workflowDiagram .pele-node[data-id=idle] > rect { fill: var(--good); stroke: #9fc4ad; }
+#workflowDiagram .pele-node[data-id=failed] > rect { fill: var(--bad); stroke: #d9aaa4; }
+#workflowDiagram .pele-node[data-id=deferred] > rect, #workflowDiagram .pele-node[data-id=stopped] > rect { fill: var(--warn); stroke: #ddbd79; }
+.workflow-audio-note { padding: 14px 16px; background: var(--sub); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; font-size: 13px; }
 @media (max-width: 1000px) {
   body { padding: 24px; }.track-toolbar { grid-template-columns: 1fr 200px; }.track-toolbar .pagination { grid-column: 1 / -1; }.columns, .details-grid { grid-template-columns: 1fr; }
 }
@@ -210,8 +221,10 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 .approval-table th:nth-child(2), .approval-table td:nth-child(2) { width: 24%; }
 .approval-table th:last-child, .approval-table td:last-child { width: 72px; text-align: right; }
 .approval-table button { font-size: 12px; padding: 6px 10px; }
-.approval-table tr[data-choice]:hover { background: var(--sub); }
-.approval-table tr[data-choice] { cursor: pointer; }
+.beets-table th:first-child, .beets-table td:first-child { width: 64px; text-align: left; }
+.beets-table th:nth-child(2), .beets-table td:nth-child(2) { width: 36%; }
+.beets-table th:nth-child(3), .beets-table td:nth-child(3) { width: 24%; }
+.beets-table th:last-child, .beets-table td:last-child { width: auto; text-align: left; }
 .approval-table small { display: block; margin-top: 4px; }
 .approval-table details { font-size: 11px; margin-top: 7px; }
 .approval-table details select { width: 100%; max-width: 100%; min-width: 0; font-size: 12px; }
@@ -219,8 +232,9 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 .approval-table details button { font-size: 11px; }
 .approval-source { width: 100%; text-align: left; margin: 16px 0 24px; padding: 13px 16px; border-color: var(--border); }
 .approval-search-form { display: grid; grid-template-columns: 115px minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; }
-.approval-search-form input, .approval-search-form select { margin-bottom: 0; }
-.approval-search-form button { margin-bottom: 0; }
+.approval-search-form label { min-width: 0; }
+.approval-search-form label input, .approval-search-form label select { height: 42px; margin: 6px 0 0; }
+.approval-search-form button { height: 42px; margin: 0; }
 #mbStatus { font-size: 12px; margin: 10px 0; }
 #mbStatus:empty { display: none; }
 .approval-search-results { max-height: 460px; overflow: auto; margin: 12px 0; }
@@ -263,5 +277,11 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .approval-table th, .approval-table td { padding: 8px 5px; }
   .approval-table th:last-child, .approval-table td:last-child { width: 60px; }
   .approval-table th:first-child, .approval-table td:first-child { width: 30%; }
+  .beets-table th:first-child, .beets-table td:first-child { width: 54px; }
+  .beets-table th:nth-child(2), .beets-table td:nth-child(2) { width: 32%; }
+  .beets-table th:last-child, .beets-table td:last-child { width: auto; }
   .approval-details .manual-fields { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 420px) {
+  .approval-search-form { grid-template-columns: minmax(0, 1fr); }
 }

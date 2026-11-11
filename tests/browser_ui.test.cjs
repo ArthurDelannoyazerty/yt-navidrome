@@ -139,6 +139,8 @@ async function fixtureServer(t, data) {
     try {
       const url = new URL(request.url, "http://localhost");
       response.setHeader("Cache-Control", "no-store");
+      if (data.strictCsp) response.setHeader("Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'self'");
       if (url.pathname === "/" || url.pathname.startsWith("/static/")) {
         const file = url.pathname === "/" ? "index.html" : basename(url.pathname);
         const content = readFileSync(join(staticRoot, file));
@@ -345,6 +347,10 @@ test("real browser: Approval is a two-column page with automatic search and one-
   assert.equal(await chrome.evaluate("document.querySelector('#metadataAudio').src.includes('candidate=true') && document.querySelector('#metadataAudio').src.includes('approval_token=')"),true);
   assert.equal(await chrome.evaluate("document.querySelectorAll('#metadataSuggestions > tr').length"),1);
   assert.equal(await chrome.evaluate("document.querySelectorAll('#metadataSuggestions select').length"),0);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions > tr td:first-child button').textContent"),"Use");
+  assert.equal(await chrome.evaluate("(() => {const fields=['mbEntity','mbTitle','mbArtist','mbSearchNow'].map(id=>document.getElementById(id).getBoundingClientRect());return fields.every(r=>Math.abs(r.top-fields[0].top)<1 && Math.abs(r.bottom-fields[0].bottom)<1 && Math.abs(r.height-42)<1);})()"),true,"MusicBrainz controls share their top and bottom alignment");
+  await chrome.evaluate("document.querySelector('#metadataSuggestions > tr').click(); document.querySelector('#metadataSuggestions > tr td:nth-child(3)').click()");
+  assert.equal(data.writes.length,0,"row and text clicks must not apply metadata");
   assert.equal(await chrome.evaluate("document.querySelector('#approvalPicker').open"),false);
   assert.equal(await chrome.evaluate("document.querySelector('#metadataOrigin').textContent.includes('Topic')"),true);
   await chrome.screenshot("approval-page-desktop");
@@ -353,7 +359,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   assert.equal(data.writes.length,0);
   await chrome.evaluate("document.querySelector('#approvalPrevious').click()");
   await chrome.until("document.querySelector('#approvalPosition').textContent==='1 / 2' && !document.querySelector('#sourceMetadataApply').disabled");
-  await chrome.evaluate("document.querySelector('#metadataSuggestions > tr td:last-child button').click(); document.querySelector('#metadataSuggestions > tr td:last-child button').click()");
+  await chrome.evaluate("document.querySelector('#metadataSuggestions > tr td:first-child button').click(); document.querySelector('#metadataSuggestions > tr td:first-child button').click()");
   await chrome.until("document.querySelector('#approvalPosition').textContent==='2 / 2' && !document.querySelector('#sourceMetadataApply').disabled");
   assert.equal(data.writes.length,1);
   assert.deepEqual(data.writes[0].body,{user_id:"admin",mode:"approve",index:0,approval_token:"a".repeat(64)});
@@ -370,6 +376,41 @@ test("real browser: Approval is a two-column page with automatic search and one-
   await chrome.evaluate("document.querySelector('#sourceMetadataApply').click()");
   await chrome.until("!document.querySelector('#approvalEmpty').hidden");
   assert.deepEqual(data.writes[1].body,{user_id:"admin",mode:"restore_source",revision:"b".repeat(64)});
+  assert.deepEqual(chrome.errors,[]);
+});
+
+test("real browser: Help lazily renders the workflow with local Pele and fits narrow screens", {timeout:60000}, async t=>{
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures(); data.strictCsp=true;
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.addScriptToEvaluateOnNewDocument",{source:"window.styleViolations=[];document.addEventListener('securitypolicyviolation',event=>{if(event.effectiveDirective.startsWith('style-src'))window.styleViolations.push(event.violatedDirective);});"});
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1");
+  assert.equal(await chrome.evaluate("typeof window.IngestorPele"),"undefined");
+  await chrome.evaluate("document.querySelector('[data-tab=help]').click()");
+  await chrome.until("document.querySelectorAll('#workflowDiagram svg.pele').length===1 && document.querySelector('#workflowDiagramStatus').hidden");
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('#workflowDiagram .pele-node')).map(node=>node.dataset.id).sort()"),["deferred","failed","idle","processing","queued","review","stopped"]);
+  assert.equal(await chrome.evaluate("document.querySelector('#workflowDiagram svg title').textContent"),"Music operation states");
+  assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#workflowDiagram .pele-node[data-id=queued] rect')).fill"),"rgb(247, 248, 246)");
+  assert.equal(await chrome.evaluate("Array.from(document.scripts).filter(script=>script.src.includes('pele-flowchart.js')).every(script=>new URL(script.src).origin===location.origin)"),true);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.transition-table tbody tr').length>=10"),true);
+  await chrome.evaluate("document.querySelector('.workflow-diagram').scrollIntoView({block:'start'})");
+  await chrome.screenshot("help-workflow-desktop");
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:true});
+  await chrome.until("document.querySelector('#workflowDiagram svg').getBoundingClientRect().width<=document.querySelector('#workflowDiagram').clientWidth+1");
+  assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
+  const originalBox=await chrome.evaluate("document.querySelector('#workflowDiagram svg').getAttribute('viewBox')");
+  await chrome.evaluate("document.querySelector('#workflowZoomIn').click()");
+  assert.notEqual(await chrome.evaluate("document.querySelector('#workflowDiagram svg').getAttribute('viewBox')"),originalBox);
+  await chrome.evaluate("document.querySelector('#workflowZoomReset').click()");
+  assert.equal(await chrome.evaluate("document.querySelector('#workflowDiagram svg').getAttribute('viewBox')"),originalBox);
+  await chrome.screenshot("help-workflow-mobile");
+  await chrome.evaluate("document.querySelector('[data-tab=music]').click(); document.querySelector('[data-tab=help]').click()");
+  await chrome.until("document.querySelectorAll('#workflowDiagram svg.pele').length===1 && document.querySelector('#workflowDiagramStatus').hidden");
+  assert.equal(await chrome.evaluate("Array.from(document.scripts).filter(script=>script.src.includes('pele-flowchart.js')).length"),1);
+  assert.equal(data.writes.length,0);
+  assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
   assert.deepEqual(chrome.errors,[]);
 });
 

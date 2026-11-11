@@ -8,8 +8,9 @@ the list, and both controls share the same server-side filtering and page state.
 
 The visual system uses neutral surfaces, a single green action color, restrained
 status colors, consistent spacing, labelled controls and visible keyboard focus.
-On narrow screens the music table becomes stacked rows. Help uses numbered workflow steps, separate recovery guidance and an expandable
-transition table, without a CDN dependency.
+On narrow screens the music table becomes stacked rows. Help combines a Pele
+flowchart, numbered steps, recovery guidance and an expandable transition table.
+Only the pinned flowchart renderer is loaded, locally, when Help is opened.
 
 Sources consulted:
 
@@ -39,6 +40,14 @@ Approval is a full-width application panel between Music and Sources. It is not
 a dialog. A desktop two-column grid keeps the current track on the left and
 matching controls on the right. Beets suggestions are table rows, the source-tag
 choice is a separate button, and MusicBrainz search is visible and automatic.
+Only the **Use** button in each Beets row's first column applies its suggestion;
+clicking or selecting text elsewhere in the row does not change metadata. The
+MusicBrainz search selector, title, artist and Search button share a baseline.
 Previous/Next and a collapsed, searchable, paginated title/channel picker replace
 the old Music review toolbar. The Show options match Music but default to
 Waiting for approval independently. No custom keyboard shortcuts are introduced.
+
+Both views include **Imported from YouTube** and **Imported from Spotify** filters.
+They use retained discovery provenance; a Spotify import's YouTube audio candidate
+does not turn it into a direct YouTube import. Origin details retain both URLs,
+without introducing another badge into the main music list.

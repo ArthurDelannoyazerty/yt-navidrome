@@ -163,11 +163,8 @@ window.MetadataUI = (() => {
       title.append(evidence(item));
       const action = node("td"), use = control("Use", () => useChoice(item), ui.context.can_correct && Boolean(ui.context.state === "NEEDS_APPROVAL" || item.mbid));
       use.setAttribute("aria-label", `Use ${item.artist || ""} ${item.title}`); action.append(use);
-      row.append(title, node("td", item.artist || "\u2014"), node("td", duration(item.evidence?.candidate_duration_seconds)),
-        node("td", item.match_score ?? item.similarity ?? "\u2014"), action);
-      row.addEventListener("click", event => {
-        if (!event.target.closest("a,button,details,input,select") && !use.disabled) use.click();
-      });
+      row.append(action, title, node("td", item.artist || "\u2014"), node("td", duration(item.evidence?.candidate_duration_seconds)),
+        node("td", item.match_score ?? item.similarity ?? "\u2014"));
       return row;
     }));
     $("beetsEmpty").hidden = matches.length > 0;

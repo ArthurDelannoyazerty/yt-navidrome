@@ -62,8 +62,17 @@ test('Beets shows candidate rows, source and keep-current choices remain separat
   assert.equal(b.get('metadataSuggestions').children.length,1);
   assert.equal(b.get('metadataSuggestions').children[0].tagName,'tr');
   assert.equal(buttons(b.get('metadataSuggestions'),'Use').length,1);
+  assert.equal(b.get('metadataSuggestions').children[0].children[0].children[0].textContent,'Use');
   assert.equal(b.get('sourceMetadataApply').disabled,false);
   assert.equal(b.get('metadataKeepCurrent').hidden,false);
+});
+test('clicking Beets row content never applies metadata',async()=>{
+  const b=setup();await open(b);
+  const row=b.get('metadataSuggestions').children[0];
+  await row.click();
+  for (const cell of row.children.slice(1)) await cell.click();
+  assert.equal(b.requests.some(r=>r.options?.method==='POST'),false);
+  assert.equal(b.get('approvalPosition').textContent,'1 / 2');
 });
 test('one-click use sends the displayed candidate index/token once then advances',async()=>{
   const b=setup();await open(b);const use=buttons(b.get('metadataSuggestions'),'Use')[0];

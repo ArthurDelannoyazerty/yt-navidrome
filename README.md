@@ -1,7 +1,7 @@
 # Music Ingestor
 
 Self-hosted, provider-aware music ingestion for a user-separated Navidrome library.
-FastAPI, SQLite, beets 2.14.1, and an isolated yt-dlp runtime are used throughout.
+FastAPI, SQLite, beets 2.14.1, and isolated yt-dlp and spotDL runtimes are used throughout.
 The administration interface must remain behind an authenticated reverse proxy.
 
 ## Listen before approving metadata
@@ -10,8 +10,9 @@ Every new audio download is published immediately to
 `<library>/<user>/Waiting for approval/<track-id>.opus`, with **Waiting for approval**
 as the album and **Various Artists** as the album artist. Source artist/title,
 discovery tags and measured loudness are retained. Navidrome can play it and its
-exported YouTube playlists after the next scan, even while MusicBrainz is offline.
-Spotify-only entries still require an explicit audio link; Spotify supplies no audio.
+exported playlists after the next scan, even while MusicBrainz is offline.
+Public Spotify URLs are scanned without account setup; spotDL finds audio candidates
+that enter the same download and approval pipeline.
 
 New imports require metadata approval, including strong automatic matches. Use
 **Approve**, **Review metadata**, or the original source tags. Approval replaces
@@ -155,8 +156,8 @@ The single-page interface is split into six tabs:
   clears only the browser display.
 - **Maintenance** — paginated integrity issues, optional batch tag/loudness repair,
   failed-operation export and downloader updates.
-- **Help** — numbered workflow steps, separate recovery guidance and an expandable
-  table of operation transitions.
+- **Help** — a locally rendered Pele workflow graph, separate recovery guidance and
+  an expandable table of operation transitions.
 
 Search is server-side and matches source titles/channels and identified
 artist/title. Pagination follows filtering/search, with 50 rows per page and
@@ -211,16 +212,19 @@ The committed `uv.lock` is used by both CI and Docker with `uv sync --frozen`.
 | `YT_CIRCUIT_MAX_COOLDOWN_SECONDS` | `3600` | maximum repeated circuit cooldown |
 | `YTDLP_UPDATE_ENABLED` | `true` | isolated nightly downloader update |
 | `YTDLP_UPDATE_TIME` | `04:00` | local scheduled time |
+| `SPOTDL_UPDATE_ENABLED` | `true` | isolated stable spotDL update |
+| `SPOTDL_UPDATE_TIME` | `04:30` | local scheduled time for spotDL |
 | `TZ` | `Europe/Paris` | updater timezone |
 
 The API resolver uses `playlistItems.snippet.publishedAt`, never video upload time,
-for playlist addition history. Spotify tracks, albums and owned/collaborative playlists are supported as
-metadata-only sources, with per-library OAuth connection and explicit links to
-separate audio origins. See [Spotify setup and workflow](docs/spotify.md).
+for playlist addition history. Public Spotify tracks, albums and playlists import
+by URL through spotDL, with automatic audio lookup and the usual approval workflow.
+An optional per-library OAuth connection supports account browsing and eligible
+private sources. See [Spotify setup and workflow](docs/spotify.md).
 
 ## SQLite schema versioning
 
-The database uses `PRAGMA user_version`. Fresh installations create schema v5.
+The database uses `PRAGMA user_version`. Fresh installations create schema v8.
 An unversioned database containing data is refused rather than silently changed.
 
 Existing versioned installations upgrade in place, with a consistent SQLite
@@ -232,6 +236,10 @@ backup under `state/backups/` before each versioned migration:
 - v3 → v4 retains source channel names for conservative identification hints.
 - v4 → v5 adds persistent source download permissions, failure budgets and durable
   cancellation/stage fields for jobs. Existing origins start enabled.
+- v5 → v6 retains metadata-source and manual-edit provenance.
+- v6 → v7 adds artwork choices and persistent pins.
+- v7 → v8 distinguishes discovery origins from automatically selected audio
+  origins and retains Spotify/audio associations through recording merges.
 
 Origin identity rejections, source snapshots, identification reports and explicit
 artist aliases are retained in additive tables. Existing tracks, assets,
@@ -275,7 +283,8 @@ node --check src/static/app.js
 node --check src/static/ui-state.js
 node --check src/static/spotify-ui.js
 node --check src/static/metadata-ui.js
-node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs tests/metadata_frontend.test.cjs
+node --check src/static/help-ui.js
+node --test tests/frontend_runtime.test.cjs tests/spotify_frontend.test.cjs tests/metadata_frontend.test.cjs tests/help_frontend.test.cjs
 # Requires Chrome/Chromium; set CHROME_PATH if it is not found automatically.
 REQUIRE_BROWSER=1 node --test tests/browser_ui.test.cjs
 ```
@@ -376,16 +385,18 @@ beets and ffmpeg offline; it does not prove live external providers are availabl
 
 ## Spotify sources
 
-See [Spotify setup and workflow](docs/spotify.md). Configure `SPOTIFY_CLIENT_ID`
-and `SPOTIFY_REDIRECT_URI`, then connect the selected library from Sources.
-Paste Spotify track/playlist/album URLs or browse and select your playlists.
-Spotify imports metadata and exact playlist addition times, not audio streams.
+Paste a public Spotify track/playlist/album URL in **Sources**. No Spotify account
+or client ID is required. spotDL reads a complete metadata snapshot and finds
+YouTube audio candidates, then the existing yt-dlp/beets pipeline handles downloads,
+temporary publication and metadata approval. Playlist monitoring, duplicate reuse,
+source history and local playlist exports work with the same logical tracks.
 
-Review matching library recordings in bulk, or use **Link audio** to choose an
-existing confirmed track or a separate YouTube video. Unlinked entries have a
-**Spotify: needs audio link** filter; they are not marked as integrity failures.
-Automatic unreviewed Spotify-to-YouTube searching is intentionally not performed.
-Tokens remain in protected server-side files; no client secret is needed.
+**Imported from Spotify** and **Imported from YouTube** filters in Music and
+Approval retain discovery provenance independently of the audio provider. A track
+discovered through both appears in both filters; no extra badge is added to rows.
+**Maintenance** includes independent spotDL update/rollback controls. Account
+browsing/private-source access and manual **Link audio** recovery remain optional.
+See [Spotify setup and workflow](docs/spotify.md) for dates, limits and recovery.
 
 ## Correcting misidentified music
 

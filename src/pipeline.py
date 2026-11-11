@@ -21,6 +21,7 @@ from common import (
 from http_policy import ApiDeferred, HttpPolicy
 from providers import PROVIDERS
 from runtime import DeferredOperation, DownloaderRuntime, ProcessError, SourceAccessError, run_process
+from spotdl_runtime import SpotDLRuntime
 from store import JobCancelled
 
 
@@ -62,9 +63,12 @@ class Pipeline:
     def __init__(self, store):
         self.store = store
         self.downloader = DownloaderRuntime(store)
+        self.spotdl = SpotDLRuntime(store)
         self.stopping = asyncio.Event()
         self.children: set[asyncio.Task] = set()
         self.job_tasks: dict[int, asyncio.Task] = {}
+        self.downloader_update_task: asyncio.Task | None = None
+        self.spotdl_update_task: asyncio.Task | None = None
 
     def cancel_job(self, job_id: int):
         """Interrupt only the selected job; its worker remains available."""
@@ -592,7 +596,8 @@ class Pipeline:
                                receipt, action, operation_id, directory,
                                overrides=None, persisted_plan=None):
         self.checkpoint(job, "applying")
-        if action == "replace_source":
+        replacing_source = action == "replace_source"
+        if replacing_source:
             chosen_mbid = (selected or {}).get("mbid") or (selected or {}).get("tags", {}).get("mb_trackid")
             if source_track.get("mbid") and chosen_mbid != source_track["mbid"]:
                 raise ReplacementIdentityMismatch(
@@ -624,7 +629,8 @@ class Pipeline:
         else:
             plan = None
         if plan is None:
-            plan = self.store.identity_plan(source_track["id"], origin["id"], selected, action)
+            plan = self.store.identity_plan(source_track["id"], origin["id"], selected, action,
+                                            replacement=replacing_source)
             plan["action"] = action
             if selected and selected.get("kind") == "source":
                 plan["metadata_source"], plan["metadata_edited"] = "source", bool(overrides)
@@ -657,7 +663,7 @@ class Pipeline:
             target_track["artwork_split"] = True
         target_track["source_urls"] = canonical_source_urls(
             ([o["url"] for o in self.store.origins_for_track(target_track["id"], target_track["user_id"])]
-             if plan["route"] != "split" else []) + [origin["url"]]
+             if plan["route"] != "split" else []) + [origin["url"]] + plan.get("associated_source_urls", [])
         )
         target_asset = self.store.current_asset(target_track["id"])
         if plan["route"] == "existing" and await self.usable_asset(target_track, target_asset):
@@ -744,6 +750,12 @@ class Pipeline:
             return
         operation = payload.get("operation", str(job["id"]))
         directory = STATE / "staging" / job["target"]
+        if mode == "spotify_resolve":
+            from spotify_library import process_resolution
+            resolved_job = await process_resolution(self, job, directory)
+            if resolved_job:
+                await self.process_track(resolved_job)
+            return
         if mode in {"spotify_link", "spotify_audio"}:
             from spotify_library import process_link
             await process_link(self, job, directory)
@@ -899,7 +911,10 @@ class Pipeline:
         source = self.store.owned("sources", job["target"], job["user_id"])
         self.store.update("sources", source["id"], status="SYNCING", error=None)
         http = HttpPolicy(self.store, self.report(job))
-        snapshot = await asyncio.to_thread(PROVIDERS[source["provider"]].resolve, source, http)
+        if source["provider"] == "spotify":
+            snapshot = await self.spotdl.scan(source, self.report(job))
+        else:
+            snapshot = await asyncio.to_thread(PROVIDERS[source["provider"]].resolve, source, http)
         stats = self.store.apply_snapshot(source, snapshot)
         source = self.store.owned("sources", source["id"], source["user_id"])
         await asyncio.to_thread(write_playlist, self.store, source)
@@ -1078,9 +1093,24 @@ class Pipeline:
             pass
 
     def start_update(self):
-        if self.downloader.lock.locked() or any(not task.done() for task in self.children):
+        if self.downloader.lock.locked() or (self.downloader_update_task and not self.downloader_update_task.done()):
             raise ValueError("A downloader update is already queued or running")
         task = asyncio.create_task(self.update_downloader())
+        self.downloader_update_task = task
+        self.children.add(task)
+        task.add_done_callback(self.children.discard)
+
+    async def update_spotdl(self):
+        try:
+            await self.spotdl.update()
+        except Exception:
+            pass  # Runtime records the update failure for Maintenance/Activity.
+
+    def start_spotdl_update(self):
+        if self.spotdl.lock.locked() or (self.spotdl_update_task and not self.spotdl_update_task.done()):
+            raise ValueError("A spotDL update is already queued or running")
+        task = asyncio.create_task(self.update_spotdl())
+        self.spotdl_update_task = task
         self.children.add(task)
         task.add_done_callback(self.children.discard)
 
@@ -1098,6 +1128,13 @@ class Pipeline:
                         self.store.set_setting("next_downloader_update", future.timestamp())
                         if next_at is not None:
                             self.start_update()
+                if os.getenv("SPOTDL_UPDATE_ENABLED", "true").lower() == "true":
+                    next_at = self.store.setting("next_spotdl_update")
+                    if next_at is None or next_at <= now:
+                        future = next_nightly(datetime.now(UTC), os.getenv("SPOTDL_UPDATE_TIME", "04:30"), os.getenv("TZ", "Europe/Paris"))
+                        self.store.set_setting("next_spotdl_update", future.timestamp())
+                        if next_at is not None:
+                            self.start_spotdl_update()
                 for receipt in self.store.receipts_with_followups():
                     self.queue_receipt_followup(receipt)
                 integrity_hours = float(os.getenv("INTEGRITY_INTERVAL_HOURS", "24"))

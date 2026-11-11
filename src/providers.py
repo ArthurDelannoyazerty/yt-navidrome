@@ -29,6 +29,7 @@ class Entry:
     basis: str = "playlist_added"
     downloadable: bool = True
     channel: str | None = None
+    resolve_audio: bool = False
 
 
 @dataclass(frozen=True)

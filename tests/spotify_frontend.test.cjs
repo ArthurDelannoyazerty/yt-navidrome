@@ -20,7 +20,8 @@ test('Spotify configuration errors are rendered without enabling authorization',
   b.requests[0].resolve({configured: false, connected: false, configuration_error: 'Configure client ID'});
   await pending;
   assert.equal(b.get('spotifyConnect').disabled, true);
-  assert.equal(b.get('spotifyStatus').textContent, 'Configure client ID');
+  assert.match(b.get('spotifyStatus').textContent, /Public Spotify URLs work without a connection/);
+  assert.match(b.get('spotifyStatus').textContent, /Optional account setup: Configure client ID/);
 });
 test('Spotify link dialog discards old-user library candidates', async () => {
   const b = browser(true); b.app.state.user = 'admin';
@@ -32,9 +33,11 @@ test('Spotify audio controls never pretend catalog entries are downloadable', ()
   const b = browser(true);
   const track = {id:'one', title:'Artist - Song', current_asset_id:null,
     operation_state:'IDLE', origins:[{provider:'spotify', downloadable:0}]};
-  assert.equal(b.spotify.controls(track)[0].textContent, 'Link audio');
+  assert.deepEqual(Array.from(b.spotify.controls(track), c=>c.textContent), ['Find audio', 'Link audio']);
   assert.equal(b.spotify.controls({...track, current_asset_id:1}).length, 0);
   assert.equal(b.spotify.controls({...track, operation_state:'DEFERRED', operation_kind:'SPOTIFY_AUDIO'})[0].textContent, 'Cancel waiting link');
+  assert.equal(b.spotify.controls({...track, operation_state:'DEFERRED', operation_kind:'SPOTIFY_RESOLVE'})[0].textContent, 'Cancel audio search');
+  assert.equal(b.spotify.controls({...track, operation_state:'STOPPED', operation_kind:'SPOTIFY_RESOLVE'})[0].textContent, 'Retry audio search');
 });
 test('Spotify matches are preview-only until the user confirms', async () => {
   const b = browser(true); b.app.state.user = 'admin';
