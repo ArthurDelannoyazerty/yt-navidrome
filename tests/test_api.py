@@ -81,6 +81,28 @@ def test_system_exposes_youtube_circuit_state(db):
         assert data["youtube_circuit"]["failures"] == 0
 
 
+def test_spotdl_maintenance_uses_its_own_runtime_and_rejects_queued_rollback(db, monkeypatch):
+    from types import SimpleNamespace
+
+    app = create_app(db, start_workers=False)
+    pipeline = app.state.pipeline
+    calls = []
+    monkeypatch.setattr(pipeline, "start_spotdl_update", lambda: calls.append("spotdl"))
+    monkeypatch.setattr(pipeline, "start_update", lambda: calls.append("youtube"))
+    with TestClient(app) as client:
+        data = client.get("/api/system").json()
+        assert data["spotdl"]["version"]
+        assert data["spotdl_last_update"] is None
+        assert data["spotdl_next_update"] is None
+        assert client.post("/api/spotdl/update", json={}).status_code == 200
+        assert calls == ["spotdl"]
+        pipeline.spotdl_update_task = SimpleNamespace(done=lambda: False)
+        response = client.post("/api/spotdl/rollback", json={})
+        assert response.status_code == 400
+        assert "Wait for the active spotDL update" in response.json()["error"]
+        pipeline.spotdl_update_task = None
+
+
 
 def test_bulk_approve_is_scoped_to_current_user(db, track):
     from providers import Entry, Snapshot, parse_source

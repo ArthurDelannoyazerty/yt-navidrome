@@ -1,4 +1,4 @@
-/* Spotify metadata and reviewed audio links; credentials stay on the server. */
+/* Public Spotify URL imports and optional account/recovery tools. */
 "use strict";
 window.SpotifyUI = (() => {
   const ui = {playlistPage: 1, playlistMax: 1, selected: new Map(), matchPage: 1,
@@ -25,9 +25,9 @@ window.SpotifyUI = (() => {
     const ticket = scope("status");
     const data = await api(`/api/spotify/status?user_id=${encodeURIComponent(ticket.user)}`, null, null, ticket.current);
     if (!ticket.current()) return;
-    $("spotifyStatus").textContent = data.configuration_error || (data.connected
+    $("spotifyStatus").textContent = data.connected
       ? `Connected for ${ticket.user}: ${data.display_name || data.account_id}`
-      : `Not connected for ${ticket.user}. Connect to read Spotify sources.`);
+      : `Public Spotify URLs work without a connection.${data.configuration_error ? ` Optional account setup: ${data.configuration_error}` : " Connect only to browse your account or access eligible private playlists."}`;
     $("spotifyRedirect").textContent = data.redirect_uri || "https://YOUR-INGESTOR-HOST/api/spotify/callback";
     $("spotifyConnect").disabled = !data.configured;
     $("spotifyConnect").textContent = data.connected ? "Reconnect Spotify" : "Connect Spotify";
@@ -41,7 +41,7 @@ window.SpotifyUI = (() => {
   }));
   $("spotifyDisconnect").addEventListener("click", guard(async () => {
     const user = state.user;
-    if (!confirm(`Disconnect Spotify for ${user}? Imported files and links remain. Future Spotify syncs need reconnection.`)) return;
+    if (!confirm(`Disconnect Spotify for ${user}? Public URL imports will still work. Private playlists and account browsing need reconnection.`)) return;
     const data = await api(`/api/spotify/connection?user_id=${encodeURIComponent(user)}`, null, "DELETE");
     if (user !== state.user) return;
     notice(data.message); await refresh();
@@ -67,7 +67,7 @@ window.SpotifyUI = (() => {
         if (check.checked) ui.selected.set(item.url, item.title); else ui.selected.delete(item.url);
         selectedCount();
       });
-      const text = node("div"); text.append(spotifyLink(item.url, item.title), node("small", item.owned ? "Your playlist" : "Requires collaborator access to import"));
+      const text = node("div"); text.append(spotifyLink(item.url, item.title), node("small", item.owned ? "Your playlist" : "Public playlists can be imported by URL"));
       row.append(check, text); return row;
     }));
     if (!data.items.length) $("spotifyPlaylists").append(node("p", "No playlists returned for this account.", "empty"));
@@ -80,11 +80,11 @@ window.SpotifyUI = (() => {
   $("spotifyPlaylistNext").addEventListener("click", guard(async () => { ui.playlistPage = Math.min(ui.playlistMax, ui.playlistPage + 1); await playlists(); }));
   $("spotifyImportSelected").addEventListener("click", guard(async () => {
     const ticket = scope("import"); const urls = [...ui.selected.keys()];
-    if (!urls.length || !confirm(`Import ${urls.length} Spotify playlists for ${ticket.user}? Audio linking is a separate step.`)) return;
+    if (!urls.length || !confirm(`Import ${urls.length} Spotify playlists for ${ticket.user}? Audio candidates will enter the usual processing and approval queue.`)) return;
     await api("/api/sources", {user_id: ticket.user, urls, monitored: $("spotifyMonitor").checked});
     if (!ticket.current()) return;
     ui.selected.clear(); $("spotifyPlaylistsDialog").close();
-    notice("Spotify sources queued. Review library matches after synchronization."); await refreshAll(false);
+    notice("Spotify sources queued. New tracks will enter the processing and approval queue."); await refreshAll(false);
   }));
   async function matches() {
     const ticket = scope("matches");
@@ -169,10 +169,11 @@ window.SpotifyUI = (() => {
   }));
   function controls(track) {
     if (track.current_asset_id || !track.origins.some(o => o.provider === "spotify") || track.origins.some(o => o.downloadable)) return [];
-    if (["QUEUED", "DEFERRED"].includes(track.operation_state) && ["SPOTIFY_LINK", "SPOTIFY_AUDIO"].includes(track.operation_kind)) {
-      return [button("Cancel waiting link", async () => {
+    if (["QUEUED", "DEFERRED"].includes(track.operation_state) && ["SPOTIFY_LINK", "SPOTIFY_AUDIO", "SPOTIFY_RESOLVE"].includes(track.operation_kind)) {
+      const searching = track.operation_kind === "SPOTIFY_RESOLVE";
+      return [button(searching ? "Cancel audio search" : "Cancel waiting link", async () => {
         const user = state.user;
-        if (!confirm("Cancel this waiting link? Independently queued YouTube imports are retained.")) return;
+        if (!confirm(searching ? "Stop automatic audio lookup for this track? You can restart it with Retry audio search." : "Cancel this waiting link? Independently queued YouTube imports are retained.")) return;
         const result = await api(`/api/spotify/entries/${encodeURIComponent(track.id)}/cancel`, {user_id: user});
         if (state.user !== user) return;
         notice(result.message); await refreshTracks(false);
@@ -180,6 +181,9 @@ window.SpotifyUI = (() => {
     }
     const link = button("Link audio", () => openLink(track));
     link.disabled = ["QUEUED", "RUNNING", "DEFERRED"].includes(track.operation_state);
+    if (["IDLE", "STOPPED"].includes(track.operation_state)) {
+      return [button(track.operation_state === "IDLE" ? "Find audio" : "Retry audio search", () => action(track, "retry")), link];
+    }
     return [link];
   }
   for (const [buttonId, dialogId] of [["spotifyClosePlaylists", "spotifyPlaylistsDialog"], ["spotifyCloseMatches", "spotifyMatchesDialog"], ["spotifyCloseLink", "spotifyLinkDialog"]]) {

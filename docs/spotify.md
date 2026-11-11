@@ -1,145 +1,146 @@
 # Spotify sources
 
-Spotify is a **metadata source**, not an audio downloader. Import Spotify tracks,
-playlists and albums, preserve their playlist addition history, and link them to
-confirmed audio in the same Music Ingestor library. Audio is never extracted from
-Spotify, and the application does not modify your Spotify account or playlists.
+## Import a public playlist by URL
 
-## One-time setup
+1. Select your library user and open **Sources**.
+2. Paste a full Spotify playlist, track or album URL in **Add music**. Enable
+   monitoring to keep its local playlist synchronized.
+3. New tracks are queued automatically. spotDL reads Spotify metadata and finds
+   a YouTube audio candidate; the existing yt-dlp downloader, beets identification,
+   loudness processing, temporary publication and Approval workflow then run.
+4. Review the tracks in **Approval**, using the same **Use** and original-source
+   choices as YouTube imports. New audio still requires metadata approval.
 
-Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-For a Development Mode app, check the current Premium/allowlist requirements for
-the app owner and each connecting user. Add the exact callback URL to the app:
+Public URLs need no Spotify account connection, developer app, client ID or client
+secret. Spotify is the metadata/discovery source; audio is acquired from a separate
+YouTube origin. The application does not download Spotify audio streams or edit
+online playlists. YouTube download options, cookies, retry budgets and its circuit
+breaker continue to apply to the actual audio download.
 
-```text
-https://YOUR-INGESTOR-HOST/api/spotify/callback
+Full `https://open.spotify.com/playlist/...`, `/track/...` and `/album/...` URLs,
+their `spotify:...` URI forms and localized `intl-...` URLs are accepted. Sharing
+parameters are removed. Open short links in Spotify first and paste the resulting
+full URL. Artists, podcasts and local files are not import sources.
+
+## Source filters and reuse
+
+Both **Music** and **Approval** offer **Imported from Spotify** and **Imported from
+YouTube** filters. They describe discovery provenance, not the service transporting
+the audio. A Spotify import stays in the Spotify filter when spotDL finds its audio
+on YouTube. If that video is also imported directly or discovered in a monitored
+YouTube playlist, the logical track appears in both filters. No extra source badge
+is added to music rows; **Sources & details** retains the origin URLs.
+
+The same Spotify ID is reused across playlists, including repeated occurrences in
+one playlist. Resolving a video already present in the selected library reuses its
+track and audio. When approval identifies a recording already in the library,
+Spotify playlist memberships follow the merged recording. A durable association
+between the Spotify discovery origin and its selected audio origin prevents
+playlist entries from being stranded on empty placeholders.
+
+## Complete snapshots and dates
+
+Only complete snapshots replace playlist memberships. The fast path reads the
+ordinary public Spotify page only when its rows match an independent advertised
+total and it explicitly has no next page. A second complete read must have the same
+content fingerprint. This fingerprint is recorded as an observational digest,
+not a Spotify-issued revision. Larger or incomplete documents fall back to the
+public reader shipped with spotDL's free Spotify backend, which verifies independent
+item totals, page positions and native playlist revisions before accepting the result.
+Malformed, repeated, truncated or changed pages fail without replacing the last
+valid snapshot or exported playlist. The scanner does not accept a Spotify embed
+preview as a complete playlist. Collections are bounded to 10,000 occurrences.
+
+Local, podcast and removed entries are skipped with a count while their original
+positions remain available. Duplicate songs retain separate memberships. A real
+playlist addition time is retained when provided; otherwise the date is explicitly
+unknown and the stable first-observed date is used. A rescan does not manufacture
+an earlier date or reset first observation. Album release dates are not discovery
+dates. Beets/MusicBrainz remains responsible for approved release metadata.
+
+The public backend depends on Spotify's web responses and can break when Spotify
+changes them. A transient failure defers the job and applies a shared cooldown.
+If scanning stops working, check Activity and use **Maintenance → Update spotDL**,
+then retry. Existing library files and the last successful playlist snapshot stay
+available. Private playlists need the optional account connection below; public
+URL support does not confer private access.
+
+## Updates and rollback
+
+spotDL is installed in its own environment, separate from the application/beets
+and yt-dlp environments. The container bundles spotDL 4.6.0. Maintenance displays
+its active version, previous update outcome and next scheduled update, with
+**Update spotDL** and **Roll back spotDL** controls next to the yt-dlp controls.
+
+An update installs a fresh stable spotDL 4.x environment, checks the exact bridge
+imports and an offline matching fixture, then atomically switches future work.
+Active scans/searches keep their original interpreter; failed updates retain the
+previous runtime. Rollback selects the previous validated runtime. The smoke
+check validates compatibility, not live Spotify/YouTube service availability.
+
+```dotenv
+SPOTDL_UPDATE_ENABLED=true
+SPOTDL_UPDATE_TIME=04:30
+TZ=Europe/Paris
 ```
 
-Set these values in your server's `.env`, then recreate the container:
+For development, install spotDL in a separate virtual environment and set
+`SPOTDL_PYTHON` to its Python interpreter. Do not add spotDL to the application's
+beets environment. Application changes still require rebuilding/restarting the
+container; runtime updates only update the isolated provider packages.
+
+## Recovery and existing imports
+
+**Spotify: waiting for audio** finds entries that do not yet have a usable audio
+origin. A failed search can be retried using the ordinary retry action. Monitoring
+can queue a legacy idle Spotify entry for automatic audio lookup, but does not
+override failed, stopped, deferred or approval decisions. A no-match result remains
+visible as a failed operation so it can be reviewed rather than silently omitted.
+
+**Link audio** remains available for an unlinked entry. Choose a confirmed recording
+from this user's library or supply a specific YouTube video. **Review library
+matches** still offers explicit, revision-checked name-match suggestions; names
+alone never silently establish a recording identity. A manual link's cancellation
+does not cancel a separately queued YouTube import.
+
+Resolved audio enters the same durable ingest job. Its selected URL is saved before
+download, so retries/restarts do not search for a different video after a file has
+been staged. Existing approval tokens, staged-file hashes, ignore rules and source
+download controls remain authoritative. Removing a monitored source removes its
+local playlist export and memberships while retaining shared music.
+
+Schema v8 adds discovery provenance and Spotify/audio associations, with a SQLite
+backup before migration. Existing origins retain discovery provenance; existing
+audio, identities and memberships are preserved.
+
+## Optional account connection
+
+An account connection enables **Browse my playlists** and an authenticated fallback
+for sources the public reader cannot access. Public imports do not require it.
+Create a Spotify Developer Dashboard app and register the exact callback URL:
 
 ```dotenv
 SPOTIFY_CLIENT_ID=your_spotify_app_client_id
 SPOTIFY_REDIRECT_URI=https://YOUR-INGESTOR-HOST/api/spotify/callback
 ```
 
-For local development use `http://127.0.0.1:8008/api/spotify/callback` (or an
-explicit IPv6 loopback). Spotify does not allow `localhost` callbacks. Remote
-callbacks require HTTPS. Open Ingestor at the callback's host before connecting;
-the callback and connection request must use the same browser and origin.
+For local development, use `http://127.0.0.1:8008/api/spotify/callback`; remote
+callbacks require HTTPS. Open the app at the configured host, select the library
+user, expand the optional connection section in **Sources**, and connect. PKCE
+requires no client secret. The requested scopes are read-only playlist scopes.
+Spotify developer-app eligibility, allowlisting and playlist access restrictions
+still apply to this optional official API route.
 
-In **Sources**, select the intended library user, then **Connect Spotify**. The
-PKCE flow needs no client secret. It requests only `playlist-read-private` and
-`playlist-read-collaborative`, not playback, library modification, or email access.
-Every Ingestor library connects separately. A different Spotify account requires
-an explicit disconnect first, preventing accidental account replacement.
+Each library connects separately. Tokens remain in protected server-side files
+under `state/spotify/`, never in the browser or application events. Disconnecting
+removes that library's credentials and keeps imported files, origins and public
+URL syncing. Protect the state volume/backups and keep the administration UI behind
+authentication. Library user names organize data; they are not login credentials.
 
-Credentials and one-use login attempts are kept under `state/spotify/`, with
-0700 directories and 0600 files. Access/refresh tokens are never returned to the
-browser or stored in application events. They are not encrypted at rest: protect
-the state volume and backups. A permanently rejected refresh grant removes that user's local token file so
-Sources shows Disconnected and a new authorization is required. Transient errors
-retain credentials. Disconnect deletes local credentials and pending
-logins but retains imported metadata and audio. Revoke the app in Spotify's
-account settings as well when revocation is desired.
+## Upstream references
 
-The admin UI still requires your authenticated reverse proxy; library user
-names are organization, **not authentication**. Keep the OAuth callback protected
-by that proxy, and avoid logging its query parameters (short-lived OAuth codes).
-Ingestor redacts callback query strings in Uvicorn's access log; configure the
-reverse proxy's logs separately.
-
-## Supported sources and access restrictions
-
-Paste one or more full `https://open.spotify.com/track/...`, `/playlist/...`, or
-`/album/...` URLs in **Add music**. Spotify `spotify:track:...`,
-`spotify:playlist:...`, and `spotify:album:...` URIs and localized `intl-...` URLs
-are accepted. Sharing parameters are removed during canonicalization.
-
-**Browse my playlists** supports selection across pages, up to 100 playlists per
-import, with optional monitoring. Spotify may list a followed playlist but deny
-its contents: the current playlist-items endpoint only permits playlists the
-connected account owns or collaborates on. A denial is an actionable source
-error, never interpreted as an empty playlist. Open Spotify short links first
-and paste the resulting full URL. Artist pages, podcasts, local files, mixes,
-and Spotify audio downloading are not supported.
-
-The provider uses `/playlists/{id}/items` and the newer `item` field, while
-accepting the legacy `track` field in responses. It does not depend on removed
-popularity, market, or audio-features fields, nor on removed batch-fetch APIs.
-The stable `account_id` field is used when supplied, with legacy `id` fallback.
-
-## Link audio without duplicating your library
-
-After synchronization, unlinked entries appear under **Spotify: needs audio
-link**. This is an expected metadata-only state, not a corrupt/missing file.
-Spotify entries do not launch downloads on their own.
-
-**Review library matches** suggests existing, available MusicBrainz-confirmed
-recordings whose artist/title text matches. Only Unicode normalization, case and
-whitespace are normalized; live/remaster/edition labels and punctuation are not
-removed. **Link unique matches** requires confirmation and acts across all
-preview pages. Ambiguous names are excluded. Even exact names are not proof of
-identity: review editions before accepting a batch. Preview changes invalidate
-the batch confirmation rather than silently selecting different recordings.
-
-For each unmatched entry, **Link audio** offers two routes:
-
-* Search the same user's existing library and explicitly confirm a recording.
-  This reuses its file, MusicBrainz ID and asset provenance. Spotify becomes an
-  additional metadata origin; its memberships and earlier discovery date are
-  attached to that recording. No audio download or re-encoding occurs.
-* Supply one YouTube video URL you are authorized to download. A separate
-  YouTube source goes through the normal download, identification, approval,
-  tagging and loudness pipeline. The Spotify link waits while this happens.
-  Approve the YouTube track when requested. If its confirmed artist/title differs
-  from Spotify, the link fails for review rather than accepting it silently; use
-  the existing-library search to confirm the correct version explicitly.
-
-`YT_API_KEY` is required for the YouTube route, not for Spotify metadata syncing.
-This release deliberately does not search YouTube and automatically select an
-unverified recording for each Spotify entry. **Cancel waiting link** cancels only
-the waiting metadata operation, not an independently queued audio import.
-**Retry all failed** also retries failed Spotify links with their original job
-payload; deferred links already retry automatically.
-
-## Synchronization and recovery guarantees
-
-Each complete snapshot is committed atomically. Failed pagination, changed
-playlist revisions, unsafe/repeated `next` URLs, or permission errors preserve the
-previous memberships and local playlist. The provider constructs its own API
-URLs: access tokens are not forwarded to pagination URLs supplied by responses.
-Requests share the existing host pacing and Retry-After/backoff behavior.
-A Spotify `QUOTA_EXCEEDED` response pauses that API host for at least one hour
-(or a longer Retry-After), rather than repeatedly retrying within seconds. This
-is a conservative retry cooldown, not an assumed Spotify quota reset time.
-
-Playlists and albums are paginated in batches of 50, with a 10,000-item safety
-bound. Duplicate track occurrences preserve their separate positions. Null,
-local and podcast items are skipped with a summary warning. Null playlist
-`added_at` remains unknown; first observation is used only as a fallback.
-Direct tracks and albums do not manufacture playlist-add or release dates.
-Only MusicBrainz/beets supplies the audio release tags.
-
-Metadata links use durable receipts and reserve the target while discovery tags
-and playlists are updated. A restart resumes finalization without another audio
-download. The same Spotify origin in several sources or subsequent syncs stays
-attached to the same per-user logical recording. Deleting a Spotify source
-removes its exported playlist, not the shared audio. Delete and ignore continues
-to exclude known Spotify origins and, for linked tracks, confirmed recordings.
-
-No database schema change is required (schema v2 is retained). Existing YouTube
-sources, download options and matching thresholds are unchanged. Restart/rebuild
-is required for this application code; the nightly yt-dlp updater does not update
-Music Ingestor itself.
-
-## Primary API references
-
-Verified against Spotify's documentation, including the 2026 changes:
-
-- [Authorization Code with PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
-- [Redirect URI requirements](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri)
-- [Token refresh](https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens)
-- [Playlist items and access requirements](https://developer.spotify.com/documentation/web-api/reference/get-playlists-items)
-- [February 2026 migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)
-- [May 2026 stable account IDs](https://developer.spotify.com/documentation/web-api/references/changes/may-2026)
-- [July 2026 developer-account quota changes](https://developer.spotify.com/documentation/web-api/references/changes/july-2026)
+- [spotDL](https://github.com/spotDL/spotify-downloader)
+- [spotDL Spotify backend](https://github.com/spotDL/spotify-downloader/blob/v4.6.0/spotdl/utils/spotify.py)
+- [Spotify Authorization Code with PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
+- [Spotify redirect requirements](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri)
+- [Spotify playlist items](https://developer.spotify.com/documentation/web-api/reference/get-playlists-items)

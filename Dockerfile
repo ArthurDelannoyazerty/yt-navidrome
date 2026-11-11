@@ -13,11 +13,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
  && uv pip install --python /opt/ytdlp/bin/python --prerelease=allow \
       "yt-dlp[default]" "tenacity>=9,<10"
 
+# Spotify only discovers metadata and candidate URLs. Its dependency versions
+# must never change the working yt-dlp downloader or API/beets environment.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv --python /usr/local/bin/python /opt/spotdl \
+ && uv pip install --python /opt/spotdl/bin/python "spotdl==4.6.0"
+
 FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
     INGESTOR_STATE_DIR=/data/state NAVIDROME_LIB_DIR=/data/library \
-    YTDLP_PYTHON=/opt/ytdlp/bin/python UV_PYTHON_DOWNLOADS=never \
+    YTDLP_PYTHON=/opt/ytdlp/bin/python SPOTDL_PYTHON=/opt/spotdl/bin/python UV_PYTHON_DOWNLOADS=never \
     UV_CACHE_DIR=/data/state/uv-cache TZ=Europe/Paris
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools ca-certificates tzdata \
@@ -25,10 +31,13 @@ RUN apt-get update \
 COPY --from=ghcr.io/denoland/deno:bin-2.9.5 /deno /usr/local/bin/deno
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /opt/ytdlp /opt/ytdlp
+COPY --from=builder /opt/spotdl /opt/spotdl
 WORKDIR /app
 COPY beets.yaml ./
 COPY src/ ./src/
 COPY tools/ ./tools/
+RUN /opt/spotdl/bin/python /app/src/spotdl_bridge.py smoke --output /tmp/spotdl-smoke.json \
+ && rm /tmp/spotdl-smoke.json
 RUN useradd -m -u 1000 pipeline \
  && mkdir -p /data/state /data/library \
  && chown -R pipeline:pipeline /data /home/pipeline

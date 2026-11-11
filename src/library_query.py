@@ -28,6 +28,8 @@ def track_where(user: str, status: str = "ALL", query: str = ""):
         "SOURCE_METADATA": "t.metadata_source='source'",
         "MANUAL_METADATA": "t.metadata_edited=1",
         "UNKNOWN_METADATA": "t.metadata_source='unknown'",
+        "SOURCE_YOUTUBE": "EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.provider='youtube' AND o.is_discovery=1)",
+        "SOURCE_SPOTIFY": "EXISTS(SELECT 1 FROM track_origins o WHERE o.track_id=t.id AND o.provider='spotify' AND o.is_discovery=1)",
         "NEEDS_AUDIO": (
             "t.current_asset_id IS NULL AND EXISTS(SELECT 1 FROM track_origins o "
             "WHERE o.track_id=t.id AND o.provider='spotify') AND NOT EXISTS("

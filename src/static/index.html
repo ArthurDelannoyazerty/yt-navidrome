@@ -9,6 +9,7 @@
   <script src="/static/app.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/spotify-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/metadata-ui.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/help-ui.js?v=__STATIC_VERSION__" defer></script>
 <script src="/static/artwork-ui.js?v=__STATIC_VERSION__" defer></script>
 </head>
 <body>
@@ -70,7 +71,9 @@
           <option value="FAILED">Last operation failed</option>
           <option value="STOPPED">Downloads stopped</option>
           <option value="MISSING">Missing audio</option>
-          <option value="NEEDS_AUDIO">Spotify: needs audio link</option>
+          <option value="NEEDS_AUDIO">Spotify: waiting for audio</option>
+          <option value="SOURCE_YOUTUBE">Imported from YouTube</option>
+          <option value="SOURCE_SPOTIFY">Imported from Spotify</option>
           <option value="UNAVAILABLE">No audio yet</option>
           </optgroup>
         </select>
@@ -129,7 +132,9 @@
           <option value="FAILED">Last operation failed</option>
           <option value="STOPPED">Downloads stopped</option>
           <option value="MISSING">Missing audio</option>
-          <option value="NEEDS_AUDIO">Spotify: needs audio link</option>
+          <option value="NEEDS_AUDIO">Spotify: waiting for audio</option>
+          <option value="SOURCE_YOUTUBE">Imported from YouTube</option>
+          <option value="SOURCE_SPOTIFY">Imported from Spotify</option>
           <option value="UNAVAILABLE">No audio yet</option>
           </optgroup>
         </select></label>
@@ -167,7 +172,7 @@
       <div id="approvalMetadata" class="approval-metadata">
         <section class="approval-matches" aria-labelledby="beetsHeading">
           <h3 id="beetsHeading">Beets matches</h3>
-          <div class="table-scroll"><table class="approval-table"><thead><tr><th scope="col">Track</th><th scope="col">Artist</th><th scope="col">Duration</th><th scope="col" title="Beets similarity, not a probability">Match</th><th scope="col"><span class="sr-only">Action</span></th></tr></thead><tbody id="metadataSuggestions"></tbody></table></div>
+          <div class="table-scroll"><table class="approval-table beets-table"><thead><tr><th scope="col"><span class="sr-only">Action</span></th><th scope="col">Track</th><th scope="col">Artist</th><th scope="col">Duration</th><th scope="col" title="Beets similarity, not a probability">Match</th></tr></thead><tbody id="metadataSuggestions"></tbody></table></div>
           <p id="beetsEmpty" class="hint" hidden>No detected matches.</p>
         </section>
         <button id="sourceMetadataApply" type="button" class="secondary approval-source" disabled>Use original source metadata</button>
@@ -205,11 +210,11 @@
 
   <section class="panel" data-panel="sources" hidden>
     <div class="panel-heading"><div><h2>Sources</h2><p class="hint">Import a link once, or keep a playlist in sync.</p></div><button id="syncAll" class="secondary">Sync monitored sources</button></div>
-    <details class="subpanel spotify-panel"><summary>Spotify connection</summary>
+    <details class="subpanel spotify-panel"><summary>Optional Spotify account connection &amp; audio recovery</summary>
       <div class="panel-heading compact"><div><h3>Spotify sources</h3><p id="spotifyStatus" class="hint">Loading Spotify connection...</p></div>
         <div class="row"><button id="spotifyConnect" type="button" class="secondary" disabled>Connect Spotify</button><button id="spotifyDisconnect" type="button" class="secondary" disabled>Disconnect</button></div>
       </div>
-      <p class="hint">Spotify imports need a link to audio from your library or YouTube.</p>
+      <p class="hint">Paste a public Spotify URL below to scan and import music automatically. Connect an account only to browse your playlists or access eligible private playlists. Library matching and manual audio links are available for recovery.</p>
       <div class="row"><button id="spotifyBrowse" type="button" class="secondary" disabled>Browse my playlists</button><button id="spotifyReviewMatches" type="button">Review library matches</button></div>
     </details>
     <div class="columns">
@@ -256,10 +261,11 @@
         <div id="integrityIssues" class="issue-list"></div>
       </div>
       <div class="subpanel">
-        <h3>Downloader runtime</h3>
+        <h3>Import runtimes</h3>
         <dl id="runtime"></dl>
-        <div class="row"><button id="update" class="secondary">Update nightly build now</button><button id="rollback" class="secondary">Roll back</button></div>
-        <p class="hint">Future downloads switch runtimes atomically. Running downloads and FastAPI are not restarted.</p>
+        <div class="row"><button id="update" class="secondary">Update yt-dlp nightly</button><button id="rollback" class="secondary">Roll back yt-dlp</button></div>
+        <div class="row"><button id="spotdlUpdate" class="secondary">Update spotDL</button><button id="spotdlRollback" class="secondary">Roll back spotDL</button></div>
+        <p class="hint">yt-dlp downloads audio. spotDL scans Spotify and finds audio candidates. Updates switch future operations atomically; running work and FastAPI continue unchanged.</p>
       </div>
     </div>
 
@@ -267,19 +273,20 @@
   <section class="panel help-panel" data-panel="help" hidden>
     <div class="panel-heading"><div><span class="eyebrow">QUICK GUIDE</span><h2>Import now. Organize when you’re ready.</h2></div></div>
     <ol class="quick-start" aria-label="Music ingestion workflow">
-      <li><strong>1. Add a source</strong><p>Open Sources and paste a YouTube video or playlist. Monitor a playlist to import new additions.</p></li>
+      <li><strong>1. Add a source</strong><p>Open Sources and paste a YouTube or public Spotify playlist URL. Monitor a playlist to import new additions. Spotify tracks automatically look for matching YouTube audio.</p></li>
       <li><strong>2. Listen in Navidrome</strong><p>Downloaded songs appear in <b>Waiting for approval</b> and their playlists after Navidrome scans your library.</p></li>
-      <li><strong>3. Review the metadata</strong><p>Choose a suggested match and Approve, search MusicBrainz, or keep the original source tags. The approved file replaces the temporary copy.</p></li>
+      <li><strong>3. Review the metadata</strong><p>Choose a suggested match with Use, search MusicBrainz, or keep the original source tags. The approved file replaces the temporary copy.</p></li>
     </ol>
     <h3>From import to approval</h3>
-    <p class="hint">Follow the numbered steps for the usual path. The sections below explain retries, stopped downloads and other transitions.</p>
+    <p class="hint">YouTube and Spotify share the same download, identification and approval workflow. Follow the arrows to see what happens next.</p>
     <div class="workflow-guide" role="group" aria-label="Track operation states and transitions">
-      <ol class="workflow-main">
-        <li><strong>Queued</strong><span>Waiting for the worker</span></li>
-        <li><strong>Processing</strong><span>Download and identify</span></li>
-        <li><strong>Waiting for approval</strong><span>Listen and review the metadata</span></li>
-        <li><strong>Apply and finish</strong><span>Approval queues the worker again; success leaves the track idle</span></li>
-      </ol>
+      <figure class="workflow-diagram">
+        <div id="workflowDiagram" aria-label="Music operation states"></div>
+        <div id="workflowZoom" class="workflow-zoom" role="group" aria-label="Diagram zoom" hidden><button id="workflowZoomOut" type="button" class="secondary" aria-label="Zoom out">−</button><button id="workflowZoomIn" type="button" class="secondary" aria-label="Zoom in">+</button><button id="workflowZoomReset" type="button" class="secondary">Reset zoom</button></div>
+        <p id="workflowDiagramStatus" class="hint" role="status">The workflow diagram loads when you open Help.</p>
+        <figcaption>Approval queues the worker to apply your choice. A successful operation ends at Idle. Queued or deferred work can also stop when you cancel an audio search or disable its URL; a shared download pause can defer queued work. On a small screen, use the + button or pinch to zoom.</figcaption>
+      </figure>
+      <p class="workflow-audio-note"><strong>Audio availability is separate.</strong> Playable means a local file exists, including temporary audio while you review it. Missing means an expected file needs redownloading; No audio means no local file is available. Retrying or replacing a track keeps existing audio playable until the replacement succeeds.</p>
       <div class="workflow-exceptions">
         <section><h4>Temporary problem</h4><p><strong>Processing → Deferred → Processing</strong></p><p>The displayed retry time controls the next attempt. A shared YouTube pause can also move queued work directly to Deferred. Repeated download failures eventually need your attention.</p></section>
         <section><h4>Source cannot be downloaded</h4><p><strong>Download work → Stopped</strong></p><p>Use Stop retrying this URL, or let a restricted-video error stop it automatically. Choose another URL, or enable the old one before retrying. Existing audio stays playable.</p></section>
@@ -297,8 +304,8 @@
           <tr><td>Deferred</td><td>The retry time arrives and the worker claims the job</td><td>Processing</td></tr>
           <tr><td>Processing</td><td>An error needs your attention</td><td>Failed</td></tr>
           <tr><td>Failed</td><td>You choose Retry</td><td>Queued</td></tr>
-          <tr><td>Queued / Deferred / Processing</td><td>You disable the download URL, or a source restriction stops the download. A file already being published finishes safely.</td><td>Stopped when cancellation finishes</td></tr>
-          <tr><td>Stopped</td><td>You choose another URL, or enable the source and Retry</td><td>Queued</td></tr>
+          <tr><td>Queued / Deferred / Processing</td><td>You cancel a waiting Spotify audio search, disable the download URL, or a source restriction stops the download. A file already being published finishes safely.</td><td>Stopped when cancellation finishes</td></tr>
+          <tr><td>Stopped</td><td>You retry the audio search, choose another URL, or enable the source and Retry</td><td>Queued</td></tr>
           <tr><td>Idle</td><td>You request an operation, or monitored sync finds missing audio</td><td>Queued</td></tr>
           <tr><td>Processing</td><td>The application restarts and recovers interrupted work</td><td>Queued</td></tr>
         </tbody></table>
@@ -309,7 +316,7 @@
       <dl class="help-definitions">
         <dt>Playable / AVAILABLE</dt><dd>A local file is available, including temporary audio.</dd>
         <dt>Missing / MISSING</dt><dd>A file expected in your library is missing. Use Redownload.</dd>
-        <dt>No audio / UNAVAILABLE</dt><dd>No file has been downloaded. Spotify-only entries need Link audio.</dd>
+        <dt>No audio / UNAVAILABLE</dt><dd>No local file is available yet. Spotify audio lookup runs automatically; use Link audio if it needs help.</dd>
         <dt>Queued / QUEUED</dt><dd>The worker will start when earlier jobs finish.</dd>
         <dt>Processing / RUNNING</dt><dd>A download or metadata operation is running.</dd>
         <dt>Waiting / NEEDS_APPROVAL</dt><dd>Review the suggested metadata, search for another match, or use source tags.</dd>
@@ -338,9 +345,10 @@
         <dt>Verify / Repair tags</dt><dd>Check files and metadata, then repair eligible tags without downloading audio again.</dd>
       </dl>
     </details>
-    <details class="help-detail"><summary>Spotify imports and connection setup</summary>
-      <p>Spotify supplies track names and playlists. Connect your account in Sources, then use <strong>Link audio</strong> to choose an existing recording or import a YouTube video. Spotify does not supply downloadable audio.</p>
-      <details class="spotify-setup"><summary>Connection setup and Spotify access limits</summary>
+    <details class="help-detail"><summary>Spotify imports and optional connection setup</summary>
+      <p>Paste a <strong>public Spotify playlist URL</strong> in Sources, just like a YouTube playlist. No Spotify account connection is needed for public imports. The app reads track metadata with spotDL, finds matching YouTube audio, then uses the normal downloader, beets identification and Approval tab. Spotify itself does not supply downloadable audio.</p>
+      <p>Monitor the playlist to scan new additions. The original Spotify link stays with each track, so you can filter music by source. If an automatic audio match needs help, use <strong>Link audio</strong> to choose a recording in your library or supply a YouTube video.</p>
+      <details class="spotify-setup"><summary>Optional account connection and private playlists</summary>
         <p>Create an app in the Spotify Developer Dashboard. Set <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code> in your server environment, then restart. A client secret is not required.</p>
         <p>Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code></p>
         <p>Use HTTPS, or HTTP with an explicit loopback IP for local development. Spotify does not accept localhost. Development-mode apps require an eligible Premium app owner and allowlisted users. Playlist contents are available only for playlists you own or collaborate on.</p>

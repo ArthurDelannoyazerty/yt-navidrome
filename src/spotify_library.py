@@ -1,7 +1,8 @@
-"""Explicit Spotify-to-library links, serialized by the existing durable worker.
+"""Spotify-to-library links, serialized by the existing durable worker.
 
-Spotify metadata never establishes MusicBrainz identity or a downloadable origin.
-Name matches are suggestions which require the user's confirmation.
+Spotify metadata never establishes MusicBrainz identity. spotDL may select a
+separate YouTube audio origin; its bytes use the normal download/approval path.
+Name-only library matches still require the user's confirmation.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from pathlib import Path
 from common import utcnow
 from runtime import DeferredOperation
 
-MODES = {"spotify_link", "spotify_audio"}
+MODES = {"spotify_link", "spotify_audio", "spotify_resolve"}
 
 
 def normalized(title):
@@ -133,9 +134,15 @@ def cancel_waiting(store, track_id, user):
         job = con.execute("SELECT * FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')", (track_id,)).fetchone()
         if not job or job["state"] != "PENDING" or json.loads(job["payload"]).get("mode") not in MODES:
             raise ValueError("Only a waiting Spotify link can be cancelled")
-        con.execute("UPDATE jobs SET state='CANCELLED',finished_at=? WHERE id=?", (utcnow(), job["id"]))
-        con.execute("UPDATE tracks SET operation_state='IDLE',operation_kind=NULL,operation_error=NULL,updated_at=? WHERE id=?", (utcnow(), track_id))
-    return {"message": "Waiting link cancelled; independently queued YouTube imports were not cancelled"}
+        resolving = json.loads(job["payload"]).get("mode") == "spotify_resolve"
+        con.execute("UPDATE jobs SET state='CANCELLED',cancel_requested=?,finished_at=? WHERE id=?", (int(resolving), utcnow(), job["id"]))
+        con.execute("UPDATE tracks SET operation_state=?,operation_kind=?,operation_error=?,updated_at=? WHERE id=?", (
+            "STOPPED" if resolving else "IDLE", "SPOTIFY_RESOLVE" if resolving else None,
+            "Automatic audio search stopped by user; Retry audio search starts it again" if resolving else None,
+            utcnow(), track_id,
+        ))
+    return {"message": ("Automatic audio search stopped. Use Retry audio search to restart it." if resolving
+                        else "Waiting link cancelled; independently queued YouTube imports were not cancelled")}
 
 
 def audio_target(store, user, payload):
@@ -224,3 +231,134 @@ async def process_link(pipeline, job, directory):
     except Exception as exc:
         # Completion stays retryable even after deleting the metadata placeholder.
         raise DeferredOperation(f"Spotify link committed; finalization will retry: {exc}") from exc
+
+
+async def process_resolution(pipeline, job, directory):
+    """Resolve one Spotify track, then resume the ordinary durable audio job.
+
+    The selection is persisted before waiting for an existing import. Attaching
+    the transport origin and changing the job payload is a single transaction,
+    so restart/retry cannot resolve another video or download the same one twice.
+    """
+    from providers import parse_source
+    from store import JobCancelled
+
+    store = pipeline.store
+    current_job = store.one("SELECT * FROM jobs WHERE id=?", (job["id"],))
+    if not current_job:
+        raise JobCancelled("Spotify resolution was removed")
+    payload = json.loads(current_job["payload"])
+    if payload.get("mode") != "spotify_resolve":
+        return current_job
+    operation = payload["operation"]
+    receipt = store.operation_receipt(operation)
+    if receipt:
+        try:
+            await finish_link(pipeline, job, receipt, directory)
+        except Exception as exc:
+            raise DeferredOperation(f"Spotify link committed; finalization will retry: {exc}") from exc
+        return None
+    with store.db() as con:
+        source, origin = metadata_only(con, job["target"], job["user_id"])
+    if origin["id"] != payload["origin_id"]:
+        raise ValueError("Spotify source changed; retry this track")
+    pipeline.checkpoint(job, "resolving")
+    store.set_operation(source["id"], "RUNNING", "spotify_resolve")
+    resolved = payload.get("resolved_audio")
+    if not resolved:
+        circuit = pipeline.downloader.circuit_status()
+        if circuit["open"]:
+            raise DeferredOperation("YouTube audio search is paused with the download cooldown", retry_at=circuit["until"])
+        resolved = await pipeline.spotdl.resolve_audio(origin["url"], pipeline.report(job))
+        pipeline.checkpoint(job)
+        if not isinstance(resolved, dict):
+            raise ValueError("spotDL returned an invalid audio match")
+        payload["resolved_audio"] = resolved
+        store.update("jobs", job["id"], payload=json.dumps(payload))
+    ref = parse_source(resolved.get("url", ""))
+    if ref.provider != "youtube" or ref.is_playlist:
+        raise ValueError("spotDL must return one YouTube video for each Spotify track")
+    key = ref.key.split(":", 1)[1]
+    with store.db() as con:
+        if store._origin_ignored(con, job["user_id"], "youtube", key):
+            raise ValueError("The matching YouTube URL is ignored. Choose another audio URL or restore it before retrying")
+    existing = store.one("SELECT * FROM track_origins WHERE user_id=? AND provider='youtube' AND media_key=?",
+                         (job["user_id"], key))
+    target = None
+    if existing and existing["track_id"] != source["id"]:
+        target = store.owned("tracks", existing["track_id"], job["user_id"])
+        if target["operation_state"] in {"FAILED", "STOPPED"}:
+            raise ValueError("The matching YouTube track has a failed or stopped operation. Retry it or choose another audio URL")
+        if target["operation_state"] != "IDLE":
+            raise DeferredOperation("Waiting for the existing YouTube track to finish processing or approval")
+        if not target["current_asset_id"] or not await pipeline.usable_asset(target, store.current_asset(target["id"])):
+            if not existing["download_enabled"]:
+                raise ValueError("The matching YouTube URL is disabled. Enable it or choose another audio URL")
+            store.queue_track(target["id"], job["user_id"], {"mode": "ingest", "origin_id": existing["id"]})
+            raise DeferredOperation("Queued the existing YouTube track for audio; waiting for its processing and approval")
+    pipeline.checkpoint(job)
+    now = utcnow()
+    with store.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        fresh_job = con.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone()
+        if not fresh_job or fresh_job["cancel_requested"] or fresh_job["state"] == "CANCELLED":
+            raise JobCancelled("Spotify resolution was cancelled")
+        metadata_only(con, source["id"], job["user_id"])
+        if store._origin_ignored(con, job["user_id"], "youtube", key):
+            raise ValueError("The matching YouTube URL was ignored during resolution")
+        latest_origin = con.execute("SELECT * FROM track_origins WHERE user_id=? AND provider='youtube' AND media_key=?",
+                                    (job["user_id"], key)).fetchone()
+        if target:
+            latest = con.execute("SELECT * FROM tracks WHERE id=? AND user_id=?", (target["id"], job["user_id"])).fetchone()
+            if (not latest or not latest_origin or latest_origin["track_id"] != target["id"]
+                    or latest["operation_state"] != "IDLE" or latest["mbid"] != target["mbid"]
+                    or latest["current_asset_id"] != target["current_asset_id"]
+                    or con.execute("SELECT 1 FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')", (target["id"],)).fetchone()):
+                raise DeferredOperation("The matching library track changed; retrying the link later")
+            con.execute("UPDATE track_origins SET track_id=? WHERE id=?", (target["id"], origin["id"]))
+            audio_id = latest_origin["id"]
+            store._recompute_discovery_locked(con, target["id"])
+            con.execute("UPDATE tracks SET operation_state='RUNNING',operation_kind='SPOTIFY_LINK',updated_at=? WHERE id=?", (now, target["id"]))
+            store._record_receipt_locked(con, operation, job["user_id"], source["id"], target["id"], "spotify_resolve", {
+                "kind": "SPOTIFY_LINKED", "source_id": source["id"], "target_id": target["id"],
+                "asset_id": target["current_asset_id"], "mbid": target["mbid"],
+            })
+        else:
+            if latest_origin and latest_origin["track_id"] != source["id"]:
+                raise DeferredOperation("The matching YouTube URL was imported concurrently; retrying its association")
+            if latest_origin and not latest_origin["download_enabled"]:
+                raise ValueError("The matching YouTube URL is disabled. Enable it or choose another audio URL")
+            audio_id = latest_origin["id"] if latest_origin else str(uuid.uuid4())
+            if not latest_origin:
+                con.execute(
+                    """INSERT INTO track_origins(id,track_id,user_id,provider,media_key,url,title,channel,
+                       downloadable,is_discovery,first_seen_at,last_seen_at)
+                       VALUES (?,?,?,'youtube',?,?,?,?,1,0,?,?)""",
+                    (audio_id, source["id"], job["user_id"], key, ref.url,
+                     resolved.get("title") or origin["title"], resolved.get("channel"), now, now),
+                )
+            # Keep the same operation ID: normal downloader receipts, source
+            # cancellation, rate limits and candidate-hash approval now apply.
+            payload = {"mode": "ingest", "origin_id": audio_id, "operation": operation,
+                       "spotify_origin_id": origin["id"]}
+            con.execute("UPDATE jobs SET payload=?,stage='queued' WHERE id=?", (json.dumps(payload), job["id"]))
+            con.execute("UPDATE tracks SET operation_kind='INGEST',operation_error=NULL,updated_at=? WHERE id=?", (now, source["id"]))
+        con.execute(
+            """INSERT INTO spotify_audio_links(spotify_origin_id,audio_origin_id,resolver_version,resolved_metadata,resolved_at)
+               VALUES (?,?,?,?,?) ON CONFLICT(spotify_origin_id) DO UPDATE SET
+               audio_origin_id=excluded.audio_origin_id,resolver_version=excluded.resolver_version,
+               resolved_metadata=excluded.resolved_metadata,resolved_at=excluded.resolved_at""",
+            (origin["id"], audio_id, resolved.get("version"), json.dumps({**resolved, "selected_by": "spotdl"}), now),
+        )
+    if target:
+        try:
+            await finish_link(pipeline, job, store.operation_receipt(operation), directory)
+        except Exception as exc:
+            raise DeferredOperation(f"Spotify link committed; finalization will retry: {exc}") from exc
+        return None
+    pipeline.report(job)("INFO", "Matched Spotify metadata to a YouTube audio source; queued normal audio and metadata review")
+    updated = store.one("SELECT * FROM jobs WHERE id=?", (job["id"],))
+    # Keep the worker's in-memory payload in step with the durable transition,
+    # including its error/retry reporting and receipt follow-up behavior.
+    job.update(updated)
+    return updated

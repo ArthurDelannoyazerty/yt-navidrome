@@ -15,6 +15,56 @@ MAX_ITEMS = 10000
 class Spotify:
     name = "spotify"
 
+    @staticmethod
+    def public_snapshot(source, data, report):
+        """Accept only a complete, validated metadata snapshot from the bridge."""
+        from providers import Entry, Snapshot
+
+        entries = data.get("entries")
+        total, skipped = data.get("total_items"), data.get("skipped")
+        if (data.get("complete") is not True or data.get("provider") != "spotify"
+                or data.get("url") != source["url"]
+                or not isinstance(data.get("title"), str) or not data["title"].strip()
+                or not isinstance(entries, list) or type(total) is not int
+                or type(skipped) is not int or not 0 <= total <= MAX_ITEMS
+                or skipped < 0 or len(entries) + skipped != total):
+            raise ApiDeferred("Spotify returned an incomplete snapshot; previous playlist contents were retained")
+        if source["source_key"].startswith("playlist:") and not data.get("revision"):
+            raise ApiDeferred("Spotify returned no playlist revision; previous playlist contents were retained")
+        direct_id = source["source_key"].split(":", 1)[1] if source["source_key"].startswith("track:") else None
+        if direct_id and (total != 1 or skipped != 0 or len(entries) != 1):
+            raise ApiDeferred("Spotify did not return the requested track")
+        result, positions = [], set()
+        for row in entries:
+            if not isinstance(row, dict):
+                raise ApiDeferred("Spotify returned an invalid track entry")
+            key, position = row.get("key"), row.get("position")
+            artists, title = row.get("artists"), row.get("title")
+            if (not isinstance(key, str) or not re.fullmatch(ID, key)
+                    or (direct_id is not None and key != direct_id)
+                    or row.get("url") != f"https://open.spotify.com/track/{key}"
+                    or type(position) is not int or not 0 <= position < total
+                    or position in positions or row.get("entry_id") != f"spotify:{position}"
+                    or not isinstance(title, str) or not title.strip()
+                    or not isinstance(artists, list) or not artists
+                    or not all(isinstance(artist, str) and artist.strip() for artist in artists)):
+                raise ApiDeferred("Spotify returned invalid or repeated playlist occurrences; snapshot rejected")
+            positions.add(position)
+            added = row.get("added_at")
+            basis = row.get("basis")
+            if basis not in {"playlist_added", "first_seen"} or (basis == "playlist_added" and not added):
+                raise ApiDeferred("Spotify returned an invalid discovery-date basis")
+            if added is not None:
+                try:
+                    added = timestamp(added)
+                except (ValueError, TypeError, AttributeError):
+                    raise ApiDeferred("Spotify returned an invalid playlist addition time") from None
+            result.append(Entry(key, row["url"], title, added, row["entry_id"], position,
+                                basis, False, ", ".join(artists), resolve_audio=True))
+        if skipped:
+            report("WARNING", f"Skipped {skipped} Spotify local, podcast or unavailable item(s)")
+        return Snapshot(data["title"], result)
+
     def parse(self, url):
         from providers import SourceRef
         if url.startswith("spotify:"):

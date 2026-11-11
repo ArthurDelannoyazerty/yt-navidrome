@@ -729,7 +729,7 @@ function renderTrack(track) {
   health.append(stateBadge);
   if (track.temporary_candidate_sha256) health.append(node("small", "Playable · temporary album", "availability"));
   else if (track.health === "AVAILABLE" && status !== "AVAILABLE") health.append(node("small", "Current audio is playable", "availability"));
-  if (!track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable && originDownloadsEnabled(o))) stateBadge.textContent = "Needs audio link";
+  if (track.operation_state === "IDLE" && !track.current_asset_id && track.origins.some(o => o.provider === "spotify") && !track.origins.some(o => o.downloadable && originDownloadsEnabled(o))) stateBadge.textContent = "Waiting for audio";
   if (track.operation_state === "DEFERRED" && track.retry_at) {
     health.append(node("div", `Retry after ${new Date(track.retry_at * 1000).toLocaleString()}`, "hint"));
   }
@@ -1003,10 +1003,15 @@ async function loadSystem(background = true) {
     ["Beets", data.beets],
     ["yt-dlp", data.downloader.version || data.downloader.error],
     ["YouTube downloads", youtubeStatus],
-    ["Next update", when(data.next_update)],
-    ["Last update", data.last_update ? `${data.last_update.status}${data.last_update.error ? `: ${data.last_update.error}` : ""}` : "Bundled runtime"],
+    ["Next yt-dlp update", when(data.next_update)],
+    ["Last yt-dlp update", data.last_update ? `${data.last_update.status}${data.last_update.error ? `: ${data.last_update.error}` : ""}` : "Bundled runtime"],
+    ["spotDL", data.spotdl?.version || data.spotdl?.error || "Not installed"],
+    ["Next spotDL update", when(data.spotdl_next_update)],
+    ["Last spotDL update", data.spotdl_last_update ? `${data.spotdl_last_update.status}${data.spotdl_last_update.error ? `: ${data.spotdl_last_update.error}` : ""}` : "Bundled runtime"],
   ];
   $("runtime").replaceChildren(...values.flatMap(([label, value]) => [node("dt", label), node("dd", value)]));
+  $("update").disabled = $("rollback").disabled = data.last_update?.status === "RUNNING";
+  $("spotdlUpdate").disabled = $("spotdlRollback").disabled = data.spotdl_last_update?.status === "RUNNING";
   state.systemSignature = signature;
 }
 
@@ -1304,6 +1309,17 @@ $("update").addEventListener("click", guard(async () => {
 $("rollback").addEventListener("click", guard(async () => {
   if (!confirm("Switch future downloads to the previous yt-dlp runtime?")) return;
   const result = await api("/api/downloader/rollback", {});
+  notice(result.message);
+  await loadSystem(false);
+}));
+$("spotdlUpdate").addEventListener("click", guard(async () => {
+  const result = await api("/api/spotdl/update", {});
+  notice(result.message);
+  await loadSystem(false);
+}));
+$("spotdlRollback").addEventListener("click", guard(async () => {
+  if (!confirm("Switch future Spotify scans and audio searches to the previous spotDL runtime?")) return;
+  const result = await api("/api/spotdl/rollback", {});
   notice(result.message);
   await loadSystem(false);
 }));

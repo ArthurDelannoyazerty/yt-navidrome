@@ -19,7 +19,7 @@ from library_query import track_where
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, correction_revision, prepare_correction
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class JobCancelled(RuntimeError):
@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS track_origins (
  title TEXT NOT NULL,
  channel TEXT,
  downloadable INTEGER NOT NULL DEFAULT 1,
+ is_discovery INTEGER NOT NULL DEFAULT 1,
  availability TEXT NOT NULL DEFAULT 'UNKNOWN',
  download_enabled INTEGER NOT NULL DEFAULT 1,
  disabled_at TEXT,
@@ -104,6 +105,15 @@ CREATE TABLE IF NOT EXISTS track_origins (
  UNIQUE(user_id, provider, media_key)
 );
 CREATE INDEX IF NOT EXISTS origin_track ON track_origins(track_id);
+
+CREATE TABLE IF NOT EXISTS spotify_audio_links (
+ spotify_origin_id TEXT PRIMARY KEY REFERENCES track_origins(id) ON DELETE CASCADE,
+ audio_origin_id TEXT NOT NULL REFERENCES track_origins(id) ON DELETE CASCADE,
+ resolver_version TEXT,
+ resolved_metadata TEXT NOT NULL DEFAULT '{}',
+ resolved_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS spotify_audio_origin ON spotify_audio_links(audio_origin_id);
 
 CREATE TABLE IF NOT EXISTS origin_identity_rejections (
  origin_id TEXT NOT NULL REFERENCES track_origins(id) ON DELETE CASCADE,
@@ -258,6 +268,7 @@ CREATE TABLE IF NOT EXISTS quota (
 """
 
 DROP_ORDER = [
+    "spotify_audio_links",
     "artwork_preferences", "artwork_candidates",
     "metadata_artist_aliases",
     "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
@@ -344,7 +355,7 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, 1, 2, 3, 4, 5, 6, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
@@ -422,9 +433,14 @@ class Store:
                 con.execute("PRAGMA user_version=6")
                 con.commit()
 
-            if version == 6:
-                self.backup_database("schema-v6")
-            con.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + METADATA_SCHEMA + ARTWORK_SCHEMA
+            spotify_migration = ""
+            if version in (1, 2, 3, 4, 5, 6, 7):
+                migration_version = con.execute("PRAGMA user_version").fetchone()[0]
+                self.backup_database(f"schema-v{migration_version}")
+                columns = {row["name"] for row in con.execute("PRAGMA table_info(track_origins)")}
+                if "is_discovery" not in columns:
+                    spotify_migration = "ALTER TABLE track_origins ADD COLUMN is_discovery INTEGER NOT NULL DEFAULT 1;\n"
+            con.executescript("BEGIN IMMEDIATE;\n" + spotify_migration + SCHEMA + METADATA_SCHEMA + ARTWORK_SCHEMA
                               + f"\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;")
             con.executemany(
                 "INSERT OR IGNORE INTO users VALUES (?)",
@@ -934,6 +950,7 @@ class Store:
             con.execute("DELETE FROM memberships WHERE source_id=?", (source["id"],))
             touched: set[str] = set()
             for entry in snapshot.entries:
+                resolve_audio = source["provider"] == "spotify" and getattr(entry, "resolve_audio", False)
                 if self._origin_ignored(con, source["user_id"], source["provider"], entry.key):
                     stats["ignored"] += 1
                     continue
@@ -947,11 +964,11 @@ class Store:
                 if origin is None:
                     track_id = str(uuid.uuid4())
                     origin_id = str(uuid.uuid4())
-                    first_seen = entry.added_at if entry.basis == "first_seen" else now
+                    first_seen = (entry.added_at or now) if entry.basis == "first_seen" else now
                     discovered = playlist_added or first_seen
                     basis = "playlist_added" if playlist_added else "first_seen"
-                    operation_state = "QUEUED" if entry.downloadable else "IDLE"
-                    operation_kind = "INGEST" if entry.downloadable else None
+                    operation_state = "QUEUED" if entry.downloadable or resolve_audio else "IDLE"
+                    operation_kind = "INGEST" if entry.downloadable else "SPOTIFY_RESOLVE" if resolve_audio else None
                     con.execute(
                         """INSERT INTO tracks(
                            id,user_id,title,first_seen_at,playlist_discovered_at,
@@ -971,6 +988,8 @@ class Store:
                     )
                     if entry.downloadable:
                         self.enqueue("track", track_id, source["user_id"], {"mode": "ingest", "origin_id": origin_id}, con=con)
+                    elif resolve_audio:
+                        self.enqueue("track", track_id, source["user_id"], {"mode": "spotify_resolve", "origin_id": origin_id}, con=con)
                     stats["created"] += 1
                 else:
                     track_id = origin["track_id"]
@@ -978,7 +997,7 @@ class Store:
                     first_seen = _earliest(origin["first_seen_at"], entry.added_at if entry.basis == "first_seen" else now)
                     origin_playlist = _earliest(origin["playlist_discovered_at"], playlist_added)
                     con.execute(
-                        """UPDATE track_origins SET url=?,title=?,channel=COALESCE(NULLIF(?,''),channel),downloadable=?,
+                        """UPDATE track_origins SET url=?,title=?,channel=COALESCE(NULLIF(?,''),channel),downloadable=?,is_discovery=1,
                            first_seen_at=?,playlist_discovered_at=?,last_seen_at=? WHERE id=?""",
                         (entry.url, entry.title, entry.channel, int(entry.downloadable), first_seen, origin_playlist, now, origin_id),
                     )
@@ -990,7 +1009,17 @@ class Store:
                                 """UPDATE tracks SET operation_state='QUEUED',operation_kind='INGEST',
                                    operation_error=NULL,updated_at=? WHERE id=?""", (now, track_id),
                             )
-                con.execute("INSERT INTO memberships VALUES (?,?,?,?,?)", (source["id"], entry.entry_id, origin_id, entry.added_at, entry.position))
+                    elif (resolve_audio and origin["operation_state"] == "IDLE" and not origin["file_path"]
+                          and not con.execute("SELECT 1 FROM assets WHERE track_id=?", (track_id,)).fetchone()
+                          and not con.execute("SELECT 1 FROM track_origins WHERE track_id=? AND id<>?", (track_id, origin_id)).fetchone()):
+                        if self.enqueue("track", track_id, source["user_id"], {"mode": "spotify_resolve", "origin_id": origin_id}, con=con):
+                            con.execute(
+                                "UPDATE tracks SET operation_state='QUEUED',operation_kind='SPOTIFY_RESOLVE',operation_error=NULL,updated_at=? WHERE id=?",
+                                (now, track_id),
+                            )
+                # An observed scan time is not evidence of a playlist addition.
+                membership_added = playlist_added if source["is_playlist"] else entry.added_at
+                con.execute("INSERT INTO memberships VALUES (?,?,?,?,?)", (source["id"], entry.entry_id, origin_id, membership_added, entry.position))
                 touched.add(track_id)
             for track_id in touched:
                 changed = self._recompute_discovery_locked(con, track_id)
@@ -1065,10 +1094,22 @@ class Store:
                 payload = prepare_correction(con, track, payload)
                 mode = payload["mode"]
             if mode == "retry":
-                if track["operation_state"] not in {"FAILED", "STOPPED"}:
+                spotify_origin = con.execute(
+                    """SELECT o.* FROM track_origins o WHERE o.track_id=? AND o.provider='spotify'
+                       AND o.downloadable=0 AND NOT EXISTS(SELECT 1 FROM track_origins other WHERE other.track_id=o.track_id AND other.id<>o.id)
+                       AND NOT EXISTS(SELECT 1 FROM assets a WHERE a.track_id=o.track_id)""", (track_id,),
+                ).fetchone()
+                if track["operation_state"] not in {"FAILED", "STOPPED"} and not (
+                    spotify_origin and track["operation_state"] == "IDLE" and not track["file_path"]
+                ):
                     raise ValueError("Only a failed or stopped operation can be retried")
                 previous = con.execute("SELECT payload FROM jobs WHERE kind='track' AND target=? AND state IN ('FAILED','CANCELLED') ORDER BY id DESC LIMIT 1", (track_id,)).fetchone()
-                payload = json.loads(previous["payload"]) if previous else {"mode": "ingest"}
+                if previous and track["operation_state"] != "IDLE":
+                    payload = json.loads(previous["payload"])
+                elif spotify_origin:
+                    payload = {"mode": "spotify_resolve", "origin_id": spotify_origin["id"]}
+                else:
+                    payload = {"mode": "ingest"}
                 mode = payload.get("mode", "ingest")
                 action = payload.get("action") or payload.get("pending_action") or mode
                 if mode in {"ingest", "redownload", "reprocess", "replace_source", "resume"} and action != "refresh_suggestions":
@@ -1290,7 +1331,7 @@ class Store:
             self.update("tracks", track_id, operation_state="FAILED", operation_kind=kind.upper(),
                         operation_error=redact(error), updated_at=utcnow())
 
-    def identity_plan(self, track_id: str, origin_id: str, selected: dict, action: str):
+    def identity_plan(self, track_id: str, origin_id: str, selected: dict, action: str, *, replacement=False):
         with self.db() as con:
             track = con.execute("SELECT * FROM tracks WHERE id=?", (track_id,)).fetchone()
             origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=?", (origin_id, track_id)).fetchone()
@@ -1303,14 +1344,34 @@ class Store:
             existing = None
             if mbid:
                 existing = con.execute("SELECT * FROM tracks WHERE user_id=? AND mbid=? AND id<>?", (track["user_id"], mbid, track_id)).fetchone()
-            count = con.execute("SELECT COUNT(*) FROM track_origins WHERE track_id=?", (track_id,)).fetchone()[0]
+            related_audio_ids = {origin_id}
+            if replacement:
+                if track["current_origin_id"]:
+                    related_audio_ids.add(track["current_origin_id"])
+                elif not track["current_asset_id"]:
+                    initial = con.execute(
+                        """SELECT DISTINCT l.audio_origin_id FROM spotify_audio_links l
+                           JOIN track_origins o ON o.id=l.spotify_origin_id WHERE o.track_id=?""", (track_id,),
+                    ).fetchall()
+                    if len(initial) == 1:
+                        related_audio_ids.add(initial[0]["audio_origin_id"])
+            marks = ",".join("?" for _ in related_audio_ids)
+            linked = con.execute(
+                f"""SELECT o.* FROM spotify_audio_links l JOIN track_origins o ON o.id=l.spotify_origin_id
+                    WHERE l.audio_origin_id IN ({marks}) AND o.track_id=?""", (*related_audio_ids, track_id),
+            ).fetchall()
+            moving_first = _earliest(origin["first_seen_at"], *(o["first_seen_at"] for o in linked))
+            moving_playlist = _earliest(origin["playlist_discovered_at"], *(o["playlist_discovered_at"] for o in linked))
+            # One Spotify import and its selected audio are one identity group.
+            # Only independent origins require an identity correction to split.
+            count = con.execute("SELECT COUNT(*) FROM track_origins WHERE track_id=?", (track_id,)).fetchone()[0] - len(linked)
             route = "in_place"
             working = dict(track)
             if existing:
                 route = "existing"
                 working = dict(existing)
-                first_seen = _earliest(existing["first_seen_at"], origin["first_seen_at"])
-                playlist_seen = _earliest(existing["playlist_discovered_at"], origin["playlist_discovered_at"])
+                first_seen = _earliest(existing["first_seen_at"], moving_first)
+                playlist_seen = _earliest(existing["playlist_discovered_at"], moving_playlist)
                 working.update({"first_seen_at": first_seen, "playlist_discovered_at": playlist_seen,
                                 "discovered_at": playlist_seen or first_seen,
                                 "discovery_basis": "playlist_added" if playlist_seen else "first_seen"})
@@ -1318,8 +1379,8 @@ class Store:
                 mbid or selected.get("kind") == "source"
             ):
                 route = "split"
-                first_seen = origin["first_seen_at"]
-                playlist_seen = origin["playlist_discovered_at"]
+                first_seen = moving_first
+                playlist_seen = moving_playlist
                 working = {
                     "id": str(uuid.uuid4()), "user_id": track["user_id"], "title": origin["title"],
                     "first_seen_at": first_seen, "playlist_discovered_at": playlist_seen,
@@ -1332,7 +1393,9 @@ class Store:
                     "current_asset_id": None, "created_at": utcnow(), "updated_at": utcnow(),
                 }
             return {"route": route, "source_track": dict(track), "working_track": working,
-                    "origin": dict(origin), "selected_mbid": mbid, "ignored": dict(ignored) if ignored else None}
+                    "origin": dict(origin), "associated_source_urls": [o["url"] for o in linked],
+                    "associated_spotify_origins": [o["id"] for o in linked],
+                    "selected_mbid": mbid, "ignored": dict(ignored) if ignored else None}
 
     @staticmethod
     def _insert_history_locked(con, plan: dict, result: dict, reason: str):
@@ -1352,6 +1415,43 @@ class Store:
              previous.get("matched_title") or previous.get("title"), new_mbid,
              result.get("release_id"), result.get("matched_title"), utcnow(), reason),
         )
+
+    @staticmethod
+    def _bind_spotify_origins_locked(con, plan):
+        """An accepted manual replacement becomes the Spotify entry's audio.
+
+        Queueing or failing a replacement never changes the existing relation.
+        The retained resolution evidence records that this choice was manual.
+        """
+        for origin_id in plan.get("associated_spotify_origins", []):
+            link = con.execute(
+                """SELECT l.* FROM spotify_audio_links l JOIN track_origins o ON o.id=l.spotify_origin_id
+                   WHERE o.id=? AND o.track_id=?""", (origin_id, plan["source_track"]["id"]),
+            ).fetchone()
+            if not link or link["audio_origin_id"] == plan["origin"]["id"]:
+                continue
+            metadata = json.loads(link["resolved_metadata"])
+            metadata.update(previous_url=metadata.get("url"), url=plan["origin"]["url"], selected_by="user")
+            con.execute("UPDATE spotify_audio_links SET audio_origin_id=?,resolved_metadata=?,resolved_at=? WHERE spotify_origin_id=?",
+                        (plan["origin"]["id"], json.dumps(metadata), utcnow(), origin_id))
+
+    @staticmethod
+    def _transfer_spotify_origins_locked(con, source_id: str, target_id: str, audio_origin_id: str):
+        """Keep Spotify discovery/playlists with the exact audio selected for it.
+
+        Recording deduplication moves an audio origin, not an entire track. The
+        explicit relation prevents its Spotify playlists being stranded on an
+        empty placeholder, or following an unrelated origin on a merged track.
+        """
+        if source_id == target_id:
+            return
+        linked = con.execute(
+            """SELECT o.id FROM spotify_audio_links l JOIN track_origins o ON o.id=l.spotify_origin_id
+               WHERE l.audio_origin_id=? AND o.track_id=?""", (audio_origin_id, source_id),
+        ).fetchall()
+        for row in linked:
+            con.execute("UPDATE track_origins SET track_id=? WHERE id=?", (target_id, row["id"]))
+            transfer_origin(con, source_id, target_id, row["id"])
 
     @staticmethod
     def _detach_origin_assets_locked(con, source_id: str, target_id: str,
@@ -1389,8 +1489,10 @@ class Store:
         origin_id = plan["origin"]["id"]
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
+            self._bind_spotify_origins_locked(con, plan)
             con.execute("UPDATE track_origins SET track_id=?,last_error=NULL WHERE id=?", (target_id, origin_id))
             transfer_origin(con, source_id, target_id, origin_id)
+            self._transfer_spotify_origins_locked(con, source_id, target_id, origin_id)
             detached = self._detach_origin_assets_locked(con, source_id, target_id, origin_id, utcnow())
             self._recompute_discovery_locked(con, source_id)
             self._recompute_discovery_locked(con, target_id)
@@ -1412,6 +1514,7 @@ class Store:
         now = utcnow()
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
+            self._bind_spotify_origins_locked(con, plan)
             if plan["route"] == "split":
                 working = plan["working_track"]
                 con.execute(
@@ -1426,6 +1529,7 @@ class Store:
             if plan["route"] in {"split", "existing"}:
                 con.execute("UPDATE track_origins SET track_id=? WHERE id=?", (target_id, origin_id))
                 transfer_origin(con, source_id, target_id, origin_id)
+                self._transfer_spotify_origins_locked(con, source_id, target_id, origin_id)
                 detached = self._detach_origin_assets_locked(con, source_id, target_id, origin_id, now)
             self._recompute_discovery_locked(con, source_id)
             self._recompute_discovery_locked(con, target_id)
@@ -1512,12 +1616,17 @@ class Store:
             ignored = con.execute("SELECT * FROM ignored_tracks WHERE user_id=? AND mbid=?", (origin["user_id"], mbid)).fetchone()
             if not ignored:
                 return None
-            con.execute(
-                """INSERT OR REPLACE INTO ignored_origins(user_id,provider,media_key,url,title,ignored_track_id,created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (origin["user_id"], origin["provider"], origin["media_key"], origin["url"], title or origin["title"], ignored["id"], utcnow()),
-            )
             track_id = origin["track_id"]
+            # Deleting this uncommitted track also removes its Spotify metadata
+            # origin. Retain that URL in the block so a monitored Spotify list
+            # cannot recreate the same rejected recording on the next scan.
+            for associated in con.execute("SELECT * FROM track_origins WHERE track_id=?", (track_id,)).fetchall():
+                con.execute(
+                    """INSERT OR REPLACE INTO ignored_origins(user_id,provider,media_key,url,title,ignored_track_id,created_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (associated["user_id"], associated["provider"], associated["media_key"], associated["url"],
+                     (title or origin["title"]) if associated["id"] == origin_id else associated["title"], ignored["id"], utcnow()),
+                )
             receipt = {"kind": "IGNORED", "source_id": track_id, "target_id": None,
                        "source_orphan": False, "old_asset": None, "new_path": None}
             self._record_receipt_locked(con, operation_id, origin["user_id"], track_id, None, "INGEST", receipt, finalized=True)
@@ -1703,7 +1812,8 @@ class Store:
                     "other origin first, then remove or detach this one."
                 )
             sources = [row[0] for row in con.execute(
-                "SELECT DISTINCT source_id FROM memberships WHERE origin_id=?", (origin_id,)
+                """SELECT DISTINCT source_id FROM memberships WHERE origin_id=? OR origin_id IN
+                   (SELECT spotify_origin_id FROM spotify_audio_links WHERE audio_origin_id=?)""", (origin_id, origin_id)
             )]
             now = utcnow()
             new_id = None
@@ -1724,6 +1834,10 @@ class Store:
                 )
                 con.execute("UPDATE track_origins SET track_id=? WHERE id=?", (new_id, origin_id))
                 transfer_origin(con, track_id, new_id, origin_id)
+                self._transfer_spotify_origins_locked(con, track_id, new_id, origin_id)
+                self._recompute_discovery_locked(con, new_id)
+                if origin["provider"] == "spotify":
+                    con.execute("DELETE FROM spotify_audio_links WHERE spotify_origin_id=?", (origin_id,))
                 if track["mbid"]:
                     con.execute("INSERT OR IGNORE INTO origin_identity_rejections VALUES (?,?,?)",
                                 (origin_id, track["mbid"], now))
@@ -1830,6 +1944,7 @@ class Store:
             row.pop("selected", None)
             row.pop("pending_operation", None)
             row["origins"] = origins.get(row["id"], [])
+            row["source_providers"] = sorted({o["provider"] for o in row["origins"] if o["is_discovery"]})
             job = jobs.get(row["id"], {})
             row["retry_at"] = job.get("not_before")
             row["defer_count"] = int(job.get("defer_count") or 0)
@@ -1858,6 +1973,11 @@ class Store:
     def track_details(self, track_id: str, user: str):
         track = self.owned("tracks", track_id, user)
         track["origins"] = self.origins_for_track(track_id, user)
+        track["source_providers"] = sorted({o["provider"] for o in track["origins"] if o["is_discovery"]})
+        track["spotify_audio_links"] = self.rows(
+            """SELECT l.* FROM spotify_audio_links l JOIN track_origins o ON o.id=l.spotify_origin_id
+               WHERE o.track_id=? AND o.user_id=? ORDER BY l.spotify_origin_id""", (track_id, user),
+        )
         track["assets"] = self.rows("SELECT * FROM assets WHERE track_id=? ORDER BY id DESC", (track_id,))
         track["identity_history"] = self.rows("SELECT * FROM identity_history WHERE user_id=? AND track_id=? ORDER BY id DESC", (user, track_id))
         track["integrity_issues"] = self.rows("SELECT * FROM integrity_issues WHERE user_id=? AND track_id=? AND resolved_at IS NULL ORDER BY severity DESC,id", (user, track_id))

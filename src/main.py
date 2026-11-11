@@ -30,7 +30,7 @@ from store import SCHEMA_VERSION, Store
 STATIC_ROOT = ROOT / "static"
 INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
 _asset_digest = hashlib.sha256()
-for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js"):
+for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js", "help-ui.js", "pele-flowchart.js"):
     _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
@@ -468,11 +468,18 @@ def create_app(store=None, start_workers=True):
             active = pipeline.downloader.active()
         except Exception as exc:
             active = {"error": str(exc)}
+        try:
+            spotdl = pipeline.spotdl.active()
+        except Exception as exc:
+            spotdl = {"error": str(exc)}
         return {
             "downloader": active,
+            "spotdl": spotdl,
             "youtube_circuit": pipeline.downloader.circuit_status(),
             "last_update": store.setting("downloader_update"),
             "next_update": store.setting("next_downloader_update"),
+            "spotdl_last_update": store.setting("spotdl_update"),
+            "spotdl_next_update": store.setting("next_spotdl_update"),
             "beets": "2.14.1",
             "schema": SCHEMA_VERSION,
         }
@@ -484,10 +491,22 @@ def create_app(store=None, start_workers=True):
 
     @app.post("/api/downloader/rollback")
     async def rollback_downloader():
-        if pipeline.downloader.lock.locked():
+        if pipeline.downloader.lock.locked() or (pipeline.downloader_update_task and not pipeline.downloader_update_task.done()):
             raise ValueError("Wait for the active downloader update to finish")
         previous = await pipeline.downloader.rollback()
         return {"message": f"Downloader rolled back to {previous['version']}"}
+
+    @app.post("/api/spotdl/update")
+    async def update_spotdl():
+        pipeline.start_spotdl_update()
+        return {"message": "spotDL update queued"}
+
+    @app.post("/api/spotdl/rollback")
+    async def rollback_spotdl():
+        if pipeline.spotdl.lock.locked() or (pipeline.spotdl_update_task and not pipeline.spotdl_update_task.done()):
+            raise ValueError("Wait for the active spotDL update to finish")
+        previous = await pipeline.spotdl.rollback()
+        return {"message": f"spotDL rolled back to {previous['version']}"}
 
     from spotify_routes import install_spotify_routes
     install_spotify_routes(app, store)
