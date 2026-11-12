@@ -75,7 +75,7 @@ def music_comment(value: str | None, source_urls=()) -> str:
 
 
 def user_name(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
         raise ValueError("User names must be 1-64 letters, digits, underscores or hyphens")
     return value
 
