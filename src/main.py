@@ -9,7 +9,6 @@ import json
 import logging
 import shutil
 import traceback
-import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -218,9 +217,8 @@ def create_app(store=None, start_workers=True):
 
     @app.post("/api/users")
     def add_user(data: UserInput):
-        name = unicodedata.normalize("NFC", data.name.replace("\u200b", "").replace("\ufeff", "").strip())
-        store.add_user(name)
-        return {"name": name}
+        store.add_user(data.name)
+        return {"name": data.name}
 
     @app.get("/api/sources")
     def sources(user_id: str):
