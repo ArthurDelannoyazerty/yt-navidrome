@@ -298,9 +298,9 @@ $("user").addEventListener("change", changeUser);
 $("userForm").addEventListener("submit", guard(async event => {
   event.preventDefault();
   const name = $("newUser").value.trim();
-  await api("/api/users", {name});
+  const created = await api("/api/users", {name});
   $("newUser").value = "";
-  await loadUsers(name);
+  await loadUsers(created.name);
 }));
 
 $("ingestForm").addEventListener("submit", guard(async event => {
