@@ -344,6 +344,11 @@ function renderSource(source) {
   if (source.synced_at) content.append(node("p", `Last sync: ${time(source.synced_at)}`, "hint"));
   if (source.error) content.append(node("div", source.error, "error-text"));
   const controls = node("div", null, "source-buttons");
+  if (source.status === "PURGING") {
+    controls.append(node("small", "Source purge queued or in progress.", "hint"));
+    row.append(content, controls);
+    return row;
+  }
   if (source.provider !== "legacy") {
     controls.append(button("Sync / retry", async () => {
       await api(`/api/sources/${encodeURIComponent(source.id)}/retry`, {user_id: state.user});
