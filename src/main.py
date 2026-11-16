@@ -35,6 +35,11 @@ for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "meta
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
 
+class SourcePurgeInput(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    source_url: str = Field(min_length=1, max_length=2048)
+
+
 class SourceMonitoringInput(BaseModel):
     user_id: str = Field(min_length=1, max_length=64)
     monitored: bool
@@ -234,6 +239,16 @@ def create_app(store=None, start_workers=True):
             store.add_source(ref, data.user_id, data.monitored, data.label)
             for ref in refs
         ]
+
+    @app.get("/api/sources/{source_id}/purge-preview")
+    def source_purge_preview(source_id: str, user_id: str):
+        from source_purge import preview
+        return preview(store, source_id, user_id)
+
+    @app.post("/api/sources/{source_id}/purge")
+    def purge_source(source_id: str, data: SourcePurgeInput):
+        from source_purge import queue
+        return queue(store, source_id, data.user_id, data.source_url)
 
     @app.post("/api/sources/{source_id}/retry")
     def retry_source(source_id: str, data: ActionInput):
