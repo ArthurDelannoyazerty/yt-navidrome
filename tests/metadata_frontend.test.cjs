@@ -247,7 +247,7 @@ test('Beets recommendation duration is blank when unavailable, not the local dur
       evidence:{local_duration_seconds:198,candidate_duration_seconds:null}}]
   })});
   const row=b.get('metadataSuggestions').children[0];
-  assert.equal(row.children[4].textContent,'—');
+  assert.equal(row.children[4].textContent,'');
   assert.equal(buttons(row,'Use').length,1);
 });
 test('MusicBrainz shows one-click buttons for different releases',async()=>{
