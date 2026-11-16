@@ -287,28 +287,50 @@ def create_app(store=None, start_workers=True):
                 store.enqueue("sync", source_id, data.user_id, con=con)
         return {"message": "Monitoring resumed; sync queued" if data.monitored else "Monitoring paused; music and playlist history retained. A sync already running may finish."}
 
-    @app.delete("/api/sources/{source_id}")
-    def delete_source(source_id: str, user_id: str):
-        source = store.owned("sources", source_id, user_id)
-        if source["status"] == "PURGING" or store.one(
-            "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND user_id=? AND state IN ('PENDING','RUNNING')",
-            (source_id, user_id),
-        ):
-            raise ValueError("Source purge is already in progress")
+    @app.post("/api/sources/{source_id}/restore")
+    def restore_source(source_id: str, data: SourcePurgeInput):
+        source = store.owned("sources", source_id, data.user_id)
+        if source["url"] != data.source_url or source["status"] != "REMOVED":
+            raise ValueError("Only this user's archived source URL may be restored")
         with store.db() as con:
             con.execute("BEGIN IMMEDIATE")
             if con.execute(
-                "SELECT 1 FROM jobs WHERE target=? AND state IN ('PENDING','RUNNING')",
+                "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND state IN ('PENDING','RUNNING')",
                 (source_id,),
             ).fetchone():
-                raise ValueError("Wait until this source finishes syncing")
-            con.execute("DELETE FROM sources WHERE id=?", (source_id,))
+                raise ValueError("Source purge is already in progress")
+            con.execute(
+                "UPDATE sources SET status='PENDING',error=NULL,next_sync=0 WHERE id=? AND user_id=? AND status='REMOVED'",
+                (source_id, data.user_id),
+            )
+            store.enqueue("sync", source_id, data.user_id, con=con)
+        return {"message": "Source restored; synchronization queued. Monitoring remains off."}
+
+    @app.delete("/api/sources/{source_id}")
+    def delete_source(source_id: str, user_id: str):
+        """Archive the source, preserving its origin history for later cleanup."""
+        source = store.owned("sources", source_id, user_id)
+        if source["status"] == "REMOVED":
+            raise ValueError("This source is already archived")
+        with store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute(
+                """SELECT 1 FROM jobs WHERE target=? AND state IN ('PENDING','RUNNING')
+                   AND kind IN ('sync','purge_source')""", (source_id,),
+            ).fetchone():
+                raise ValueError("Wait until this source finishes syncing or purging")
+            con.execute(
+                """UPDATE sources SET status='REMOVED',monitored=0,next_sync=0,
+                   playlist_path=NULL WHERE id=? AND user_id=?""",
+                (source_id, user_id),
+            )
+            con.execute("DELETE FROM memberships WHERE source_id=?", (source_id,))
         if source["playlist_path"]:
             path = Path(source["playlist_path"]).resolve()
             playlist_dir = (LIBRARY / user_id / "000000-playlists").resolve()
             if path.parent == playlist_dir:
                 path.unlink(missing_ok=True)
-        return {"message": "Source removed; music retained"}
+        return {"message": "Source archived; music retained. You can purge it from Archived sources."}
 
     @app.get("/api/tracks")
     def tracks(
