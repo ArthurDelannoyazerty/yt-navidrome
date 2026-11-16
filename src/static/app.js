@@ -221,14 +221,17 @@ for (const tab of document.querySelectorAll(".tab")) {
 async function loadUsers(preferred) {
   const users = await api("/api/users");
   const select = $("user");
-  select.replaceChildren(...users.map(user => {
+  const placeholder = node("option", "Select a library user…");
+  placeholder.value = "";
+  placeholder.disabled = true;
+  select.replaceChildren(placeholder, ...users.map(user => {
     const option = node("option", user);
     option.value = user;
     return option;
   }));
-  select.value = users.includes(preferred)
-    ? preferred
-    : (users.includes("admin") ? "admin" : users[0]);
+  // Only preserve the account if it was explicitly chosen on this page.
+  // Never infer a library from the first user, 'admin', or localStorage.
+  select.value = users.includes(preferred) ? preferred : "";
   changeUser();
 }
 
@@ -238,6 +241,9 @@ function changeUser() {
   window.ArtworkUI?.reset();
   requestGate.reset();
   state.user = $("user").value;
+  $("ingestForm").querySelectorAll("textarea, input, button").forEach(element => {
+    element.disabled = !state.user;
+  });
   state.sources = [];
   state.musicView = "tracks";
   state.ignoredCount = 0;
@@ -289,6 +295,14 @@ function changeUser() {
   $("logs").replaceChildren();
   $("tracks").replaceChildren();
   $("sources").replaceChildren();
+  if (!state.user) {
+    $("libraryScope").textContent = "Select a library user to view its music";
+    $("resultsSummary").textContent = "Select a library user to begin.";
+    $("integritySummary").textContent = "Select a library user to run an audit.";
+    $("healthSummary").textContent = "";
+    $("sources").append(node("p", "Select a library user before importing music.", "empty"));
+    return;
+  }
   guard(() => refreshAll(false))();
   if (state.tab === "approval") guard(() => window.MetadataUI?.enter())();
 }
@@ -305,6 +319,7 @@ $("userForm").addEventListener("submit", guard(async event => {
 
 $("ingestForm").addEventListener("submit", guard(async event => {
   event.preventDefault();
+  if (!state.user) throw new Error("Select a library user before importing.");
   const urls = $("urls").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
   if (!urls.length) return;
   await api("/api/sources", {
@@ -350,6 +365,24 @@ function renderSource(source) {
     if (!confirm("Remove this source and exported playlist? Music files are retained.")) return;
     await api(`/api/sources/${encodeURIComponent(source.id)}?user_id=${encodeURIComponent(state.user)}`, null, "DELETE");
     await loadSources(state.generation, false);
+  }, "danger"));
+  controls.append(button("Remove source and its music…", async () => {
+    const user = state.user;
+    if (!user || source.user_id !== user) throw new Error("Library changed; reopen this source.");
+    const path = `/api/sources/${encodeURIComponent(source.id)}`;
+    const preview = await api(
+      `${path}/purge-preview?user_id=${encodeURIComponent(user)}`
+    );
+    if (user !== state.user) throw new Error("Library changed; reopen this source.");
+    const message = `Permanently remove source ${source.url} from library ${user}?\n\n` +
+      `${preview.exclusive_tracks} tracks used only by this source will be deleted, ` +
+      `including their audio files. ${preview.shared_tracks} tracks shared with ` +
+      "other sources or independently added will be kept. This cannot be undone.";
+    if (!confirm(message)) return;
+    if (user !== state.user) throw new Error("Library changed; reopen this source.");
+    const result = await api(`${path}/purge`, {user_id: user, source_url: source.url});
+    notice(result.message);
+    if (user === state.user) await loadSources(state.generation, false);
   }, "danger"));
   row.append(content, controls);
   return row;
@@ -1345,7 +1378,7 @@ async function pollSlow() {
   try {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("spotify") === "connected";
-    await loadUsers(connected ? params.get("library") : localStorage.getItem("music-user"));
+    await loadUsers(null);
     if (connected) {
       setTab("sources"); notice("Spotify connected. Import a source or browse your playlists.");
       window.history.replaceState(null, "", window.location.pathname);
