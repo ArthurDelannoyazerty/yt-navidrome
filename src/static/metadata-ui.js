@@ -7,7 +7,8 @@ window.MetadataUI = (() => {
     timer: null, filterTimer: null, pickerTimer: null, loading: false, sending: false,
     queueLoading: false, page: 1, maxPage: 1, artistId: null, effectiveQuery: null,
     retryUntil: 0, pickerPage: 1, submitted: new Set(), manualOriginal: {},
-    actions: {base: [], search: []}, audioKey: null, audioSerial: 0};
+    actions: {base: [], search: []}, audioKey: null, audioSerial: 0,
+    releaseCache: new Map(), searchItems: [], searchEntity: "recording"};
   const manualFields = {artist: "metadataManualArtist", title: "metadataManualTitle", album: "metadataManualAlbum",
     mbid: "metadataManualMbid", release_id: "metadataManualRelease"};
   const list = value => Array.isArray(value) ? value.join("; ") : value || "";
@@ -46,7 +47,7 @@ window.MetadataUI = (() => {
   function reset() {
     leave(); ui.user = null; ui.context = null; ui.track = null; ui.tracks = []; ui.index = -1;
     ui.scope = ""; ui.submitted.clear(); ui.actions = {base: [], search: []};
-    ui.retryUntil = 0; ui.pickerPage = 1;
+    ui.retryUntil = 0; ui.pickerPage = 1; ui.releaseCache.clear(); ui.searchItems = [];
     $("approvalFilter").value = "NEEDS_APPROVAL"; $("approvalSearch").value = "";
     $("approvalPickerSearch").value = ""; $("approvalPickerList").replaceChildren();
     $("approvalWorkspace").hidden = true; $("approvalEmpty").hidden = true;
@@ -149,25 +150,101 @@ window.MetadataUI = (() => {
     }
     return details;
   }
-  function useChoice(item) {
+  function useChoice(item, releaseId = null) {
     return ui.context?.state === "NEEDS_APPROVAL"
-      ? submit("approve", {index: item.index ?? choices().indexOf(item)})
-      : item.mbid ? submit("select_recording", {mbid: item.mbid}) : null;
+      ? submit("approve", {index: item.index ?? choices().indexOf(item), ...(releaseId ? {release_id: releaseId} : {})})
+      : item.mbid ? submit("select_recording", {mbid: item.mbid, ...(releaseId ? {release_id: releaseId} : {})}) : null;
+  }
+  function editionLabel(release) {
+    return [release.title || "Untitled album", release.date?.slice(0, 4), release.country].filter(Boolean).join(" · ");
+  }
+  function albumOptions(releases) {
+    const found = new Set();
+    return (releases || []).filter(release => release?.id && !found.has(release.id) && found.add(release.id));
+  }
+  function moreReleasesButton(mbid, group = "base") {
+    const cached = ui.releaseCache.get(mbid);
+    const count = cached?.releases?.length || 0;
+    if (cached?.page && count >= cached.total) return null;
+    if (cached?.page >= 20) return null;
+    const label = cached?.pending ? "Finding albums..." : cached?.error ? "Retry albums" : "More albums";
+    return control(label, () => loadReleases(mbid, (cached?.page || 0) + 1),
+      !cached?.pending && ui.context.can_correct, group);
   }
   function renderSuggestions() {
+    const body = $("metadataSuggestions");
     const matches = choices().filter(item => item.kind !== "source" && item.kind !== "asis" && !item.asis);
-    $("metadataSuggestions").replaceChildren(...matches.map(item => {
-      const row = node("tr"); row.dataset.choice = String(item.index ?? choices().indexOf(item));
-      const title = node("td", null, "approval-track"); title.append(item.mbid ? mbLink("recording", item.mbid, item.title) : node("strong", item.title));
-      title.append(evidence(item));
-      const action = node("td", null, "approval-action"), use = control("Use", () => useChoice(item), ui.context.can_correct && Boolean(ui.context.state === "NEEDS_APPROVAL" || item.mbid));
-      use.setAttribute("aria-label", `Use ${item.artist || ""} ${item.title}`); action.append(use);
-      row.append(action, title, node("td", item.artist || "\u2014", "approval-artist"), node("td", item.album || "\u2014", "approval-album"),
-        node("td", duration(item.evidence?.candidate_duration_seconds), "approval-duration"),
-        node("td", item.match_score ?? item.similarity ?? "\u2014", "approval-score"));
-      return row;
-    }));
+    body.replaceChildren();
+    for (const item of matches) {
+      const options = albumOptions(ui.releaseCache.get(item.mbid)?.releases);
+      // No release lookup is required to approve the recording automatically.
+      // Once editions arrive, every album is selectable with a single click.
+      const editions = options.length ? options : [null];
+      for (const [index, release] of editions.entries()) {
+        const row = node("tr"); row.dataset.choice = String(item.index ?? choices().indexOf(item));
+        const action = node("td", null, "approval-action");
+        const use = control("Use", () => useChoice(item, release?.id),
+          ui.context.can_correct && Boolean(ui.context.state === "NEEDS_APPROVAL" || item.mbid));
+        use.setAttribute("aria-label", `Use ${item.title} — ${release ? editionLabel(release) : "automatic release"}`);
+        action.append(use);
+        row.append(action);
+        if (!index) {
+          const title = node("td", null, "approval-track");
+          title.append(item.mbid ? mbLink("recording", item.mbid, item.title) : node("strong", item.title));
+          title.append(evidence(item));
+          const artist = node("td", item.artist || "—", "approval-artist");
+          const recommended = item.evidence?.candidate_duration_seconds;
+          const durationCell = node("td", Number.isFinite(recommended) ? duration(recommended) : "", "approval-duration");
+          const score = node("td", item.match_score ?? item.similarity ?? "—", "approval-score");
+          for (const cell of [title, artist, durationCell, score]) cell.rowSpan = editions.length;
+          row.append(title, artist);
+          const album = node("td", release ? editionLabel(release) : (item.album || "Automatic release"), "approval-album");
+          if (editions.length === 1 && item.mbid && ui.releaseCache.has(item.mbid)) {
+            const more = moreReleasesButton(item.mbid); if (more) album.append(more);
+          }
+          row.append(album, durationCell, score);
+          if (item.mbid && !ui.releaseCache.has(item.mbid)) loadReleases(item.mbid);
+        } else {
+          const album = node("td", editionLabel(release), "approval-album");
+          if (index === editions.length - 1) {
+            const more = moreReleasesButton(item.mbid); if (more) album.append(more);
+          }
+          row.append(album);
+        }
+        body.append(row);
+      }
+    }
     $("beetsEmpty").hidden = matches.length > 0;
+  }
+  function refreshReleaseTables() {
+    if (!active() || !ui.context) return;
+    renderSuggestions();
+    if (ui.searchItems.length && ui.searchEntity === "recording") {
+      ui.actions.search = [];
+      $("mbResults").replaceChildren(resultTable(ui.searchItems, ui.searchEntity));
+    }
+    updateButtons();
+  }
+  async function loadReleases(mbid, page = 1) {
+    if (!mbid) return;
+    const existing = ui.releaseCache.get(mbid);
+    if (existing?.pending || (page === 1 && existing?.page)) return;
+    const context = ui.context, user = ui.user;
+    ui.releaseCache.set(mbid, {...existing, pending: true, releases: existing?.releases || []});
+    try {
+      const params = new URLSearchParams({user_id: user, recording_id: mbid, page: String(page)});
+      const response = await fetch(`/api/musicbrainz/releases?${params}`, {cache: "no-store"});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Release lookup unavailable");
+      if (context !== ui.context || user !== ui.user) return;
+      ui.releaseCache.set(mbid, {...data, pending: false,
+        releases: albumOptions([...(existing?.releases || []), ...data.releases])});
+    } catch (error) {
+      if (context !== ui.context || user !== ui.user) return;
+      ui.releaseCache.set(mbid, {...existing, pending: false, releases: existing?.releases || [],
+        error: error.message || String(error)});
+    }
+    refreshReleaseTables();
   }
   function renderDecisions() {
     const alias = ui.context.approved_artist_alias;
@@ -364,33 +441,41 @@ window.MetadataUI = (() => {
         row.append(action, info, node("td", [item.type, item.country, item.disambiguation].filter(Boolean).join(" \u00b7 "), "approval-artist-details"));
       } else {
         info.append(mbLink("recording", item.id, item.title));
-        const edition = node("select"); edition.setAttribute("aria-label", `Release for ${item.title}`);
-        const album = node("td", null, "approval-album"), releases = item.releases || [];
-        const showAlbums = () => {
-          const selected = releases.find(release => edition.value && release.id === edition.value);
-          const titles = [...new Set((selected ? [selected] : releases).map(release => release.title).filter(Boolean))];
-          album.replaceChildren(...(titles.length ? titles.slice(0, 2).map(title => node("div", title)) : [node("span", "\u2014")]));
-          if (titles.length > 2) {
-            const more = node("details"); more.append(node("summary", `+${titles.length - 2} more albums`));
-            more.append(...titles.slice(2).map(title => node("div", title))); album.append(more);
-          }
-        };
-        const automatic = node("option", "Automatic release"); automatic.value = ""; edition.append(automatic);
-        for (const release of releases) {
-          const option = node("option", [release.title, release.date, release.country].filter(Boolean).join(" \u00b7 "));
-          option.value = release.id; edition.append(option);
-        }
-        edition.addEventListener("change", showAlbums); showAlbums();
         if (item.disambiguation) info.append(node("small", item.disambiguation));
         const details = node("details"); details.append(node("summary", "Details"));
         if (item.score != null) details.append(node("p", `Search relevance: ${item.score}`));
         if (aliasNames(item)) details.append(node("p", aliasNames(item)));
-        if (item.releases?.length) details.append(edition);
         if (item.artists?.length === 1) { const remember = rememberButton(item.artists[0], "search"); if (remember) details.append(remember); }
         info.append(details);
-        action.append(control("Use", () => submit("select_recording", {mbid: item.id, ...(edition.value ? {release_id: edition.value} : {})}), ui.context.can_correct, "search"));
-        row.append(action, info, node("td", item.artist || "\u2014", "approval-artist"), album,
-          node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null), "approval-duration"));
+        const cached = ui.releaseCache.get(item.id);
+        const releases = albumOptions(cached?.releases?.length ? cached.releases : item.releases);
+        const editions = releases.length ? releases : [null];
+        for (const [index, release] of editions.entries()) {
+          const editionRow = index ? node("tr") : row;
+          const releaseAction = index ? node("td", null, "approval-action") : action;
+          const use = control("Use", () => submit("select_recording",
+            {mbid: item.id, ...(release ? {release_id: release.id} : {})}), ui.context.can_correct, "search");
+          use.setAttribute("aria-label", `Use ${item.title} — ${release ? editionLabel(release) : "automatic release"}`);
+          releaseAction.append(use); editionRow.append(releaseAction);
+          if (!index) {
+            const artist = node("td", item.artist || "—", "approval-artist");
+            const length = node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null), "approval-duration");
+            const album = node("td", release ? editionLabel(release) : "Automatic release", "approval-album");
+            if (editions.length === 1) {
+              const more = moreReleasesButton(item.id, "search"); if (more) album.append(more);
+            }
+            for (const cell of [info, artist, length]) cell.rowSpan = editions.length;
+            editionRow.append(info, artist, album, length);
+          } else {
+            const album = node("td", editionLabel(release), "approval-album");
+            if (index === editions.length - 1) {
+              const more = moreReleasesButton(item.id, "search"); if (more) album.append(more);
+            }
+            editionRow.append(album);
+          }
+          body.append(editionRow);
+        }
+        continue;
       }
       body.append(row);
     }
@@ -402,7 +487,7 @@ window.MetadataUI = (() => {
       status(`MusicBrainz retry in ${Math.ceil((ui.retryUntil - Date.now()) / 1000)} s.`);
       clearTimeout(ui.timer); ui.timer = setTimeout(search, Math.max(500, ui.retryUntil - Date.now())); return;
     }
-    invalidateSearch(); ui.actions.search = []; $("mbResults").replaceChildren();
+    invalidateSearch(); ui.actions.search = []; ui.searchItems = []; $("mbResults").replaceChildren();
     const serial = ui.searchSerial, user = ui.user, context = ui.context, entity = $("mbEntity").value;
     const controller = new AbortController(); ui.controller = controller;
     const effective = ui.page > 1 ? ui.effectiveQuery : null;
@@ -426,6 +511,7 @@ window.MetadataUI = (() => {
       ui.maxPage = Math.max(1, Math.min(100, Math.ceil(data.total / data.limit)));
       $("mbPage").textContent = `${data.page} / ${ui.maxPage}`;
       $("mbPrev").disabled = data.page <= 1; $("mbNext").disabled = data.page >= ui.maxPage;
+      ui.searchItems = data.items; ui.searchEntity = entity;
       if (data.items.length) $("mbResults").append(resultTable(data.items, entity));
       status(data.query_note || (data.items.length ? "" : "No results."), data.query_strategy === "title_only");
       updateButtons();

@@ -680,7 +680,14 @@ class Pipeline:
             if result_path.is_file():
                 result = json.loads(result_path.read_text())
             else:
-                result = await self.bridge(job, target_track, directory, "apply", path=str(candidate),
+                # The reviewed candidate is an immutable approval receipt. Beets
+                # rewrites Opus tags *before* all provider calls have completed;
+                # a MusicBrainz cooldown must not mutate the reviewed bytes and
+                # invalidate the user's choice on the next attempt.
+                working = directory / "apply-working.opus"
+                if Path(candidate).resolve() != working.resolve():
+                    await asyncio.to_thread(atomic_copy, candidate, working)
+                result = await self.bridge(job, target_track, directory, "apply", path=str(working),
                                            selected=selected, operation=operation_id, overrides=overrides or {})
             return await self.activate_result(job, plan, result, receipt, operation_id, directory)
         except Exception:

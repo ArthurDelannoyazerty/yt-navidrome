@@ -29,11 +29,14 @@ function context(id='one',extra={}){
       {index:5,kind:'source',title:'Original title'}, {index:7,kind:'asis',title:'Current title',asis:true}],...extra};
 }
 const summaries=(count=2)=>Array.from({length:count},(_,i)=>({id:i===0?'one':i===1?'two':String(i+1),title:'Canonical '+i,source_title:'Video '+i,channel:'Channel '+i}));
-async function open(b,{tracks=summaries(),data=context(),pane=''}={}){
+async function open(b,{tracks=summaries(),data=context(),pane='',editions=[],releaseTotal=editions.length}={}){
   const pending=b.metadata.open({id:data.track_id,title:'Song',operation_state:data.state},pane);
   assert.match(b.requests.at(-1).url,/\/api\/review\/queue/);
   b.requests.at(-1).resolve({ids:tracks.map(t=>t.id),tracks,total:tracks.length,excluded:0});await tick();
   b.requests.at(-1).resolve(data);await pending;
+  const lookups=b.requests.filter(r=>r.url.includes('/musicbrainz/releases'));
+  for(const request of lookups)request.resolve({recording_id:MBID,releases:editions,page:1,total:releaseTotal});
+  await tick();
 }
 function walk(node,fn){if(!node||typeof node!=='object')return;fn(node);for(const child of node.children||[])walk(child,fn);}
 function buttons(node,text){const out=[];walk(node,n=>{if(n.tagName==='button'&&(!text||n.textContent===text))out.push(n);});return out;}
@@ -132,7 +135,7 @@ test('leaving the page cancels automatic search and prevents hidden provider req
 });
 test('MusicBrainz use can select a compatible edition without trusting result tags',async()=>{
   const b=setup();await open(b,{tracks:summaries(1)});await search(b);
-  let edition;walk(b.get('mbResults'),n=>{if(n.tagName==='select')edition=n;});edition.value=RID;
+  assert.equal(buttons(b.get('mbResults'),'Use').length,1);
   const pending=buttons(b.get('mbResults'),'Use')[0].listeners.click();
   const request=b.requests.at(-1);assert.match(request.url,/metadata-correction$/);
   assert.deepEqual(JSON.parse(request.options.body),{user_id:'admin',mode:'select_recording',mbid:MBID,release_id:RID,revision:'r'.repeat(64)});
@@ -220,4 +223,60 @@ test('another filter is independent of Music and failed list loads can be retrie
 test('no shortcut listeners or modal calls remain in the approval implementation',()=>{
   const js=fs.readFileSync(require.resolve('../src/static/metadata-ui.js'),'utf8');
   assert.equal(js.includes('showModal'),false);assert.equal(js.includes('keydown'),false);
+});
+
+test('one click on Beets album submits the exact release ID and keeps recommended duration',async()=>{
+  const releaseA={id:RID,title:'Original album',date:'2001'};
+  const releaseB={id:'33333333-3333-4333-8333-333333333333',title:'Live album',date:'2010'};
+  const b=setup();await open(b,{tracks:summaries(1),editions:[releaseA,releaseB]});
+  const rows=b.get('metadataSuggestions').children;
+  assert.equal(rows.length,2);
+  assert.equal(rows[0].children[1].rowSpan,2);
+  assert.equal(rows[0].children[4].textContent,'3:19');
+  assert.match(rows[1].children[1].textContent,/Live album/);
+  const pending=buttons(rows[1],'Use')[0].listeners.click();
+  const request=b.requests.at(-1);
+  assert.deepEqual(JSON.parse(request.options.body),{
+    user_id:'admin',mode:'approve',index:3,release_id:releaseB.id,approval_token:'a'.repeat(64)
+  });
+  request.resolve({message:'Queued'});await pending;
+});
+test('Beets recommendation duration is blank when unavailable, not the local duration',async()=>{
+  const b=setup();await open(b,{tracks:summaries(1),data:context('one',{
+    choices:[{index:3,kind:'candidate',mbid:MBID,title:'Unknown duration',
+      evidence:{local_duration_seconds:198,candidate_duration_seconds:null}}]
+  })});
+  const row=b.get('metadataSuggestions').children[0];
+  assert.equal(row.children[4].textContent,'');
+  assert.equal(buttons(row,'Use').length,1);
+});
+test('MusicBrainz shows one-click buttons for different releases',async()=>{
+  const b=setup();await open(b,{tracks:summaries(1)});
+  const another={id:'33333333-3333-4333-8333-333333333333',title:'Compilation'};
+  await search(b,[{id:MBID,title:'Found',artist:'Artist',length_ms:199000,
+    releases:[{id:RID,title:'Original'},another]}]);
+  const use=buttons(b.get('mbResults'),'Use');
+  assert.equal(use.length,2);
+  const pending=use[1].listeners.click();
+  const request=b.requests.at(-1);
+  assert.equal(JSON.parse(request.options.body).release_id,another.id);
+  request.resolve({message:'Queued'});await pending;
+});
+
+test('additional release pages expand inline and preserve one-click album approval',async()=>{
+  const b=setup();await open(b,{tracks:summaries(1),releaseTotal:101,
+    editions:[{id:RID,title:'Original album'}]});
+  const more=buttons(b.get('metadataSuggestions'),'More albums');
+  assert.equal(more.length,1);
+  const pending=more[0].listeners.click();
+  const request=b.requests.at(-1);
+  assert.ok(request.url.includes('/musicbrainz/releases'));
+  assert.match(request.url,/page=2/);
+  const second={id:'33333333-3333-4333-8333-333333333333',title:'Rare compilation'};
+  request.resolve({recording_id:MBID,page:2,total:101,releases:[second]});await pending;await tick();
+  assert.equal(b.get('metadataSuggestions').children.length,2);
+  const approved=buttons(b.get('metadataSuggestions').children[1],'Use')[0].listeners.click();
+  const post=b.requests.at(-1);
+  assert.equal(JSON.parse(post.options.body).release_id,second.id);
+  post.resolve({message:'Queued'});await approved;
 });
