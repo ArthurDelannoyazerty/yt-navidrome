@@ -156,6 +156,18 @@ def install_metadata_routes(app, store):
             return JSONResponse({"error": str(exc), "retry_after": delay}, status_code=429,
                                 headers={"Retry-After": str(delay), "Cache-Control": "no-store"})
 
+    @app.get("/api/musicbrainz/releases")
+    async def releases(user_id: str, recording_id: str = Query(..., min_length=36, max_length=36),
+                       page: int = Query(1, ge=1, le=20)):
+        store.require_user(user_id)
+        try:
+            result = await searcher.releases(recording_id, page)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except ApiDeferred as exc:
+            delay = max(1, math.ceil((exc.retry_at or time.time() + 5) - time.time()))
+            return JSONResponse({"error": str(exc), "retry_after": delay}, status_code=429,
+                                headers={"Retry-After": str(delay), "Cache-Control": "no-store"})
+
     @app.get("/api/tracks/{track_id}/metadata-context")
     def context(track_id: str, user_id: str):
         return JSONResponse(metadata_context(store, track_id, user_id), headers={"Cache-Control": "no-store"})
