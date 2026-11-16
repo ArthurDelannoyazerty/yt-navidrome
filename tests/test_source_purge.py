@@ -168,3 +168,87 @@ def test_schema_9_backfills_existing_source_memberships(db, environment):
     assert db.one("PRAGMA user_version")["user_version"] == 9
     assert db.one("SELECT COUNT(*) AS n FROM source_origins")["n"] == 1
     assert preview(db, first["id"], "admin")["exclusive_tracks"] == 1
+
+def test_archived_source_remains_visible_and_can_be_purged_later(db):
+    first = source(db, "admin", "archive")
+    populate(db, first)
+    track = db.one("SELECT * FROM tracks WHERE user_id='admin'")
+    db.execute("UPDATE jobs SET state='DONE' WHERE kind='sync'")
+    with TestClient(create_app(db, start_workers=False)) as client:
+        response = client.delete(
+            f"/api/sources/{first['id']}", params={"user_id": "admin"},
+        )
+        assert response.status_code == 200
+        listed = client.get("/api/sources", params={"user_id": "admin"}).json()
+        assert listed[0]["status"] == "REMOVED"
+        assert listed[0]["id"] == first["id"]
+        assert db.one("SELECT id FROM tracks WHERE id=?", (track["id"],))
+        assert db.one(
+            "SELECT COUNT(*) AS n FROM source_origins WHERE source_id=?",
+            (first["id"],),
+        )["n"] == 1
+        assert db.one("SELECT COUNT(*) AS n FROM memberships")["n"] == 0
+        assert client.post(
+            "/api/sources",
+            json={"user_id": "admin", "urls": [first["url"]]},
+        ).status_code == 400
+        preview_response = client.get(
+            f"/api/sources/{first['id']}/purge-preview",
+            params={"user_id": "admin"},
+        )
+        assert preview_response.json()["exclusive_tracks"] == 1
+        purge = client.post(
+            f"/api/sources/{first['id']}/purge",
+            json={"user_id": "admin", "source_url": first["url"]},
+        )
+        assert purge.status_code == 200
+        assert purge.json()["job_id"]
+
+
+def test_archived_source_can_be_restored_but_not_by_another_user(db):
+    first = source(db, "admin", "restore")
+    db.execute("UPDATE jobs SET state='DONE' WHERE kind='sync'")
+    with TestClient(create_app(db, start_workers=False)) as client:
+        assert client.delete(
+            f"/api/sources/{first['id']}", params={"user_id": "admin"},
+        ).status_code == 200
+        url = f"/api/sources/{first['id']}/restore"
+        assert client.post(
+            url, json={"user_id": "guest", "source_url": first["url"]}
+        ).status_code == 404
+        assert client.post(
+            url, json={"user_id": "admin", "source_url": "wrong"}
+        ).status_code == 400
+        result = client.post(
+            url, json={"user_id": "admin", "source_url": first["url"]}
+        )
+        assert result.status_code == 200
+        restored = db.owned("sources", first["id"], "admin")
+        assert restored["status"] == "PENDING"
+        assert restored["monitored"] == 0
+        assert db.one(
+            "SELECT 1 FROM jobs WHERE kind='sync' AND target=? AND state='PENDING'",
+            (first["id"],),
+        )
+
+
+def test_two_archived_sources_preserve_shared_track_until_final_purge(db):
+    first = source(db, "admin", "one")
+    second = source(db, "admin", "two")
+    populate(db, first)
+    populate(db, second)
+    db.execute("UPDATE jobs SET state='DONE' WHERE kind='sync'")
+    with TestClient(create_app(db, start_workers=False)) as client:
+        for src in (first, second):
+            assert client.delete(
+                f"/api/sources/{src['id']}", params={"user_id": "admin"},
+            ).status_code == 200
+    music = db.one("SELECT id FROM tracks")
+    first_result = commit(db, first["id"], "admin", first["url"],
+                          "purge-source:" + first["id"])
+    assert first_result["shared_tracks"] == 1
+    assert db.one("SELECT id FROM tracks WHERE id=?", (music["id"],))
+    second_result = commit(db, second["id"], "admin", second["url"],
+                           "purge-source:" + second["id"])
+    assert second_result["exclusive_tracks"] == 1
+    assert not db.one("SELECT id FROM tracks WHERE id=?", (music["id"],))
