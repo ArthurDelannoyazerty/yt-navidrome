@@ -34,7 +34,7 @@ async function open(b,{tracks=summaries(),data=context(),pane='',editions=[]}={}
   assert.match(b.requests.at(-1).url,/\/api\/review\/queue/);
   b.requests.at(-1).resolve({ids:tracks.map(t=>t.id),tracks,total:tracks.length,excluded:0});await tick();
   b.requests.at(-1).resolve(data);await pending;
-  const lookups=b.requests.filter(r=>/musicbrainz\\/releases/.test(r.url));
+  const lookups=b.requests.filter(r=>r.url.includes('/musicbrainz/releases'));
   for(const request of lookups)request.resolve({recording_id:MBID,releases:editions,page:1,total:editions.length});
   await tick();
 }
