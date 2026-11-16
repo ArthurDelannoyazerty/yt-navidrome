@@ -174,7 +174,7 @@ window.MetadataUI = (() => {
       for (const [index, release] of editions.entries()) {
         const row = node("tr"); row.dataset.choice = String(item.index ?? choices().indexOf(item));
         const action = node("td", null, "approval-action");
-        const use = control(release ? "Use" : "Use automatic", () => useChoice(item, release?.id),
+        const use = control("Use", () => useChoice(item, release?.id),
           ui.context.can_correct && Boolean(ui.context.state === "NEEDS_APPROVAL" || item.mbid));
         use.setAttribute("aria-label", `Use ${item.title} — ${release ? editionLabel(release) : "automatic release"}`);
         action.append(use);
@@ -425,7 +425,7 @@ window.MetadataUI = (() => {
         for (const [index, release] of editions.entries()) {
           const editionRow = index ? node("tr") : row;
           const releaseAction = index ? node("td", null, "approval-action") : action;
-          const use = control(release ? "Use" : "Use automatic", () => submit("select_recording",
+          const use = control("Use", () => submit("select_recording",
             {mbid: item.id, ...(release ? {release_id: release.id} : {})}), ui.context.can_correct, "search");
           use.setAttribute("aria-label", `Use ${item.title} — ${release ? editionLabel(release) : "automatic release"}`);
           releaseAction.append(use); editionRow.append(releaseAction);
