@@ -229,11 +229,14 @@ def create_app(store=None, start_workers=True):
     def sources(user_id: str):
         store.require_user(user_id)
         return store.rows(
-            """SELECT s.*, CASE WHEN EXISTS (
-                   SELECT 1 FROM jobs j WHERE j.kind='purge_source'
-                     AND j.target=s.id AND j.user_id=s.user_id
-                     AND j.state IN ('PENDING','RUNNING')
-               ) THEN 'PURGING' ELSE s.status END AS status
+            """SELECT s.id,s.user_id,s.provider,s.source_key,s.url,s.title,
+                      s.is_playlist,s.monitored,
+                      CASE WHEN EXISTS (
+                        SELECT 1 FROM jobs j WHERE j.kind='purge_source'
+                        AND j.target=s.id AND j.user_id=s.user_id
+                        AND j.state IN ('PENDING','RUNNING')
+                      ) THEN 'PURGING' ELSE s.status END AS status,
+                      s.error,s.synced_at,s.next_sync,s.playlist_path
                FROM sources s WHERE s.user_id=? ORDER BY s.title""", (user_id,)
         )
 
