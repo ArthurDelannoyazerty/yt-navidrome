@@ -916,6 +916,8 @@ class Pipeline:
 
     async def process_source(self, job):
         source = self.store.owned("sources", job["target"], job["user_id"])
+        if source["status"] in {"REMOVED", "PURGING"}:
+            raise ValueError("Archived or purging sources cannot synchronize")
         self.store.update("sources", source["id"], status="SYNCING", error=None)
         http = HttpPolicy(self.store, self.report(job))
         if source["provider"] == "spotify":
