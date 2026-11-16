@@ -250,20 +250,20 @@ test("real browser: first-visit account choice persists without silently picking
   if (!chrome) return;
   const origin = await fixtureServer(t, fixtures());
   await chrome.send("Page.navigate", {url: origin});
-  await chrome.until("document.querySelector('#chooseLibraryDialog').open");
+  await chrome.until("document.querySelector('#chooseLibraryDialog')?.open === true");
   assert.equal(await chrome.evaluate("document.querySelector('#user').value"), "");
   assert.equal(await chrome.evaluate("document.querySelector('#urls').disabled"), true);
   assert.equal(await chrome.evaluate("localStorage.getItem('music-explicit-user-v1')"), null);
   await chrome.evaluate("document.querySelector('#chooseLibraryUser').value='guest'; document.querySelector('#chooseLibraryForm').requestSubmit()");
-  await chrome.until("document.querySelector('#user').value==='guest' && !document.querySelector('#chooseLibraryDialog').open");
+  await chrome.until("document.querySelector('#user')?.value==='guest' && document.querySelector('#chooseLibraryDialog')?.open === false");
   assert.equal(await chrome.evaluate("localStorage.getItem('music-explicit-user-v1')"), "guest");
   await chrome.send("Page.reload", {ignoreCache: true});
-  await chrome.until("document.querySelector('#user').value==='guest'");
+  await chrome.until("document.querySelector('#user')?.value==='guest'");
   assert.equal(await chrome.evaluate("document.querySelector('#chooseLibraryDialog').open"), false);
   await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("localStorage.getItem('music-explicit-user-v1')==='admin'");
   await chrome.send("Page.reload", {ignoreCache: true});
-  await chrome.until("document.querySelector('#user').value==='admin'");
+  await chrome.until("document.querySelector('#user')?.value==='admin'");
   assert.equal(await chrome.evaluate("document.querySelector('#chooseLibraryDialog').open"), false);
 });
 
