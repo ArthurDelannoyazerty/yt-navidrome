@@ -62,25 +62,34 @@ DESCRIPTION=Discovery Date: 2019-04-17--21-36-42 UTC
 
 Writing both keys keeps MediaFile/beets and common tag viewers compatible.
 
-## Explicit user selection and source cleanup
+## Account selection and archived sources
 
-The web interface starts with no library user selected. Choose the intended
-library user before importing or viewing music. A previously selected account
-in browser storage never causes a silent selection on page load.
+On the first visit in a browser profile, choose a library in the modal account
+chooser. The choice is stored only in that browser's `localStorage` under
+`music-explicit-user-v1`; no password, cookie or server-side account login is
+created. The old automatically populated `music-user` preference is not trusted.
+Subsequent visits use the saved choice if the account still exists; otherwise
+the chooser reappears. The selector in the top-right corner switches library at
+any time and persists the explicit choice. Clearing site storage, incognito
+sessions or switching devices causes the chooser to reappear. Periodic prompts
+are not necessary; destructive operations require their own confirmations.
 
-**Sources → Remove** deletes the source and exported playlist but retains
-imported music. **Sources → Remove source and its music…** previews the number
-of exclusively associated and shared tracks, requires confirmation of the exact
-source URL and current user, disables resync, and queues a durable purge.
-Only tracks without another attributed source (or independent discovery origin)
-are removed. Tracks with another source remain playable. File and per-user
-beets cleanup is retried after a worker interruption.
+**Sources → Archive source** disables monitoring, removes the exported playlist
+and current playlist memberships, but preserves the imported music and durable
+origin attribution. It remains visible under **Archived sources**, where it can
+be restored or purged. Restore schedules a new sync with monitoring off.
 
-A source attribution is retained when a monitored playlist resyncs and no
-longer includes an earlier entry. The purge therefore also cleans up music
-imported in previous snapshots. Sources deleted using the old retain-music
-action **before** this feature cannot be reconstructed unambiguously and are
-not included in new source-scoped purges.
+**Remove source and its music…** previews the exact user's exclusive and shared
+tracks and requires two confirmations. The source purge is processed by the
+single-worker queue, with a durable cleanup receipt so file and beets cleanup
+can be retried. Tracks claimed by another source or independently added remain
+available, even if another source was previously archived. Source-origin
+attribution is retained across playlist resyncs, not only current memberships.
+
+Source records already deleted by older versions cannot be reconstructed
+reliably; these pre-upgrade sources cannot appear in Archived sources without
+an explicit migration from trustworthy external evidence. Back up the SQLite
+database before deploying the schema migration.
 
 ## Track actions
 
