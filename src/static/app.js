@@ -218,6 +218,44 @@ for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => setTab(tab.dataset.tab));
 }
 
+// A new key deliberately ignores the old silently populated "music-user" value.
+const LIBRARY_PREFERENCE_KEY = "music-explicit-user-v1";
+
+function rememberedLibrary() {
+  try { return localStorage.getItem(LIBRARY_PREFERENCE_KEY); }
+  catch (_) { return null; }
+}
+
+function rememberLibrary(user) {
+  try { localStorage.setItem(LIBRARY_PREFERENCE_KEY, user); }
+  catch (_) { /* Storage may be disabled; selection still works for this page. */ }
+}
+
+function openLibraryChooser(users) {
+  const selector = $("chooseLibraryUser");
+  const placeholder = node("option", "Select your library…");
+  placeholder.value = "";
+  placeholder.disabled = true;
+  selector.replaceChildren(placeholder, ...users.map(user => {
+    const option = node("option", user);
+    option.value = user;
+    return option;
+  }));
+  selector.value = "";
+  const dialog = $("chooseLibraryDialog");
+  if (!dialog.open) dialog.showModal();
+}
+
+$("chooseLibraryForm").addEventListener("submit", guard(async event => {
+  event.preventDefault();
+  const selected = $("chooseLibraryUser").value;
+  if (!selected || !Array.from($("user").options).some(option => option.value === selected)) {
+    throw new Error("Select a valid library account.");
+  }
+  $("user").value = selected;
+  changeUser();
+}));
+
 async function loadUsers(preferred) {
   const users = await api("/api/users");
   const select = $("user");
@@ -229,10 +267,10 @@ async function loadUsers(preferred) {
     option.value = user;
     return option;
   }));
-  // Only preserve the account if it was explicitly chosen on this page.
-  // Never infer a library from the first user, 'admin', or localStorage.
+  // Only an explicitly selected, still-existing library can be remembered.
   select.value = users.includes(preferred) ? preferred : "";
   changeUser();
+  if (!select.value) openLibraryChooser(users);
 }
 
 function changeUser() {
@@ -282,7 +320,7 @@ function changeUser() {
   $("resultsSummary").textContent = "Loading matching tracks...";
   $("exportFailures").href = `/api/failures/export?user_id=${encodeURIComponent(state.user)}`;
   for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
-  localStorage.setItem("music-user", state.user);
+  if (state.user) rememberLibrary(state.user);
   state.page = 1;
   state.after = 0;
   state.generation += 1;
@@ -295,6 +333,7 @@ function changeUser() {
   $("logs").replaceChildren();
   $("tracks").replaceChildren();
   $("sources").replaceChildren();
+  $("archivedSources").replaceChildren();
   if (!state.user) {
     $("libraryScope").textContent = "Select a library user to view its music";
     $("resultsSummary").textContent = "Select a library user to begin.";
@@ -344,19 +383,32 @@ function renderSource(source) {
   if (source.synced_at) content.append(node("p", `Last sync: ${time(source.synced_at)}`, "hint"));
   if (source.error) content.append(node("div", source.error, "error-text"));
   const controls = node("div", null, "source-buttons");
+  if (source.status === "REMOVED") {
+    controls.append(button("Restore source", async () => {
+      const user = state.user;
+      if (user !== source.user_id) throw new Error("Library changed; reopen this source.");
+      const response = await api(
+        `/api/sources/${encodeURIComponent(source.id)}/restore`,
+        {user_id: user, source_url: source.url}
+      );
+      if (user !== state.user) return;
+      notice(response.message);
+      await loadSources(state.generation, false);
+    }));
+  }
   if (source.status === "PURGING") {
     controls.append(node("small", "Source purge queued or in progress.", "hint"));
     row.append(content, controls);
     return row;
   }
-  if (source.provider !== "legacy") {
+  if (source.status !== "REMOVED" && source.provider !== "legacy") {
     controls.append(button("Sync / retry", async () => {
       await api(`/api/sources/${encodeURIComponent(source.id)}/retry`, {user_id: state.user});
       notice("Source sync queued");
       await loadSources(state.generation, false);
     }));
   }
-  if (source.is_playlist && source.provider !== "legacy") {
+  if (source.status !== "REMOVED" && source.is_playlist && source.provider !== "legacy") {
     const monitor = button(source.monitored ? "Pause monitoring" : "Resume monitoring", async () => {
       const user = state.user;
       await api(`/api/sources/${encodeURIComponent(source.id)}/monitoring`, {user_id: user, monitored: !source.monitored});
@@ -366,8 +418,8 @@ function renderSource(source) {
     }, "secondary");
     controls.append(monitor);
   }
-  controls.append(button("Remove", async () => {
-    if (!confirm("Remove this source and exported playlist? Music files are retained.")) return;
+  if (source.status !== "REMOVED") controls.append(button("Archive source", async () => {
+    if (!confirm("Archive this source and remove its playlist from this library? Imported music will be retained. You can purge it later from Archived sources.")) return;
     await api(`/api/sources/${encodeURIComponent(source.id)}?user_id=${encodeURIComponent(state.user)}`, null, "DELETE");
     await loadSources(state.generation, false);
   }, "danger"));
@@ -384,6 +436,7 @@ function renderSource(source) {
       `including their audio files. ${preview.shared_tracks} tracks shared with ` +
       "other sources or independently added will be kept. This cannot be undone.";
     if (!confirm(message)) return;
+    if (!confirm(`Final confirmation: permanently erase only music exclusive to this source for ${user}? This cannot be undone.`)) return;
     if (user !== state.user) throw new Error("Library changed; reopen this source.");
     const result = await api(`${path}/purge`, {user_id: user, source_url: source.url});
     notice(result.message);
@@ -398,7 +451,18 @@ async function loadSources(generation, background = false) {
   const sources = await api(`/api/sources?user_id=${encodeURIComponent(state.user)}`, null, null, current);
   if (!current() || generation !== state.generation) return;
   state.sources = sources;
-  updateKeyedChildren($("sources"), sources, {
+  const archived = sources.filter(source => source.status === "REMOVED");
+  const active = sources.filter(source => source.status !== "REMOVED");
+  $("archivedSourcesPanel").querySelector("summary").textContent =
+    `Archived sources (music retained): ${archived.length}`;
+  updateKeyedChildren($("archivedSources"), archived, {
+    key: source => source.id,
+    signature: stable,
+    render: renderSource,
+    background,
+    empty: () => node("p", "No archived sources for this user.", "empty"),
+  });
+  updateKeyedChildren($("sources"), active, {
     key: source => source.id,
     signature: stable,
     render: renderSource,
@@ -1383,7 +1447,7 @@ async function pollSlow() {
   try {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("spotify") === "connected";
-    await loadUsers(null);
+    await loadUsers(rememberedLibrary());
     if (connected) {
       setTab("sources"); notice("Spotify connected. Import a source or browse your playlists.");
       window.history.replaceState(null, "", window.location.pathname);
