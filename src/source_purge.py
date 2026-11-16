@@ -226,7 +226,9 @@ async def _finish(pipeline, job: dict, receipt: dict) -> None:
             for recorded in item["paths"]:
                 path = _inside_user(recorded, user)
                 # Never unlink an audio file now referenced by another track.
-                if not store.one("SELECT 1 FROM assets WHERE path=? LIMIT 1", (str(path),)):
+                if not store.one("SELECT 1 FROM assets WHERE path=? LIMIT 1", (str(path),)) and not store.one(
+                    "SELECT 1 FROM tracks WHERE file_path=? LIMIT 1", (str(path),)
+                ):
                     path.unlink(missing_ok=True)
             shutil.rmtree(track_stage, ignore_errors=True)
             shutil.rmtree(cleanup_stage, ignore_errors=True)
