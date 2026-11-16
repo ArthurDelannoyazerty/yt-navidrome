@@ -908,7 +908,7 @@ class Store:
                 "SELECT status FROM sources WHERE user_id=? AND provider=? AND source_key=?",
                 (user, ref.provider, ref.key),
             ).fetchone()
-            if existing and (existing["status"] == "PURGING" or con.execute(
+            if existing and (existing["status"] in {"PURGING", "REMOVED"} or con.execute(
                 """SELECT 1 FROM jobs WHERE kind='purge_source' AND user_id=?
                    AND target IN (
                        SELECT id FROM sources
