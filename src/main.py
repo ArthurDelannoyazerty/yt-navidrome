@@ -229,7 +229,12 @@ def create_app(store=None, start_workers=True):
     def sources(user_id: str):
         store.require_user(user_id)
         return store.rows(
-            "SELECT * FROM sources WHERE user_id=? ORDER BY title", (user_id,)
+            """SELECT s.*, CASE WHEN EXISTS (
+                   SELECT 1 FROM jobs j WHERE j.kind='purge_source'
+                     AND j.target=s.id AND j.user_id=s.user_id
+                     AND j.state IN ('PENDING','RUNNING')
+               ) THEN 'PURGING' ELSE s.status END AS status
+               FROM sources s WHERE s.user_id=? ORDER BY s.title""", (user_id,)
         )
 
     @app.post("/api/sources")
@@ -253,7 +258,10 @@ def create_app(store=None, start_workers=True):
     @app.post("/api/sources/{source_id}/retry")
     def retry_source(source_id: str, data: ActionInput):
         source = store.owned("sources", source_id, data.user_id)
-        if source["status"] == "PURGING":
+        if source["status"] == "PURGING" or store.one(
+            "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND user_id=? AND state IN ('PENDING','RUNNING')",
+            (source_id, data.user_id),
+        ):
             raise ValueError("Source purge is already in progress")
         if not store.enqueue("sync", source_id, data.user_id):
             raise ValueError("This source already has an active sync")
@@ -265,7 +273,10 @@ def create_app(store=None, start_workers=True):
         with store.db() as con:
             con.execute("BEGIN IMMEDIATE")
             source = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?", (source_id, data.user_id)).fetchone()
-            if source and source["status"] == "PURGING":
+            if source and (source["status"] == "PURGING" or con.execute(
+                "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND user_id=? AND state IN ('PENDING','RUNNING')",
+                (source_id, data.user_id),
+            ).fetchone()):
                 raise ValueError("Source purge is already in progress")
             if not source:
                 raise LookupError("Source not found for this user")
@@ -279,7 +290,10 @@ def create_app(store=None, start_workers=True):
     @app.delete("/api/sources/{source_id}")
     def delete_source(source_id: str, user_id: str):
         source = store.owned("sources", source_id, user_id)
-        if source["status"] == "PURGING":
+        if source["status"] == "PURGING" or store.one(
+            "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND user_id=? AND state IN ('PENDING','RUNNING')",
+            (source_id, user_id),
+        ):
             raise ValueError("Source purge is already in progress")
         with store.db() as con:
             con.execute("BEGIN IMMEDIATE")
