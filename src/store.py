@@ -19,7 +19,7 @@ from library_query import track_where
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, correction_revision, prepare_correction
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class JobCancelled(RuntimeError):
@@ -130,6 +130,15 @@ CREATE TABLE IF NOT EXISTS memberships (
  position INTEGER NOT NULL,
  PRIMARY KEY(source_id, entry_id)
 );
+
+-- A durable source-to-origin association survives playlist resyncs. Memberships
+-- alone are not sufficient to identify files to clean up after entries change.
+CREATE TABLE IF NOT EXISTS source_origins (
+ source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+ origin_id TEXT NOT NULL REFERENCES track_origins(id) ON DELETE CASCADE,
+ PRIMARY KEY(source_id, origin_id)
+);
+CREATE INDEX IF NOT EXISTS source_origin_origin ON source_origins(origin_id);
 CREATE INDEX IF NOT EXISTS membership_origin ON memberships(origin_id);
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -272,7 +281,7 @@ DROP_ORDER = [
     "artwork_preferences", "artwork_candidates",
     "metadata_artist_aliases",
     "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
-    "assets", "memberships", "track_origins", "tracks", "operation_receipts",
+    "assets", "source_origins", "memberships", "track_origins", "tracks", "operation_receipts",
     "jobs", "sources",
     "events", "settings", "api_clock", "quota", "users",
 ]
@@ -355,7 +364,7 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, 1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
@@ -434,7 +443,7 @@ class Store:
                 con.commit()
 
             spotify_migration = ""
-            if version in (1, 2, 3, 4, 5, 6, 7):
+            if version in (1, 2, 3, 4, 5, 6, 7, 8):
                 migration_version = con.execute("PRAGMA user_version").fetchone()[0]
                 self.backup_database(f"schema-v{migration_version}")
                 columns = {row["name"] for row in con.execute("PRAGMA table_info(track_origins)")}
@@ -442,6 +451,11 @@ class Store:
                     spotify_migration = "ALTER TABLE track_origins ADD COLUMN is_discovery INTEGER NOT NULL DEFAULT 1;\n"
             con.executescript("BEGIN IMMEDIATE;\n" + spotify_migration + SCHEMA + METADATA_SCHEMA + ARTWORK_SCHEMA
                               + f"\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;")
+            if version < 9:
+                # Backfill associations for the currently configured sources.
+                # Already removed sources cannot be reconstructed reliably.
+                con.execute("""INSERT OR IGNORE INTO source_origins(source_id,origin_id)
+                               SELECT source_id,origin_id FROM memberships""")
             con.executemany(
                 "INSERT OR IGNORE INTO users VALUES (?)",
                 [("admin",), ("guest",)],
@@ -859,7 +873,7 @@ class Store:
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
-                "SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 AND not_before<=? ORDER BY id LIMIT 1",
+                "SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 AND not_before<=? ORDER BY CASE WHEN kind='purge_source' THEN 0 ELSE 1 END,id LIMIT 1",
                 (time.time(),),
             ).fetchone()
             if not row:
@@ -1017,6 +1031,12 @@ class Store:
                                 "UPDATE tracks SET operation_state='QUEUED',operation_kind='SPOTIFY_RESOLVE',operation_error=NULL,updated_at=? WHERE id=?",
                                 (now, track_id),
                             )
+                # Retain attribution even if a later playlist snapshot removes
+                # this entry; only an explicit source purge may erase it.
+                con.execute(
+                    "INSERT OR IGNORE INTO source_origins(source_id,origin_id) VALUES (?,?)",
+                    (source["id"], origin_id),
+                )
                 # An observed scan time is not evidence of a playlist addition.
                 membership_added = playlist_added if source["is_playlist"] else entry.added_at
                 con.execute("INSERT INTO memberships VALUES (?,?,?,?,?)", (source["id"], entry.entry_id, origin_id, membership_added, entry.position))
