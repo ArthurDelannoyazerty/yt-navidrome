@@ -156,3 +156,55 @@ def test_frontend_new_elements_and_scripts_are_present_and_cache_versioned(db):
         page = client.get("/").text
         assert re.search(r'/static/metadata-ui\.js\?v=[a-f0-9]{12}', page)
     assert '"source"' in js and "500" in js
+
+
+def test_release_browser_uses_recording_filter_and_keeps_multiple_editions(db, monkeypatch):
+    calls = []
+
+    def send(self, original, session, prepared, **kwargs):
+        calls.append((prepared, kwargs))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({
+            "release-count": 2,
+            "releases": [
+                {"id": RID, "title": "Original album", "date": "2001-04-01", "status": "Official"},
+                {"id": "33333333-3333-4333-8333-333333333333",
+                 "title": "Compilation", "date": "2014", "status": "Official"},
+            ],
+        }).encode()
+        return response
+
+    monkeypatch.setattr(HttpPolicy, "send", send)
+    searcher = MusicBrainzSearch(db)
+
+    async def run():
+        first, second = await asyncio.gather(searcher.releases(ID), searcher.releases(ID))
+        assert first["releases"] == second["releases"]
+        assert [release["title"] for release in first["releases"]] == ["Original album", "Compilation"]
+        first["releases"].clear()
+        assert len((await searcher.releases(ID))["releases"]) == 2
+
+    asyncio.run(run())
+    assert len(calls) == 1
+    assert calls[0][0].url.startswith("https://musicbrainz.org/ws/2/release?")
+    assert "recording=" + ID in calls[0][0].url
+    assert "limit=100" in calls[0][0].url
+    assert calls[0][1]["allow_redirects"] is False
+
+
+def test_release_endpoint_validates_user_and_exposes_retry_after(db, monkeypatch):
+    app = create_app(db, start_workers=False)
+
+    async def deferred(*args):
+        raise ApiDeferred("MusicBrainz unavailable", retry_at=time.time() + 30)
+
+    monkeypatch.setattr(app.state.musicbrainz_search, "releases", deferred)
+    with TestClient(app) as client:
+        url = "/api/musicbrainz/releases"
+        params = {"user_id": "admin", "recording_id": ID}
+        response = client.get(url, params=params)
+        assert response.status_code == 429
+        assert int(response.headers["Retry-After"]) >= 29
+        assert client.get(url, params={**params, "user_id": "other"}).status_code == 400
+        assert client.get(url, params={**params, "recording_id": "bad"}).status_code == 422
