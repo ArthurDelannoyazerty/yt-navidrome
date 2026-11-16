@@ -62,6 +62,26 @@ DESCRIPTION=Discovery Date: 2019-04-17--21-36-42 UTC
 
 Writing both keys keeps MediaFile/beets and common tag viewers compatible.
 
+## Explicit user selection and source cleanup
+
+The web interface starts with no library user selected. Choose the intended
+library user before importing or viewing music. A previously selected account
+in browser storage never causes a silent selection on page load.
+
+**Sources → Remove** deletes the source and exported playlist but retains
+imported music. **Sources → Remove source and its music…** previews the number
+of exclusively associated and shared tracks, requires confirmation of the exact
+source URL and current user, disables resync, and queues a durable purge.
+Only tracks without another attributed source (or independent discovery origin)
+are removed. Tracks with another source remain playable. File and per-user
+beets cleanup is retried after a worker interruption.
+
+A source attribution is retained when a monitored playlist resyncs and no
+longer includes an earlier entry. The purge therefore also cleans up music
+imported in previous snapshots. Sources deleted using the old retain-music
+action **before** this feature cannot be reconstructed unambiguously and are
+not included in new source-scoped purges.
+
 ## Track actions
 
 ### Redownload
@@ -224,7 +244,7 @@ private sources. See [Spotify setup and workflow](docs/spotify.md).
 
 ## SQLite schema versioning
 
-The database uses `PRAGMA user_version`. Fresh installations create schema v8.
+The database uses `PRAGMA user_version`. Fresh installations create schema v9.
 An unversioned database containing data is refused rather than silently changed.
 
 Existing versioned installations upgrade in place, with a consistent SQLite
@@ -241,7 +261,7 @@ backup under `state/backups/` before each versioned migration:
 - v7 → v8 distinguishes discovery origins from automatically selected audio
   origins and retains Spotify/audio associations through recording merges.
 
-Origin identity rejections, source snapshots, identification reports and explicit
+- v8 → v9 retains source-to-origin attribution across playlist resyncs, enabling safe source purges.\n\nOrigin identity rejections, source snapshots, identification reports and explicit
 artist aliases are retained in additive tables. Existing tracks, assets,
 memberships and confirmed identities are preserved.
 
