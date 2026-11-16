@@ -121,6 +121,8 @@ def test_failed_approval_rechecks_saved_plan_after_user_unblocks(db, environment
         raise ReachedApply()
 
     monkeypatch.setattr(pipeline, 'bridge', bridge)
+    # Applying tags now copies the real candidate into an isolated work file.
+    (tmp_path / 'candidate.opus').write_bytes(b'approved audio bytes')
     with pytest.raises(ReachedApply):
         asyncio.run(pipeline._apply_candidate(
             {'user_id': 'admin', 'target': track['id']}, track, good,
