@@ -140,6 +140,48 @@ class MusicBrainzSearch:
             finally:
                 response.close()
 
+    def request_releases(self, recording_id: str, page: int) -> dict:
+        """Browse actual releases for a recording; search snippets are incomplete."""
+        policy = HttpPolicy(self.store)
+        with requests.Session() as session:
+            prepared = session.prepare_request(requests.Request(
+                "GET", API_ROOT + "release",
+                params={"recording": recording_id, "fmt": "json", "limit": 100, "offset": (page - 1) * 100},
+                headers={"User-Agent": os.getenv("HTTP_USER_AGENT") or USER_AGENT, "Accept": "application/json"},
+            ))
+            response = policy.send(requests.sessions.Session.send, session, prepared,
+                                   timeout=(5, 15), allow_redirects=False)
+            try:
+                if response.status_code != 200:
+                    raise ApiDeferred(f"MusicBrainz releases returned HTTP {response.status_code}",
+                                      retry_at=time.time() + 60)
+                data = response.json()
+                raw = data.get("releases")
+                if not isinstance(raw, list):
+                    raise ValueError("MusicBrainz returned an invalid release list")
+                releases = []
+                for release in raw:
+                    if not isinstance(release, dict):
+                        continue
+                    if rid := valid_id(release.get("id")):
+                        releases.append({"id": rid, "title": str(release.get("title") or "Untitled")[:1000],
+                                         "date": release.get("date"), "country": release.get("country"),
+                                         "status": release.get("status")})
+                return {"recording_id": recording_id, "releases": releases,
+                        "page": page, "total": max(0, int(data.get("release-count",
+                            data.get("release_count", len(releases)))))}
+            finally:
+                response.close()
+
+    async def releases(self, recording_id: str, page: int = 1) -> dict:
+        identity = valid_id(recording_id)
+        if not identity:
+            raise ValueError("Invalid MusicBrainz recording ID")
+        if type(page) is not int or not 1 <= page <= 20:
+            raise ValueError("Release page must be between 1 and 20")
+        return await self._cached(("releases", identity, page),
+                                  lambda: self.request_releases(identity, page))
+
     def request_artist(self, artist_id: str) -> dict:
         """Resolve IDs server-side before storing an explicitly confirmed alias."""
         policy = HttpPolicy(self.store)
