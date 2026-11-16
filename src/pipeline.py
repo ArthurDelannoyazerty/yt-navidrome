@@ -1034,6 +1034,9 @@ class Pipeline:
             await self.process_source(job)
         elif job["kind"] == "track":
             await self.process_track(job)
+        elif job["kind"] == "purge_source":
+            from source_purge import process
+            await process(self, job)
         elif job["kind"] == "integrity":
             await self.process_integrity(job)
         else:
