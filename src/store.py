@@ -904,6 +904,12 @@ class Store:
     def add_source(self, ref, user, monitored=False, label=None):
         self.require_user(user)
         with self.db() as con:
+            existing = con.execute(
+                "SELECT status FROM sources WHERE user_id=? AND provider=? AND source_key=?",
+                (user, ref.provider, ref.key),
+            ).fetchone()
+            if existing and existing["status"] == "PURGING":
+                raise ValueError("Wait for this source's purge to finish before adding it again")
             con.execute(
                 """INSERT INTO sources(
                     id,user_id,provider,source_key,url,title,is_playlist,monitored
