@@ -193,7 +193,8 @@ window.MetadataUI = (() => {
           title.append(item.mbid ? mbLink("recording", item.mbid, item.title) : node("strong", item.title));
           title.append(evidence(item));
           const artist = node("td", item.artist || "—", "approval-artist");
-          const durationCell = node("td", duration(item.evidence?.candidate_duration_seconds), "approval-duration");
+          const recommended = item.evidence?.candidate_duration_seconds;
+          const durationCell = node("td", Number.isFinite(recommended) ? duration(recommended) : "", "approval-duration");
           const score = node("td", item.match_score ?? item.similarity ?? "—", "approval-score");
           for (const cell of [title, artist, durationCell, score]) cell.rowSpan = editions.length;
           row.append(title, artist);
