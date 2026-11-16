@@ -908,7 +908,14 @@ class Store:
                 "SELECT status FROM sources WHERE user_id=? AND provider=? AND source_key=?",
                 (user, ref.provider, ref.key),
             ).fetchone()
-            if existing and existing["status"] == "PURGING":
+            if existing and (existing["status"] == "PURGING" or con.execute(
+                """SELECT 1 FROM jobs WHERE kind='purge_source' AND user_id=?
+                   AND target IN (
+                       SELECT id FROM sources
+                       WHERE user_id=? AND provider=? AND source_key=?
+                   ) AND state IN ('PENDING','RUNNING')""",
+                (user, user, ref.provider, ref.key),
+            ).fetchone()):
                 raise ValueError("Wait for this source's purge to finish before adding it again")
             con.execute(
                 """INSERT INTO sources(
