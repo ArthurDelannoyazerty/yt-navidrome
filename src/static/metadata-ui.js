@@ -8,7 +8,7 @@ window.MetadataUI = (() => {
     queueLoading: false, page: 1, maxPage: 1, artistId: null, effectiveQuery: null,
     retryUntil: 0, pickerPage: 1, submitted: new Set(), manualOriginal: {},
     actions: {base: [], search: []}, audioKey: null, audioSerial: 0,
-    releaseCache: new Map()};
+    releaseCache: new Map(), searchItems: [], searchEntity: "recording"};
   const manualFields = {artist: "metadataManualArtist", title: "metadataManualTitle", album: "metadataManualAlbum",
     mbid: "metadataManualMbid", release_id: "metadataManualRelease"};
   const list = value => Array.isArray(value) ? value.join("; ") : value || "";
@@ -47,7 +47,7 @@ window.MetadataUI = (() => {
   function reset() {
     leave(); ui.user = null; ui.context = null; ui.track = null; ui.tracks = []; ui.index = -1;
     ui.scope = ""; ui.submitted.clear(); ui.actions = {base: [], search: []};
-    ui.retryUntil = 0; ui.pickerPage = 1; ui.releaseCache.clear();
+    ui.retryUntil = 0; ui.pickerPage = 1; ui.releaseCache.clear(); ui.searchItems = [];
     $("approvalFilter").value = "NEEDS_APPROVAL"; $("approvalSearch").value = "";
     $("approvalPickerSearch").value = ""; $("approvalPickerList").replaceChildren();
     $("approvalWorkspace").hidden = true; $("approvalEmpty").hidden = true;
@@ -162,6 +162,15 @@ window.MetadataUI = (() => {
     const found = new Set();
     return (releases || []).filter(release => release?.id && !found.has(release.id) && found.add(release.id));
   }
+  function moreReleasesButton(mbid, group = "base") {
+    const cached = ui.releaseCache.get(mbid);
+    const count = cached?.releases?.length || 0;
+    if (cached?.page && count >= cached.total) return null;
+    if (cached?.page >= 20) return null;
+    const label = cached?.pending ? "Finding albums..." : cached?.error ? "Retry albums" : "More albums";
+    return control(label, () => loadReleases(mbid, (cached?.page || 0) + 1),
+      !cached?.pending && ui.context.can_correct, group);
+  }
   function renderSuggestions() {
     const body = $("metadataSuggestions");
     const matches = choices().filter(item => item.kind !== "source" && item.kind !== "asis" && !item.asis);
@@ -188,36 +197,53 @@ window.MetadataUI = (() => {
           const score = node("td", item.match_score ?? item.similarity ?? "—", "approval-score");
           for (const cell of [title, artist, durationCell, score]) cell.rowSpan = editions.length;
           row.append(title, artist);
-          row.append(node("td", release ? editionLabel(release) : (item.album || "Automatic release"), "approval-album"));
-          row.append(durationCell, score);
+          const album = node("td", release ? editionLabel(release) : (item.album || "Automatic release"), "approval-album");
+          if (editions.length === 1 && item.mbid && ui.releaseCache.has(item.mbid)) {
+            const more = moreReleasesButton(item.mbid); if (more) album.append(more);
+          }
+          row.append(album, durationCell, score);
           if (item.mbid && !ui.releaseCache.has(item.mbid)) loadReleases(item.mbid);
         } else {
-          row.append(node("td", editionLabel(release), "approval-album"));
+          const album = node("td", editionLabel(release), "approval-album");
+          if (index === editions.length - 1) {
+            const more = moreReleasesButton(item.mbid); if (more) album.append(more);
+          }
+          row.append(album);
         }
         body.append(row);
       }
     }
     $("beetsEmpty").hidden = matches.length > 0;
   }
+  function refreshReleaseTables() {
+    if (!active() || !ui.context) return;
+    renderSuggestions();
+    if (ui.searchItems.length && ui.searchEntity === "recording") {
+      ui.actions.search = [];
+      $("mbResults").replaceChildren(resultTable(ui.searchItems, ui.searchEntity));
+    }
+    updateButtons();
+  }
   async function loadReleases(mbid, page = 1) {
-    if (!mbid || ui.releaseCache.has(mbid)) return;
+    if (!mbid) return;
+    const existing = ui.releaseCache.get(mbid);
+    if (existing?.pending || (page === 1 && existing?.page)) return;
     const context = ui.context, user = ui.user;
-    // Mark requests as pending to avoid a burst of duplicate lookups.
-    ui.releaseCache.set(mbid, {pending: true, releases: []});
+    ui.releaseCache.set(mbid, {...existing, pending: true, releases: existing?.releases || []});
     try {
       const params = new URLSearchParams({user_id: user, recording_id: mbid, page: String(page)});
       const response = await fetch(`/api/musicbrainz/releases?${params}`, {cache: "no-store"});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Release lookup unavailable");
       if (context !== ui.context || user !== ui.user) return;
-      ui.releaseCache.set(mbid, data);
-      renderSuggestions();
+      ui.releaseCache.set(mbid, {...data, pending: false,
+        releases: albumOptions([...(existing?.releases || []), ...data.releases])});
     } catch (error) {
       if (context !== ui.context || user !== ui.user) return;
-      ui.releaseCache.set(mbid, {releases: [], error: error.message || String(error)});
-      // Automatic selection remains possible while MusicBrainz is unavailable.
-      renderSuggestions();
+      ui.releaseCache.set(mbid, {...existing, pending: false, releases: existing?.releases || [],
+        error: error.message || String(error)});
     }
+    refreshReleaseTables();
   }
   function renderDecisions() {
     const alias = ui.context.approved_artist_alias;
@@ -420,7 +446,8 @@ window.MetadataUI = (() => {
         if (aliasNames(item)) details.append(node("p", aliasNames(item)));
         if (item.artists?.length === 1) { const remember = rememberButton(item.artists[0], "search"); if (remember) details.append(remember); }
         info.append(details);
-        const releases = albumOptions(item.releases);
+        const cached = ui.releaseCache.get(item.id);
+        const releases = albumOptions(cached?.releases?.length ? cached.releases : item.releases);
         const editions = releases.length ? releases : [null];
         for (const [index, release] of editions.entries()) {
           const editionRow = index ? node("tr") : row;
@@ -433,10 +460,17 @@ window.MetadataUI = (() => {
             const artist = node("td", item.artist || "—", "approval-artist");
             const length = node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null), "approval-duration");
             const album = node("td", release ? editionLabel(release) : "Automatic release", "approval-album");
+            if (editions.length === 1) {
+              const more = moreReleasesButton(item.id, "search"); if (more) album.append(more);
+            }
             for (const cell of [info, artist, length]) cell.rowSpan = editions.length;
             editionRow.append(info, artist, album, length);
           } else {
-            editionRow.append(node("td", editionLabel(release), "approval-album"));
+            const album = node("td", editionLabel(release), "approval-album");
+            if (index === editions.length - 1) {
+              const more = moreReleasesButton(item.id, "search"); if (more) album.append(more);
+            }
+            editionRow.append(album);
           }
           body.append(editionRow);
         }
@@ -452,7 +486,7 @@ window.MetadataUI = (() => {
       status(`MusicBrainz retry in ${Math.ceil((ui.retryUntil - Date.now()) / 1000)} s.`);
       clearTimeout(ui.timer); ui.timer = setTimeout(search, Math.max(500, ui.retryUntil - Date.now())); return;
     }
-    invalidateSearch(); ui.actions.search = []; $("mbResults").replaceChildren();
+    invalidateSearch(); ui.actions.search = []; ui.searchItems = []; $("mbResults").replaceChildren();
     const serial = ui.searchSerial, user = ui.user, context = ui.context, entity = $("mbEntity").value;
     const controller = new AbortController(); ui.controller = controller;
     const effective = ui.page > 1 ? ui.effectiveQuery : null;
@@ -476,6 +510,7 @@ window.MetadataUI = (() => {
       ui.maxPage = Math.max(1, Math.min(100, Math.ceil(data.total / data.limit)));
       $("mbPage").textContent = `${data.page} / ${ui.maxPage}`;
       $("mbPrev").disabled = data.page <= 1; $("mbNext").disabled = data.page >= ui.maxPage;
+      ui.searchItems = data.items; ui.searchEntity = entity;
       if (data.items.length) $("mbResults").append(resultTable(data.items, entity));
       status(data.query_note || (data.items.length ? "" : "No results."), data.query_strategy === "title_only");
       updateButtons();
