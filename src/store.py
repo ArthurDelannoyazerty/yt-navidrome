@@ -1143,7 +1143,16 @@ class Store:
                 if not isinstance(index, int) or index < 0 or index >= len(choices):
                     raise ValueError("Invalid metadata candidate")
                 selected = choices[index]
-                payload = {**pending, "mode": "resume", "selected": selected}
+                # An album button selects a particular release of this recording.
+                # Keep that MBID with the accepted choice across provider deferrals.
+                release_id = payload.get("release_id")
+                overrides = dict(pending.get("overrides") or {})
+                if release_id:
+                    if not selected.get("mbid") or selected.get("asis") or selected.get("kind") == "source":
+                        raise ValueError("An album can only be chosen for a MusicBrainz recording")
+                    overrides["release_id"] = str(uuid.UUID(release_id))
+                payload = {**pending, "mode": "resume", "selected": selected,
+                           "overrides": overrides}
                 mode = pending.get("action", "reprocess")
                 con.execute("UPDATE tracks SET selected=? WHERE id=?", (json.dumps(selected), track_id))
             elif mode in {"redownload", "reprocess", "refresh_suggestions"}:
