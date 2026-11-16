@@ -258,7 +258,7 @@ def create_app(store=None, start_workers=True):
     @app.post("/api/sources/{source_id}/retry")
     def retry_source(source_id: str, data: ActionInput):
         source = store.owned("sources", source_id, data.user_id)
-        if source["status"] == "PURGING" or store.one(
+        if source["status"] in {"PURGING", "REMOVED"} or store.one(
             "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND user_id=? AND state IN ('PENDING','RUNNING')",
             (source_id, data.user_id),
         ):
@@ -273,7 +273,7 @@ def create_app(store=None, start_workers=True):
         with store.db() as con:
             con.execute("BEGIN IMMEDIATE")
             source = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?", (source_id, data.user_id)).fetchone()
-            if source and (source["status"] == "PURGING" or con.execute(
+            if source and (source["status"] in {"PURGING", "REMOVED"} or con.execute(
                 "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND user_id=? AND state IN ('PENDING','RUNNING')",
                 (source_id, data.user_id),
             ).fetchone()):
