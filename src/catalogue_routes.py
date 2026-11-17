@@ -74,9 +74,10 @@ def install_catalogue_routes(app, store, pipeline):
 
     @app.get("/api/catalogue/search")
     async def search(user_id: str, kind: str = "artist", q: str = Query("", max_length=180),
-                     online: bool = False):
+                     online: bool = False, local_only: bool = False):
         store.require_user(user_id)
-        return await asyncio.to_thread(catalogue.search, kind, q, remote=online)
+        return await asyncio.to_thread(catalogue.search, kind, q, remote=online,
+                                       user_id=user_id, local_only=local_only)
 
     @app.get("/api/catalogue/entity")
     def entity(user_id: str, kind: str, id: str):

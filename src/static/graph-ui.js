@@ -125,7 +125,7 @@ window.GraphUI = (() => {
     const meta = document.createElement("p"); meta.textContent = `${item.kind} · ${item.id.split(":").slice(1).join(":")}${item.owned ? " · Downloaded in this library" : " · Public catalogue only"}`;
     box.append(h,meta);
     const inspect = document.createElement("button"); inspect.type="button"; inspect.className="secondary";
-    inspect.textContent = "Inspect in Catalogue";
+    inspect.textContent = "Select in Catalogue";
     inspect.addEventListener("click", () => {
       setTab("catalogue"); window.CatalogueUI?.openEntity(item.kind, item.id.slice(item.kind.length + 1)).catch(error => status(error.message, true));
     });

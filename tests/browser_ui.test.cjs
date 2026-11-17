@@ -571,23 +571,71 @@ test("real browser: source actions stack vertically without crushing playlist UR
 });
 
 
-test("real browser: inspecting a catalogue artist reveals its details", {timeout: 60000}, async t => {
+test("real browser: Catalogue split layout, local scope, result slider and Select", {timeout: 60000}, async t => {
   const chrome = await browser(t); if (!chrome) return;
   const data = fixtures();
-  data.catalogueSearch = [{kind:"artist", id:"11111111-1111-4111-8111-111111111111", name:"Creo"}];
+  const id = "11111111-1111-4111-8111-111111111111";
+  data.catalogueSearch = [
+    {kind:"artist", id, name:"Creo"},
+    ...Array.from({length:65}, (_, i) => ({kind:"artist",
+      id:`00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`, name:`Other Creo ${i}`}))
+  ];
   data.catalogueEntity = {entity:{name:"Creo", data:{name:"Creo"}}, scopes:[], relations:[], tracks:[]};
   const origin = await fixtureServer(t, data);
   await chrome.send("Emulation.setDeviceMetricsOverride",
-    {width: 1280, height: 560, deviceScaleFactor: 1, mobile: false});
+    {width: 1280, height: 700, deviceScaleFactor: 1, mobile: false});
   await chrome.send("Page.navigate", {url: origin});
   await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
   await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
+  await chrome.until("document.querySelector('#catalogueSearchForm') && !document.querySelector('#catalogueLocalOnly').disabled");
+  const desktop = await chrome.evaluate(`(() => {
+    const a=document.querySelector('.catalogue-search-card').getBoundingClientRect();
+    const b=document.querySelector('.catalogue-selection-card').getBoundingClientRect();
+    const search=document.querySelector('#catalogueCachedSearch').getBoundingClientRect();
+    const online=document.querySelector('#catalogueOnlineSearch').getBoundingClientRect();
+    return {
+      columns: a.right <= b.left && Math.abs(a.top-b.top)<5,
+      stacked: online.top >= search.bottom+4,
+      equalWidth: Math.abs(search.width-online.width) < 1,
+      equalColor: getComputedStyle(document.querySelector('#catalogueCachedSearch')).backgroundColor ===
+        getComputedStyle(document.querySelector('#catalogueOnlineSearch')).backgroundColor,
+      localChecked: document.querySelector('#catalogueLocalOnly').checked
+    };
+  })()`);
+  assert.deepEqual(desktop, {columns:true,stacked:true,equalWidth:true,equalColor:true,localChecked:true});
+
   await chrome.evaluate("document.querySelector('#catalogueQuery').value='Creo'; document.querySelector('#catalogueSearchForm').requestSubmit()");
-  await chrome.until("document.querySelector('#catalogueResults button')?.textContent === 'Inspect'");
+  await chrome.until("document.querySelectorAll('#catalogueResults .catalogue-entry').length === 66");
+  const results = await chrome.evaluate(`(() => {
+    const pane=document.querySelector('#catalogueResults');
+    return {max:getComputedStyle(pane).maxHeight, scrollable:pane.scrollHeight>pane.clientHeight,
+      first:pane.querySelector('button').textContent};
+  })()`);
+  assert.equal(results.max, "360px");
+  assert.equal(results.scrollable, true);
+  assert.equal(results.first, "Select");
+  assert.ok(data.reads.some(s => s.startsWith('/api/catalogue/search?') && s.includes('local_only=true')));
+  await chrome.evaluate(`(() => {const slider=document.querySelector('#catalogueResultsHeight'); slider.value="240";
+    slider.dispatchEvent(new Event('input', {bubbles:true}));})()`);
+  assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#catalogueResults')).maxHeight"), "240px");
+  assert.equal(await chrome.evaluate("document.querySelector('#catalogueResultsHeightValue').textContent"), "240 px");
+
   await chrome.evaluate("document.querySelector('#catalogueResults button').click()");
   await chrome.until("document.querySelector('#catalogueDetail h4')?.textContent === 'Creo'");
-  assert.ok(await chrome.evaluate("scrollY > 0"), "Inspect scrolls the selected entry into view");
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueStatus').textContent"), /Inspecting Creo/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueStatus').textContent"), /Selected Creo/);
+  await chrome.evaluate("document.querySelector('#catalogueLocalOnly').click()");
+  await chrome.until("document.querySelector('#catalogueStatus').textContent.includes('public catalogue')");
+  assert.ok(data.reads.some(s => s.startsWith('/api/catalogue/search?') && s.includes('local_only=false')));
+
+  await chrome.send("Emulation.setDeviceMetricsOverride",
+    {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
+  const mobile = await chrome.evaluate(`(() => {
+    const left=document.querySelector('.catalogue-search-card').getBoundingClientRect();
+    const right=document.querySelector('.catalogue-selection-card').getBoundingClientRect();
+    return {stacked:right.top >= left.bottom-1, withinPage:left.right <= innerWidth+1 &&
+       right.right <= innerWidth+1, scroller:getComputedStyle(document.querySelector('#catalogueResults')).maxHeight};
+  })()`);
+  assert.deepEqual(mobile, {stacked:true, withinPage:true, scroller:"240px"});
   assert.deepEqual(chrome.errors, []);
 });
