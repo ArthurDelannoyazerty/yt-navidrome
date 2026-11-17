@@ -607,9 +607,10 @@ class Bridge:
         # Plugins may write the file again, so force the raw compatibility tags last.
         self.write_discovery_tags(final_path, track.get("discovered_at"), self.source_urls(track))
         write_loudness_tags(final_path, loudness)
-        if source_reset or release_warning:
+        if source_reset or (replace_identity and not item.mb_albumid):
             # Synchronize beets with the actual Opus fields after selective tag
-            # cleanup so a later discovery-comment update cannot resurrect them.
+            # cleanup, including normal recording-only approval (no release).
+            # Otherwise a later beets write can resurrect the cleared edition.
             item.read()
         item.pipeline_artwork = json.dumps(artwork_result) if artwork_result else ""
         item.pipeline_complete = "yes"
