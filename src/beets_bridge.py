@@ -387,6 +387,7 @@ class Bridge:
         display = {"title": info.title, "artist": info.artist}
         if album is not None:
             display["album"] = album.album
+            display["albumartist"] = album.albumartist
         return apply_to_opus(path, display, native, include_album=album is not None)
 
     def measure_loudness(self, item):
@@ -685,7 +686,7 @@ class Bridge:
         write_loudness_tags(final_path, loudness)
         if native is not None:
             apply_to_opus(final_path, {"title": item.title, "artist": item.artist,
-                                       "album": item.album}, native,
+                                       "album": item.album, "albumartist": item.albumartist}, native,
                           include_album=bool(item.mb_albumid),
                           clear_unassigned_album=not bool(item.mb_albumid))
         elif source_reset:
