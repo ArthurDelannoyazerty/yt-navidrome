@@ -141,7 +141,7 @@ window.CatalogueUI = (() => {
     message(`Inspecting ${data.entity?.name || kind}. Details are shown below.`);
     // Search results may contain dozens of rows. Bring the selected details
     // into view instead of making a successful Inspect click appear inert.
-    box.closest(".catalogue-details")?.scrollIntoView?.({behavior: "smooth", block: "start"});
+    box.closest(".catalogue-details")?.scrollIntoView?.({behavior: "auto", block: "start"});
   }
   function displayProgress(data) {
     const counts = Object.entries(data.counts || {}).map(([k, count]) => `${k}: ${count}`).join(" · ");
