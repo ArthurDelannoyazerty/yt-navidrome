@@ -215,20 +215,39 @@
   <section class="panel catalogue-panel" data-panel="catalogue" id="cataloguePanel" hidden>
     <div class="panel-heading"><div><span class="eyebrow">MUSICBRAINZ</span><h2>Catalogue</h2>
       <p class="hint">Explore cached artists, recordings, works, albums and editions. Cached music does not mean downloaded music.</p></div></div>
-    <form id="catalogueSearchForm" class="track-toolbar">
-      <label class="control-field">Type<select id="catalogueKind">
-        <option value="artist">Artists</option><option value="release-group">Album families</option>
-        <option value="release">Release editions</option><option value="recording">Recordings</option>
-        <option value="work">Compositions</option></select></label>
-      <label class="control-field search-field">Name<input id="catalogueQuery" type="search" placeholder="Search an artist or album" required minlength="2"></label>
-      <button id="catalogueCachedSearch" class="secondary" type="submit">Search cache</button>
-      <button id="catalogueOnlineSearch" type="button">Search MusicBrainz</button>
-    </form>
-    <p id="catalogueStatus" class="hint" role="status" aria-live="polite"></p>
-    <div id="catalogueResults" class="catalogue-results"></div>
-    <section class="catalogue-details" aria-label="Catalogue item details">
-      <h3>Selected entry</h3><div id="catalogueDetail"><p class="hint">Choose an entry to browse its discography or tracklist.</p></div>
-    </section>
+    <div class="catalogue-explorer">
+      <section class="catalogue-search-card" aria-label="Search MusicBrainz catalogue">
+        <h3>Find music</h3>
+        <form id="catalogueSearchForm" class="catalogue-search-form">
+          <label class="control-field">Type<select id="catalogueKind">
+            <option value="artist">Artists</option><option value="release-group">Album families</option>
+            <option value="release">Release editions</option><option value="recording">Recordings</option>
+            <option value="work">Compositions</option></select></label>
+          <label class="control-field">Name<input id="catalogueQuery" type="search" placeholder="Search an artist or album" required minlength="2"></label>
+          <label class="check catalogue-local-filter"><input id="catalogueLocalOnly" type="checkbox" checked> Only items linked to my library</label>
+          <p class="hint catalogue-filter-hint">Uses exact MusicBrainz IDs and cached links. Unindexed local relationships may not appear yet; uncheck to explore the full public catalogue.</p>
+          <div class="catalogue-search-actions">
+            <button id="catalogueCachedSearch" type="submit">Search cache</button>
+            <button id="catalogueOnlineSearch" type="button">Search MusicBrainz</button>
+          </div>
+        </form>
+        <p id="catalogueStatus" class="hint" role="status" aria-live="polite"></p>
+        <section class="catalogue-results-box" aria-label="Catalogue search results">
+          <div class="catalogue-results-toolbar">
+            <h4>Results</h4>
+            <label for="catalogueResultsHeight">Results height <output id="catalogueResultsHeightValue" for="catalogueResultsHeight">360 px</output></label>
+          </div>
+          <input id="catalogueResultsHeight" type="range" min="200" max="720" step="40" value="360" aria-controls="catalogueResults">
+          <div id="catalogueResults" class="catalogue-results catalogue-results-scroll" role="region" aria-label="Search results" tabindex="0">
+            <p class="hint">Search to find cached MusicBrainz entries.</p>
+          </div>
+        </section>
+      </section>
+      <section class="catalogue-selection-card" aria-label="Selected catalogue entry">
+        <h3>Selected entry</h3>
+        <div id="catalogueDetail"><p class="hint">Select an entry on the left to browse its discography or tracklist.</p></div>
+      </section>
+    </div>
     <section class="catalogue-details" aria-label="MusicBrainz synchronization">
       <h3>Cache synchronization</h3>
       <div class="row"><button id="catalogueRefreshProgress" type="button" class="secondary">Refresh progress</button>
@@ -398,6 +417,14 @@
         <dt>Failed / FAILED</dt><dd>Open the error, fix the cause if needed, then Retry.</dd>
         <dt>Idle / IDLE</dt><dd>No operation is running. Temporary audio remains marked until its metadata is approved.</dd>
       </dl>
+    </details>
+    <details class="help-detail"><summary>MusicBrainz Catalogue, local search and graph</summary>
+      <p><strong>Catalogue cache vs downloaded library:</strong> the catalogue stores public MusicBrainz artists, recordings, album editions, album families and compositions, including entries from online searches that are not downloaded. The <strong>Only items linked to my library</strong> checkbox (on by default) uses exact MusicBrainz IDs from locally approved recordings and their cached relationships; it never guesses from matching names. If a local artist or album is missing, choose <strong>Index downloaded recordings</strong> and wait for its relationships, or uncheck the filter to explore all cached entities.</p>
+      <p><strong>Search cache</strong> reads stored entities; <strong>Search MusicBrainz</strong> fetches and caches online results. The same local-only filter applies to both searches. <strong>Select</strong> opens the chosen item in the right-hand panel. Drag <strong>Results height</strong> to change the scrollable list size without expanding the whole page. The selected item may include a tracklist, relations, cached metadata and a <strong>Show in graph</strong> action.</p>
+      <p><strong>Sync / refresh</strong> on an artist queues its MusicBrainz lookup, credited recordings, release groups and works. Album-family requests can enqueue edition lookups and full tracklists. This is metadata only: it does not download audio or edit existing tags. <strong>Index downloaded recordings</strong> queues recording lookups and release associations for the selected library. Use <strong>Refresh progress</strong> to read the queue state; do not repeatedly force a refresh while it runs.</p>
+      <p><strong>Progress:</strong> PENDING means waiting, RUNNING means being fetched, and COMPLETE means a catalogue request finished. The totals can <em>increase</em> during synchronization because discovered albums, editions and works create additional jobs. One background worker makes rate-limited requests, and these totals cover the shared catalogue queue, not the number of downloaded songs. The graph can be sparse until relationships are cached.</p>
+      <p><strong>Music graph:</strong> Downloaded library starts from your confirmed recording IDs and their public MusicBrainz neighbors; Entire cached catalogue can include music you do not own. The graph is limited to 180 displayed nodes per request. Focus a MusicBrainz ID or search for a name to explore a different neighborhood; node type checkboxes only control visibility. Graph navigation never changes audio files.</p>
+      <p><strong>Organize albums → Compare albums:</strong> select imported sources or individual track IDs to compare their known MusicBrainz recordings against cached releases. The suggested coverage is evidence, not automatic proof of the correct edition. Review an exact release, sync its tracklist if necessary, preview compatible changes, and confirm before applying album tags. Changes keep stable audio paths and can be undone from the album-change history.</p>
     </details>
     <details class="help-detail"><summary>Fix a wrong match or separate different songs</summary>
       <p>Use <strong>Review metadata</strong> to search MusicBrainz by artist and title, or choose <strong>Original source metadata</strong> to undo a wrong match.</p>
