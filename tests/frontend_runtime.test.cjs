@@ -361,3 +361,63 @@ test('Music no longer exposes review selection while per-track approval keeps th
   assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin',mode:'approve',index:1,approval_token:'displayed-token'});
   b.requests[0].resolve({message:'Queued'}); await pending;
 });
+
+// Explicit state contracts are part of the production UI, not test-only models.
+test('state machine rejects invalid events without mutating its state', () => {
+  const {StateMachine} = require('../src/static/ui-state.js');
+  const actor = new StateMachine('example', 'idle', {idle: {start: 'running'}, running: {finish: 'done'}, done: {}});
+  assert.throws(() => actor.send('finish'), /cannot finish/);
+  assert.equal(actor.state, 'idle');
+  actor.send('start'); actor.send('finish');
+  assert.throws(() => actor.send('start'), /cannot start/);
+  assert.equal(actor.state, 'done');
+});
+test('async state exposes failure and retry without impossible pending flags', () => {
+  const {AsyncState} = require('../src/static/ui-state.js');
+  const actor = new AsyncState('load');
+  const first = actor.start();
+  assert.equal(actor.pending, true);
+  actor.fail(first);
+  assert.equal(actor.state, 'failed'); assert.equal(actor.pending, false);
+  const retry = actor.start(); actor.finish(retry);
+  assert.equal(actor.state, 'ready');
+});
+test('async old completion cannot settle a newer request or a reset account', () => {
+  const {AsyncState} = require('../src/static/ui-state.js');
+  const actor = new AsyncState('load');
+  const old = actor.start(), latest = actor.start();
+  assert.equal(actor.finish(old), false); assert.equal(actor.pending, true);
+  actor.reset(); assert.equal(actor.fail(latest), false); assert.equal(actor.state, 'idle');
+});
+test('request gate tracks failure/retry states but ignores old-user settlements', () => {
+  const gate = new RequestGate(), old = gate.begin('sources');
+  gate.reset(); const current = gate.begin('sources');
+  old.succeed(); assert.equal(gate.state('sources'), 'pending');
+  current.fail(); assert.equal(gate.state('sources'), 'failed');
+  const next = gate.begin('sources'); next.succeed();
+  assert.equal(gate.state('sources'), 'ready');
+});
+test('button state blocks duplicate synthetic clicks during a write', async () => {
+  const b = browser(); let release, calls = 0;
+  b.context.callback = () => { calls += 1; return new Promise(resolve => {release = resolve;}); };
+  const control = vm.runInContext('button("Write", callback)', b.context);
+  const first = control.listeners.click();
+  await control.listeners.click();
+  assert.equal(calls, 1); assert.equal(control.disabled, true);
+  release(); await first; assert.equal(control.disabled, false);
+});
+test('switching account releases old poll actors without settling a newer poll', () => {
+  const b = browser(); b.get('user').value = 'guest';
+  vm.runInContext('refreshAll = async () => {};', b.context);
+  const result = vm.runInContext(`(() => {
+    const old = activity.fastPoll.start();
+    changeUser();
+    const reset = activity.fastPoll.state;
+    activity.fastPoll.start();
+    const settled = activity.fastPoll.finish(old);
+    return {reset, settled, pending: activity.fastPoll.pending};
+  })()`, b.context);
+  assert.equal(result.reset, 'idle');
+  assert.equal(result.settled, false);
+  assert.equal(result.pending, true);
+});

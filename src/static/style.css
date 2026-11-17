@@ -297,3 +297,42 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 #archivedSourcesPanel .source-list { margin-top: 12px; }
 #archivedSourcesPanel .source { border-color: var(--border); }
 .REMOVED, .PURGING { background: var(--warn); color: #815a14; }
+
+/* Persistent catalogue and bounded interactive graph */
+.catalogue-results { display: grid; gap: .75rem; margin: 1rem 0; }
+.catalogue-entry { border: 1px solid var(--border, #334155); border-radius: .65rem; padding: .85rem; overflow-wrap: anywhere; }
+.catalogue-entry h4 { margin: 0 0 .4rem; }
+.catalogue-entry p { margin: .3rem 0; }
+.catalogue-details { margin: 1.25rem 0; padding: 1rem; border: 1px solid var(--border, #334155); border-radius: .75rem; }
+.catalogue-details .row { flex-wrap: wrap; }
+.catalogue-details pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+.catalogue-details select[multiple] { width: 100%; max-width: 750px; }
+.catalogue-details textarea { width: min(100%, 750px); }
+.catalogue-detail-list { margin: .5rem 0; padding-left: 1.5rem; max-height: 260px; overflow-y: auto; }
+.catalogue-preview-table { width: 100%; }
+.catalogue-preview-table td { overflow-wrap: anywhere; padding: .5rem; }
+.graph-controls, .graph-filters { display: flex; flex-wrap: wrap; gap: .8rem; align-items: flex-end; margin: 1rem 0; }
+.graph-controls > label { display: grid; gap: .3rem; min-width: min(100%, 190px); }
+.graph-controls input { min-width: 0; }
+.graph-filters { border: 1px solid var(--border, #334155); border-radius: .65rem; padding: .75rem 1rem; align-items: center; }
+.graph-filters legend { padding: 0 .4rem; font-weight: 600; }
+.graph-filters label { display: inline-flex; align-items: center; gap: .3rem; }
+.graph-stage { width: 100%; background: var(--surface, #101824); border: 1px solid var(--border, #334155); border-radius: .8rem; overflow: hidden; }
+.graph-stage svg { display: block; width: 100%; min-height: 390px; max-height: 80vh; user-select: none; touch-action: pan-y; }
+.graph-edge { stroke: #7b8898; stroke-width: 1.6; opacity: .55; }
+.graph-node { cursor: pointer; }
+.graph-node:focus { outline: none; }
+.graph-node:focus circle, .graph-node:hover circle { stroke: #f59e0b; stroke-width: 3; }
+.graph-node text { fill: #eff4f8; font: 11px system-ui, sans-serif; text-anchor: middle; pointer-events: none; paint-order: stroke; stroke: #14202d; stroke-width: 2.5px; }
+.graph-node circle { stroke: #f7f8fa; stroke-width: .8; }
+.graph-node[data-kind="artist"] circle { fill: #6b73d6; }
+.graph-node[data-kind="recording"] circle { fill: #16846a; }
+.graph-node[data-kind="release"] circle { fill: #c47742; }
+.graph-node[data-kind="release-group"] circle { fill: #b084c8; }
+.graph-node[data-kind="work"] circle { fill: #578aab; }
+.graph-node[data-owned="true"] circle { stroke: #f9d66e; stroke-width: 3; }
+@media (max-width: 720px) {
+  .graph-controls { display: grid; }
+  .graph-stage svg { min-height: 320px; }
+  .catalogue-details { padding: .65rem; }
+}

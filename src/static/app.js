@@ -4,15 +4,31 @@ const $ = id => document.getElementById(id);
 const FAST_POLL_MS = 2500;
 const SLOW_POLL_MS = 10000;
 
+const activity = {
+  replacement: new IngestorUI.AsyncState("replacement"),
+  batch: new IngestorUI.AsyncState("batch"),
+  fastPoll: new IngestorUI.AsyncState("fast-poll"),
+  slowPoll: new IngestorUI.AsyncState("slow-poll"),
+};
+const navigation = IngestorUI.selectionMachine("navigation", ["music", "approval", "catalogue", "graph", "sources", "activity", "maintenance", "help"], "music");
+const musicView = IngestorUI.selectionMachine("music-view", ["tracks", "ignored"], "tracks");
+const accountFlow = new IngestorUI.StateMachine("library-selection", "loading", {
+  loading: {choose: "choosing", select: "selected", fail: "error", reload: "loading"},
+  choosing: {select: "selected", reload: "loading", choose: "choosing"},
+  selected: {select: "selected", choose: "choosing", reload: "loading"},
+  error: {reload: "loading", choose: "choosing", select: "selected"},
+});
 const state = {
   user: "",
-  tab: "music",
-  musicView: "tracks",
+  get tab() { return navigation.state; },
+  set tab(value) { navigation.send(value); },
+  get musicView() { return musicView.state; },
+  set musicView(value) { musicView.send(value); },
   ignoredCount: 0,
   ignoredRulesCount: 0,
   disabledCount: 0,
   replacementTrack: null,
-  replacementPending: false,
+  get replacementPending() { return activity.replacement.pending; },
   ignoredPage: 1,
   ignoredMaxPage: 1,
   followLogs: true,
@@ -27,12 +43,12 @@ const state = {
   tracks: new Map(),
   approvals: new Map(),
   batchSerial: 0,
-  fastPolling: false,
-  slowPolling: false,
+  get fastPolling() { return activity.fastPoll.pending; },
+  get slowPolling() { return activity.slowPoll.pending; },
   systemSignature: "",
   integrityPage: 1,
   integrityMaxPage: 1,
-  batchPending: false,
+  get batchPending() { return activity.batch.pending; },
   repairable: 0,
 };
 
@@ -41,7 +57,10 @@ function beginRequest(scope) {
   const current = requestGate.begin(scope);
   const user = state.user;
   const generation = state.generation;
-  return () => current() && user === state.user && generation === state.generation;
+  const valid = () => current() && user === state.user && generation === state.generation;
+  valid.succeed = () => valid() && current.succeed();
+  valid.fail = () => valid() && current.fail();
+  return valid;
 }
 
 function setFilter(value) {
@@ -86,6 +105,7 @@ async function api(path, body, method, current = () => true) {
     });
   } catch (error) {
     if (!current()) return null;
+    current.fail?.();
     throw error;
   }
   if (!current()) return null;
@@ -93,7 +113,11 @@ async function api(path, body, method, current = () => true) {
     error: `Invalid response (HTTP ${response.status})`,
   }));
   if (!current()) return null;
-  if (!data || !response.ok || data.error) throw new Error(data?.error || `Invalid response (HTTP ${response.status})`);
+  if (!data || !response.ok || data.error) {
+    current.fail?.();
+    throw new Error(data?.error || `Invalid response (HTTP ${response.status})`);
+  }
+  current.succeed?.();
   return data;
 }
 
@@ -108,9 +132,13 @@ const guard = fn => async (...args) => {
 function button(text, fn, cls = "secondary") {
   const element = node("button", text, cls);
   element.type = "button";
+  const action = new IngestorUI.AsyncState(`button:${text}`);
   element.addEventListener("click", guard(async () => {
-    element.disabled = true;
-    try { await fn(); } finally { element.disabled = false; }
+    if (action.pending) return;
+    const token = action.start(); element.disabled = true;
+    try { await fn(); action.finish(token); }
+    catch (error) { action.fail(token); throw error; }
+    finally { element.disabled = false; }
   }));
   return element;
 }
@@ -210,6 +238,8 @@ function setTab(name, activateApproval = true) {
     panel.hidden = panel.dataset.panel !== name;
   }
   if (name === "approval" && activateApproval) guard(() => window.MetadataUI?.enter())();
+  if (name === "catalogue") guard(() => window.CatalogueUI?.enter())();
+  if (name === "graph") guard(() => window.GraphUI?.enter())();
   if (name === "maintenance") guard(() => refreshMaintenance(false))();
   if (name === "activity" && state.followLogs) requestAnimationFrame(followLatestEvents);
 }
@@ -257,7 +287,10 @@ $("chooseLibraryForm").addEventListener("submit", guard(async event => {
 }));
 
 async function loadUsers(preferred) {
-  const users = await api("/api/users");
+  accountFlow.send("reload");
+  let users;
+  try { users = await api("/api/users"); }
+  catch (error) { accountFlow.send("fail"); throw error; }
   const select = $("user");
   const placeholder = node("option", "Select a library user…");
   placeholder.value = "";
@@ -277,8 +310,12 @@ function changeUser() {
   window.SpotifyUI?.reset();
   window.MetadataUI?.reset();
   window.ArtworkUI?.reset();
+  window.CatalogueUI?.reset();
+  window.GraphUI?.reset();
   requestGate.reset();
   state.user = $("user").value;
+  accountFlow.send(state.user ? "select" : "choose");
+  for (const request of Object.values(activity)) request.reset();
   $("ingestForm").querySelectorAll("textarea, input, button").forEach(element => {
     element.disabled = !state.user;
   });
@@ -288,7 +325,6 @@ function changeUser() {
   state.ignoredRulesCount = 0;
   state.disabledCount = 0;
   state.replacementTrack = null;
-  state.replacementPending = false;
   $("replacementStatus").textContent = "";
   $("replacementSubmit").disabled = false;
   state.ignoredPage = 1;
@@ -328,7 +364,6 @@ function changeUser() {
   state.tracks.clear();
   state.approvals.clear();
   state.batchSerial += 1;
-  state.batchPending = false;
   state.systemSignature = "";
   $("logs").replaceChildren();
   $("tracks").replaceChildren();
@@ -401,14 +436,14 @@ function renderSource(source) {
     row.append(content, controls);
     return row;
   }
-  if (source.status !== "REMOVED" && source.provider !== "legacy") {
+  if (!["REMOVED", "PURGE_FAILED"].includes(source.status) && source.provider !== "legacy") {
     controls.append(button("Sync / retry", async () => {
       await api(`/api/sources/${encodeURIComponent(source.id)}/retry`, {user_id: state.user});
       notice("Source sync queued");
       await loadSources(state.generation, false);
     }));
   }
-  if (source.status !== "REMOVED" && source.is_playlist && source.provider !== "legacy") {
+  if (!["REMOVED", "PURGE_FAILED"].includes(source.status) && source.is_playlist && source.provider !== "legacy") {
     const monitor = button(source.monitored ? "Pause monitoring" : "Resume monitoring", async () => {
       const user = state.user;
       await api(`/api/sources/${encodeURIComponent(source.id)}/monitoring`, {user_id: user, monitored: !source.monitored});
@@ -418,12 +453,12 @@ function renderSource(source) {
     }, "secondary");
     controls.append(monitor);
   }
-  if (source.status !== "REMOVED") controls.append(button("Archive source", async () => {
-    if (!confirm("Archive this source and remove its playlist from this library? Imported music will be retained. You can purge it later from Archived sources.")) return;
+  if (!["REMOVED", "PURGE_FAILED"].includes(source.status)) controls.append(button("Archive source", async () => {
+    if (!confirm("Archive this source and remove its playlist from this library? Exclusive queued and delayed work will stop; imported music will be retained. You can purge it later from Archived sources.")) return;
     await api(`/api/sources/${encodeURIComponent(source.id)}?user_id=${encodeURIComponent(state.user)}`, null, "DELETE");
     await loadSources(state.generation, false);
   }, "danger"));
-  controls.append(button("Remove source and its music…", async () => {
+  controls.append(button(source.status === "PURGE_FAILED" ? "Retry source cleanup" : "Remove source and its music…", async () => {
     const user = state.user;
     if (!user || source.user_id !== user) throw new Error("Library changed; reopen this source.");
     const path = `/api/sources/${encodeURIComponent(source.id)}`;
@@ -434,7 +469,7 @@ function renderSource(source) {
     const message = `Permanently remove source ${source.url} from library ${user}?\n\n` +
       `${preview.exclusive_tracks} tracks used only by this source will be deleted, ` +
       `including their audio files. ${preview.shared_tracks} tracks shared with ` +
-      "other sources or independently added will be kept. This cannot be undone.";
+      "other sources or independently added will be kept. Queued and delayed exclusive work stops immediately; running downloads stop safely. File commits already underway finish before cleanup. This cannot be undone.";
     if (!confirm(message)) return;
     if (!confirm(`Final confirmation: permanently erase only music exclusive to this source for ${user}? This cannot be undone.`)) return;
     if (user !== state.user) throw new Error("Library changed; reopen this source.");
@@ -636,7 +671,7 @@ async function setOriginDownload(track, origin, enabled) {
 function openReplacement(track) {
   if (track.user_id !== state.user) throw new Error("Library changed; reopen this action.");
   state.replacementTrack = {...track};
-  state.replacementPending = false;
+  activity.replacement.reset();
   $("replacementTitle").textContent = track.matched_title || track.title || track.track_title;
   $("replacementUrl").value = "";
   $("replacementStatus").textContent = "";
@@ -662,22 +697,24 @@ $("replacementForm").addEventListener("submit", async event => {
   if (track.user_id !== state.user) { $("replacementStatus").textContent = "Library changed; reopen this action."; return; }
   const url = $("replacementUrl").value.trim();
   if (!url) { $("replacementStatus").textContent = "Enter a single YouTube video URL."; return; }
-  state.replacementPending = true;
+  const token = activity.replacement.start();
   $("replacementSubmit").disabled = true;
   $("replacementStatus").textContent = "Queuing replacement audio…";
   try {
     const result = await api(`/api/tracks/${encodeURIComponent(track.id)}/replacement`, {user_id: track.user_id, url});
     if (track.user_id !== state.user || state.replacementTrack !== track) return;
-    state.replacementPending = false;
+    activity.replacement.finish(token);
     closeReplacement();
     $("detailsDialog").close();
     notice(result.message || "Replacement audio queued. Existing audio stays playable until it succeeds.");
     await Promise.all([refreshTracks(false), loadDisabledOrigins(false)]);
   } catch (error) {
-    if (track.user_id === state.user && state.replacementTrack === track) $("replacementStatus").textContent = error.message || String(error);
+    if (track.user_id === state.user && state.replacementTrack === track) {
+      activity.replacement.fail(token);
+      $("replacementStatus").textContent = error.message || String(error);
+    }
   } finally {
     if (track.user_id === state.user && (!state.replacementTrack || state.replacementTrack === track)) {
-      state.replacementPending = false;
       $("replacementSubmit").disabled = false;
     }
   }
@@ -1375,17 +1412,18 @@ for (const [id, mode, message] of [
     if (state.batchPending || !confirm(message())) return;
     const user = state.user;
     const serial = ++state.batchSerial;
-    state.batchPending = true;
-      element.disabled = true;
+    const token = activity.batch.start();
+    element.disabled = true;
     try {
       const result = await api("/api/batch", {user_id: user, mode});
-      if (user !== state.user) return;
+      if (user !== state.user || serial !== state.batchSerial) return;
+      activity.batch.finish(token);
       notice(`${result.message}. ${result.skipped || 0} skipped because their state changed or they were ineligible.`);
+    } catch (error) {
+      activity.batch.fail(token);
+      throw error;
     } finally {
-      if (user === state.user && serial === state.batchSerial) {
-        state.batchPending = false;
-              await refreshAll(false);
-      }
+      if (user === state.user && serial === state.batchSerial) await refreshAll(false);
     }
   }));
 }
@@ -1434,13 +1472,15 @@ document.addEventListener("visibilitychange", () => {
 
 async function pollFast() {
   if (document.hidden || state.fastPolling || !state.user) return;
-  state.fastPolling = true;
-  try { await refreshFast(true); } finally { state.fastPolling = false; }
+  const token = activity.fastPoll.start();
+  try { await refreshFast(true); activity.fastPoll.finish(token); }
+  catch (error) { activity.fastPoll.fail(token); throw error; }
 }
 async function pollSlow() {
   if (document.hidden || state.slowPolling || !state.user) return;
-  state.slowPolling = true;
-  try { await refreshSlow(true); } finally { state.slowPolling = false; }
+  const token = activity.slowPoll.start();
+  try { await refreshSlow(true); activity.slowPoll.finish(token); }
+  catch (error) { activity.slowPoll.fail(token); throw error; }
 }
 
 (async () => {

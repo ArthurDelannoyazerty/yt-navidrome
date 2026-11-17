@@ -165,7 +165,7 @@ def test_schema_9_backfills_existing_source_memberships(db, environment):
     db.execute("DELETE FROM source_origins")
     db.execute("PRAGMA user_version=8")
     db.init()
-    assert db.one("PRAGMA user_version")["user_version"] == 9
+    assert db.one("PRAGMA user_version")["user_version"] == __import__("store").SCHEMA_VERSION
     assert db.one("SELECT COUNT(*) AS n FROM source_origins")["n"] == 1
     assert preview(db, first["id"], "admin")["exclusive_tracks"] == 1
 

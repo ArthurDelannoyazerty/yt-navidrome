@@ -23,6 +23,13 @@
     processing -->|URL disabled or restricted|stopped["Stopped"]
     stopped -->|Fix source, then retry|queued
   `;
+  const rendererFlow = new IngestorUI.AsyncState("help-renderer");
+  const diagramFlow = new IngestorUI.StateMachine("help-diagram", "unmounted", {
+    unmounted: {mount: "mounting", dispose: "unmounted"},
+    mounting: {ready: "mounted", fail: "failed", dispose: "unmounted"},
+    mounted: {fail: "failed", dispose: "unmounted"},
+    failed: {mount: "mounting", dispose: "unmounted"},
+  });
   let loading = null, diagram = null;
 
   function diagramNode(svg) {
@@ -36,16 +43,21 @@
 
   function loadRenderer() {
     if (window.IngestorPele) return Promise.resolve(window.IngestorPele);
-    if (!loading) loading = new Promise((resolve, reject) => {
+    if (rendererFlow.pending) return loading;
+    const token = rendererFlow.start();
+    loading = new Promise((resolve, reject) => {
       const script = document.createElement("script");
       script.src = assetURL.href;
+      const failed = () => {
+        rendererFlow.fail(token); loading = null; script.remove();
+        reject(new Error("Diagram renderer unavailable"));
+      };
       script.addEventListener("load", () => {
-        if (window.IngestorPele) resolve(window.IngestorPele);
-        else { loading = null; script.remove(); reject(new Error("Diagram renderer unavailable")); }
+        if (window.IngestorPele) {
+          rendererFlow.finish(token); resolve(window.IngestorPele);
+        } else failed();
       }, {once: true});
-      script.addEventListener("error", () => {
-        loading = null; script.remove(); reject(new Error("Diagram renderer unavailable"));
-      }, {once: true});
+      script.addEventListener("error", failed, {once: true});
       document.head.append(script);
     });
     return loading;
@@ -53,26 +65,34 @@
 
   async function enter() {
     if (panel.hidden) return;
-    if (diagram) { diagram.refresh(); return; }
+    if (diagramFlow.state === "mounted" && diagram) { diagram.refresh(); return; }
+    if (diagramFlow.state === "mounting") return;
     status.hidden = false;
     status.textContent = "Loading workflow diagram…";
     try {
       const pele = await loadRenderer();
-      if (panel.hidden || diagram) return;
+      if (panel.hidden || diagramFlow.state === "mounted" || diagramFlow.state === "mounting") return;
+      diagram?.destroy();
+      diagramFlow.send("mount");
       diagram = pele.mount(container, source, {
         fontSize: 14, padding: 24, links: false, images: false,
         sanitize: diagramNode,
         // Pele's own toolbar uses inline style attributes. These app buttons
         // use external CSS while keeping Pele's pan, pinch and keyboard zoom.
         zoom: {always: true, controls: false},
-        onRender: () => { status.hidden = true; zoomControls.hidden = false; },
+        onRender: () => {
+          if (diagramFlow.state === "mounting") diagramFlow.send("ready");
+          status.hidden = true; zoomControls.hidden = false;
+        },
         onError: () => {
+          if (diagramFlow.can("fail")) diagramFlow.send("fail");
           status.hidden = false;
           zoomControls.hidden = true;
           status.textContent = "The diagram could not be drawn. All steps are described in the transition table below.";
         },
       });
     } catch (_) {
+      if (diagramFlow.can("fail")) diagramFlow.send("fail");
       status.textContent = "The diagram could not be loaded. All steps are described in the transition table below.";
     }
   }
@@ -81,7 +101,7 @@
   document.getElementById("workflowZoomOut").addEventListener("click", () => diagram?.zoom?.zoomBy(1 / 1.4));
   document.getElementById("workflowZoomReset").addEventListener("click", () => diagram?.zoom?.reset());
   new MutationObserver(enter).observe(panel, {attributes: true, attributeFilter: ["hidden"]});
-  window.addEventListener("pagehide", () => { diagram?.destroy(); diagram = null; });
+  window.addEventListener("pagehide", () => { diagram?.destroy(); diagram = null; diagramFlow.send("dispose"); });
   window.addEventListener("pageshow", enter);
   enter();
 })();

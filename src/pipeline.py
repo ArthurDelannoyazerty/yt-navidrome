@@ -23,6 +23,11 @@ from providers import PROVIDERS
 from runtime import DeferredOperation, DownloaderRuntime, ProcessError, SourceAccessError, run_process
 from spotdl_runtime import SpotDLRuntime
 from store import JobCancelled
+from state_machines import SERVICE, SCHEDULE, schedule_state
+from state_machines import (
+    SOURCE_INACTIVE, COMMIT_STAGES, PUBLICATION, RECEIPT, SwapPhase,
+    swap_phase, publication_phase, receipt_state,
+)
 
 
 class ReplacementIdentityMismatch(RuntimeError):
@@ -30,40 +35,49 @@ class ReplacementIdentityMismatch(RuntimeError):
 
 
 def write_playlist(store, source):
-    if not source["is_playlist"]:
-        return
-    user_root = (LIBRARY / source["user_id"]).resolve()
-    folder = user_root / "000000-playlists"
-    destination = folder / f"{safe_name(source['title'])}--{source['id'][:8]}.m3u"
-    order = "m.position,m.entry_id" if os.getenv("PLAYLIST_ORDER", "source") == "source" else "m.added_at,m.position,m.entry_id"
-    tracks = store.rows(
-        f"""SELECT a.path,t.title,t.matched_title FROM memberships m
-            JOIN track_origins o ON o.id=m.origin_id JOIN tracks t ON t.id=o.track_id
-            JOIN assets a ON a.id=t.current_asset_id AND a.state='CURRENT'
-            WHERE m.source_id=? AND t.user_id=? ORDER BY {order}""",
-        (source["id"], source["user_id"]),
-    )
-    lines = ["#EXTM3U"]
-    for track in tracks:
-        path = Path(track["path"]).resolve()
-        if not path.is_relative_to(user_root):
-            raise ValueError("Refusing a playlist path outside this user's library")
-        if path.is_file():
-            title = (track["matched_title"] or track["title"]).replace("\n", " ").replace("\r", " ")
-            lines += [f"#EXTINF:-1,{title}", os.path.relpath(path, folder).replace(os.sep, "/")]
-    atomic_text(destination, "\n".join(lines) + "\n", mode=0o644)
-    if source.get("playlist_path") and source["playlist_path"] != str(destination):
-        old = Path(source["playlist_path"]).resolve()
-        if old.parent == folder:
-            old.unlink(missing_ok=True)
-    store.update("sources", source["id"], playlist_path=str(destination))
+    """Export only live sources; archive/purge and file writes share a DB lock."""
+    with store.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        current = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?",
+                              (source["id"], source["user_id"])).fetchone()
+        if not current or current["status"] in SOURCE_INACTIVE or not current["is_playlist"]:
+            return
+        source = dict(current)
+        user_root = (LIBRARY / source["user_id"]).resolve()
+        folder = user_root / "000000-playlists"
+        destination = folder / f"{safe_name(source['title'])}--{source['id'][:8]}.m3u"
+        order = "m.position,m.entry_id" if os.getenv("PLAYLIST_ORDER", "source") == "source" else "m.added_at,m.position,m.entry_id"
+        tracks = con.execute(
+            f"""SELECT a.path,t.title,t.matched_title FROM memberships m
+                JOIN track_origins o ON o.id=m.origin_id JOIN tracks t ON t.id=o.track_id
+                JOIN assets a ON a.id=t.current_asset_id AND a.state='CURRENT'
+                WHERE m.source_id=? AND t.user_id=? ORDER BY {order}""",
+            (source["id"], source["user_id"]),
+        ).fetchall()
+        lines = ["#EXTM3U"]
+        for track in tracks:
+            path = Path(track["path"]).resolve()
+            if not path.is_relative_to(user_root):
+                raise ValueError("Refusing a playlist path outside this user's library")
+            if path.is_file():
+                title = (track["matched_title"] or track["title"]).replace("\n", " ").replace("\r", " ")
+                lines += [f"#EXTINF:-1,{title}", os.path.relpath(path, folder).replace(os.sep, "/")]
+        atomic_text(destination, "\n".join(lines) + "\n", mode=0o644)
+        if source.get("playlist_path") and source["playlist_path"] != str(destination):
+            old = Path(source["playlist_path"]).resolve()
+            if old.parent == folder:
+                old.unlink(missing_ok=True)
+        con.execute("UPDATE sources SET playlist_path=? WHERE id=? AND user_id=?",
+                    (str(destination), source["id"], source["user_id"]))
 
 
 class Pipeline:
     def __init__(self, store):
         self.store = store
+        self.lifecycle = SERVICE.initial
         self.downloader = DownloaderRuntime(store)
         self.spotdl = SpotDLRuntime(store)
+        self.album_manager = None  # installed by catalogue_routes
         self.stopping = asyncio.Event()
         self.children: set[asyncio.Task] = set()
         self.job_tasks: dict[int, asyncio.Task] = {}
@@ -71,14 +85,26 @@ class Pipeline:
         self.spotdl_update_task: asyncio.Task | None = None
 
     def cancel_job(self, job_id: int):
-        """Interrupt only the selected job; its worker remains available."""
+        """Signal cancellation on the task's event loop, never from a worker thread."""
         job = self.store.one("SELECT * FROM jobs WHERE id=?", (job_id,))
         task = self.job_tasks.get(job_id)
-        if (job and job["cancel_requested"] and task and not task.done()
-                and job["stage"] not in {"applying", "publishing"}):
-            task.cancel()
-            return True
-        return False
+        if not (job and job["cancel_requested"] and task and not task.done()
+                and job["stage"] not in COMMIT_STAGES):
+            return False
+
+        def interrupt():
+            current = self.store.one("SELECT * FROM jobs WHERE id=?", (job_id,))
+            if (current and current["cancel_requested"] and not task.done()
+                    and current["stage"] not in COMMIT_STAGES):
+                task.cancel()
+
+        try:
+            task.get_loop().call_soon_threadsafe(interrupt)
+        except RuntimeError:
+            # The process may be shutting down. The durable cancellation flag
+            # remains authoritative and recovery acknowledges it on restart.
+            return False
+        return True
 
     def checkpoint(self, job, stage=None):
         # Helpers are also used directly for non-queued verification. Worker
@@ -243,7 +269,7 @@ class Pipeline:
 
     async def finish_operation_receipt(self, job, receipt: dict, directory: Path):
         """Finish idempotent filesystem/playlist work after a transactional commit."""
-        if receipt.get("finalized_at"):
+        if receipt_state(receipt) == "FINALIZED":
             shutil.rmtree(directory, ignore_errors=True)
             return receipt["result"]
         result = receipt["result"]
@@ -629,6 +655,13 @@ class Pipeline:
         else:
             plan = None
         if plan is None:
+            if (self.album_manager and selected and selected.get("mbid")
+                    and not selected.get("asis") and not source_track.get("release_id")
+                    and not (overrides or {}).get("release_id") and origin):
+                preference = self.album_manager.preferred_release(
+                    source_track["user_id"], origin["id"], selected["mbid"])
+                if preference:
+                    overrides = {**(overrides or {}), "release_id": preference}
             plan = self.store.identity_plan(source_track["id"], origin["id"], selected, action,
                                             replacement=replacing_source)
             plan["action"] = action
@@ -677,7 +710,9 @@ class Pipeline:
             backup = await self.backup_current(source_track, directory)
         try:
             result_path = directory / "apply-result.json"
-            if result_path.is_file():
+            phase = publication_phase(self.store.operation_receipt(operation_id),
+                                      result_exists=result_path.is_file(), candidate_exists=True)
+            if phase == "PUBLISHED":
                 result = json.loads(result_path.read_text())
             else:
                 # The reviewed candidate is an immutable approval receipt. Beets
@@ -689,6 +724,8 @@ class Pipeline:
                     await asyncio.to_thread(atomic_copy, candidate, working)
                 result = await self.bridge(job, target_track, directory, "apply", path=str(working),
                                            selected=selected, operation=operation_id, overrides=overrides or {})
+                phase = PUBLICATION.send(phase, "swap")
+            PUBLICATION.send(phase, "commit")
             return await self.activate_result(job, plan, result, receipt, operation_id, directory)
         except Exception:
             if not self.store.operation_receipt(operation_id):
@@ -729,12 +766,14 @@ class Pipeline:
                         "before": before, "after": await asyncio.to_thread(sha256_file, staged)}
             atomic_json(manifest_file, manifest)
         actual = await asyncio.to_thread(sha256_file, path)
-        if actual == manifest["before"]:
+        self.checkpoint(job, "applying")
+        swap = swap_phase(actual, manifest["before"], manifest["after"])
+        if swap == SwapPhase.STAGED:
             staged = Path(manifest["staged"])
             if await asyncio.to_thread(sha256_file, staged) != manifest["after"]:
                 raise ValueError("Staged repair changed; refusing replacement")
             await asyncio.to_thread(atomic_copy, staged, path)
-        elif actual != manifest["after"]:
+        elif swap == SwapPhase.CONFLICT:
             raise ValueError("Audio changed while repair was pending; original was not overwritten")
         refreshed = await self.bridge(job, track, directory, "refresh", path=str(path))
         stat = path.stat()
@@ -915,15 +954,21 @@ class Pipeline:
                                     operation, directory, payload.get("overrides", {}))
 
     async def process_source(self, job):
-        source = self.store.owned("sources", job["target"], job["user_id"])
-        if source["status"] in {"REMOVED", "PURGING"}:
-            raise ValueError("Archived or purging sources cannot synchronize")
-        self.store.update("sources", source["id"], status="SYNCING", error=None)
+        self.checkpoint(job)
+        with self.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            source = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?",
+                                 (job["target"], job["user_id"])).fetchone()
+            if not source or source["status"] in SOURCE_INACTIVE:
+                raise JobCancelled("Archived or purging sources cannot synchronize")
+            source = dict(source)
+            self.store.transition_source(con, source["id"], source["user_id"], "start", error=None)
         http = HttpPolicy(self.store, self.report(job))
         if source["provider"] == "spotify":
             snapshot = await self.spotdl.scan(source, self.report(job))
         else:
             snapshot = await asyncio.to_thread(PROVIDERS[source["provider"]].resolve, source, http)
+        self.checkpoint(job)
         stats = self.store.apply_snapshot(source, snapshot)
         source = self.store.owned("sources", source["id"], source["user_id"])
         await asyncio.to_thread(write_playlist, self.store, source)
@@ -1041,6 +1086,9 @@ class Pipeline:
             await process(self, job)
         elif job["kind"] == "integrity":
             await self.process_integrity(job)
+        elif job["kind"] == "album":
+            from album_management import process
+            await process(self, job)
         else:
             raise ValueError("Unknown job type")
 
@@ -1131,18 +1179,22 @@ class Pipeline:
             try:
                 now = time.time()
                 if float(os.getenv("SYNC_INTERVAL_HOURS", "6")) > 0:
-                    for source in self.store.rows("SELECT * FROM sources WHERE monitored=1 AND next_sync<=?", (now,)):
+                    for source in self.store.rows("SELECT * FROM sources WHERE monitored=1 AND status NOT IN ('REMOVED','PURGING','PURGE_FAILED') AND next_sync<=?", (now,)):
                         self.store.enqueue("sync", source["id"], source["user_id"])
                 if os.getenv("YTDLP_UPDATE_ENABLED", "true").lower() == "true":
                     next_at = self.store.setting("next_downloader_update")
-                    if next_at is None or next_at <= now:
+                    phase = schedule_state(next_at, now)
+                    if phase in {"UNSCHEDULED", "DUE"}:
+                        SCHEDULE.send(phase, "arm" if phase == "UNSCHEDULED" else "dispatch")
                         future = next_nightly(datetime.now(UTC), os.getenv("YTDLP_UPDATE_TIME", "04:00"), os.getenv("TZ", "Europe/Paris"))
                         self.store.set_setting("next_downloader_update", future.timestamp())
                         if next_at is not None:
                             self.start_update()
                 if os.getenv("SPOTDL_UPDATE_ENABLED", "true").lower() == "true":
                     next_at = self.store.setting("next_spotdl_update")
-                    if next_at is None or next_at <= now:
+                    phase = schedule_state(next_at, now)
+                    if phase in {"UNSCHEDULED", "DUE"}:
+                        SCHEDULE.send(phase, "arm" if phase == "UNSCHEDULED" else "dispatch")
                         future = next_nightly(datetime.now(UTC), os.getenv("SPOTDL_UPDATE_TIME", "04:30"), os.getenv("TZ", "Europe/Paris"))
                         self.store.set_setting("next_spotdl_update", future.timestamp())
                         if next_at is not None:
@@ -1153,10 +1205,12 @@ class Pipeline:
                 if integrity_hours > 0:
                     for user in self.store.rows("SELECT name FROM users"):
                         key = f"integrity_next:{user['name']}"
-                        if self.store.setting(key, 0) <= now:
+                        if schedule_state(self.store.setting(key, 0), now) == "DUE":
+                            SCHEDULE.send("DUE", "dispatch")
                             self.store.enqueue("integrity", user["name"], user["name"], {"mode": "verify"})
                             self.store.set_setting(key, now + integrity_hours * 3600)
                 self.store.execute("DELETE FROM events WHERE id < (SELECT COALESCE(MAX(id),0)-20000 FROM events)")
+                self.store.execute("DELETE FROM state_transition_log WHERE id < (SELECT COALESCE(MAX(id),0)-20000 FROM state_transition_log)")
                 self.store.execute("DELETE FROM jobs WHERE state='DONE' AND id < (SELECT COALESCE(MAX(id),0)-2000 FROM jobs)")
             except Exception:
                 self.store.event("ERROR", traceback.format_exc(), target="scheduler")

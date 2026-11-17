@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from store import Store
+from state_machines import cooldown_state
 
 
 class ApiDeferred(requests.RequestException):
@@ -81,7 +82,7 @@ class HttpPolicy:
                 con.execute("BEGIN IMMEDIATE")
                 row = con.execute("SELECT next_at FROM api_clock WHERE host='musicbrainz.org'").fetchone()
                 wait = max(0, (row[0] if row else now) - now)
-                if not wait:
+                if cooldown_state(now + wait, now) == "READY":
                     con.execute("INSERT INTO api_clock VALUES ('musicbrainz.org',?) "
                                 "ON CONFLICT(host) DO UPDATE SET next_at=excluded.next_at", (now + 1.1,))
                     return

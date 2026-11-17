@@ -6,7 +6,10 @@ window.SpotifyUI = (() => {
   const scope = name => {
     const user = state.user;
     const latest = requestGate.begin(`spotify-${name}`);
-    return {user, current: () => latest() && state.user === user};
+    const current = () => latest() && state.user === user;
+    current.succeed = () => current() && latest.succeed();
+    current.fail = () => current() && latest.fail();
+    return {user, current};
   };
   const spotifyLink = (url, text) => {
     const a = node("a", text); a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";

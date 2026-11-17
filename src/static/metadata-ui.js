@@ -2,10 +2,15 @@
 "use strict";
 window.MetadataUI = (() => {
   const PICKER_PAGE_SIZE = 30;
+  const flow = {
+    detail: new IngestorUI.AsyncState("approval-detail"),
+    queue: new IngestorUI.AsyncState("approval-queue"),
+    mutation: new IngestorUI.AsyncState("approval-mutation"),
+    search: new IngestorUI.AsyncState("metadata-search"),
+  };
   const ui = {user: null, context: null, track: null, tracks: [], index: -1, scope: "",
     queueSerial: 0, loadSerial: 0, searchSerial: 0, controller: null, contextController: null,
-    timer: null, filterTimer: null, pickerTimer: null, loading: false, sending: false,
-    queueLoading: false, page: 1, maxPage: 1, artistId: null, effectiveQuery: null,
+    timer: null, filterTimer: null, pickerTimer: null, page: 1, maxPage: 1, artistId: null, effectiveQuery: null,
     retryUntil: 0, pickerPage: 1, submitted: new Set(), manualOriginal: {},
     actions: {base: [], search: []}, audioKey: null, audioSerial: 0,
     releaseCache: new Map(), searchItems: [], searchEntity: "recording"};
@@ -29,6 +34,7 @@ window.MetadataUI = (() => {
     $("mbStatus").className = error ? "error-text" : "hint";
   }
   function invalidateSearch() {
+    flow.search.reset();
     clearTimeout(ui.timer); ui.timer = null;
     ui.searchSerial += 1; ui.controller?.abort(); ui.controller = null;
   }
@@ -41,10 +47,11 @@ window.MetadataUI = (() => {
     invalidateSearch(); ui.contextController?.abort(); ui.contextController = null;
     clearTimeout(ui.filterTimer); clearTimeout(ui.pickerTimer);
     ui.loadSerial += 1; ui.queueSerial += 1;
-    ui.loading = false; ui.queueLoading = false; ui.sending = false;
+    flow.detail.finish(); flow.queue.finish(); flow.mutation.finish();
     stopAudio(); $("approvalPicker").open = false; updateButtons();
   }
   function reset() {
+    for (const actor of Object.values(flow)) actor.reset();
     leave(); ui.user = null; ui.context = null; ui.track = null; ui.tracks = []; ui.index = -1;
     ui.scope = ""; ui.submitted.clear(); ui.actions = {base: [], search: []};
     ui.retryUntil = 0; ui.pickerPage = 1; ui.releaseCache.clear(); ui.searchItems = [];
@@ -74,18 +81,18 @@ window.MetadataUI = (() => {
     return result;
   }
   function updateButtons() {
-    const busy = ui.loading || ui.sending || ui.queueLoading || !active();
+    const busy = flow.detail.pending || flow.mutation.pending || flow.queue.pending || !active();
     $("approvalPrevious").disabled = busy || ui.index <= 0;
     $("approvalNext").disabled = busy || ui.index < 0 || ui.index >= ui.tracks.length - 1;
-    $("approvalRefresh").disabled = ui.sending || ui.queueLoading || !active();
-    $("approvalFilter").disabled = ui.sending;
-    $("approvalSearch").disabled = ui.sending;
+    $("approvalRefresh").disabled = flow.mutation.pending || flow.queue.pending || !active();
+    $("approvalFilter").disabled = flow.mutation.pending;
+    $("approvalSearch").disabled = flow.mutation.pending;
     $("approvalPosition").textContent = ui.index >= ui.tracks.length && ui.tracks.length
       ? `${ui.tracks.length} / ${ui.tracks.length}` : `${ui.index >= 0 ? ui.index + 1 : 0} / ${ui.tracks.length}`;
     const mutable = !busy && ui.context?.can_correct;
     $("sourceMetadataApply").disabled = !mutable || !ui.context?.source;
     $("metadataManualApply").disabled = !mutable || ui.context?.health !== "AVAILABLE" || !Object.keys(manualChanges()).length;
-    $("metadataReload").disabled = ui.sending || ui.queueLoading;
+    $("metadataReload").disabled = flow.mutation.pending || flow.queue.pending;
     $("approvalArtwork").disabled = busy || !ui.track || !window.ArtworkUI;
     for (const id of [...Object.values(manualFields), "mbArtist", "mbEntity", "mbUseSource", "mbSearchNow"]) $(id).disabled = busy;
     $("mbTitle").disabled = busy || $("mbEntity").value === "artist";
@@ -99,7 +106,7 @@ window.MetadataUI = (() => {
     const element = node("button", text, "secondary"); element.type = "button";
     const context = ui.context, searchSerial = ui.searchSerial;
     element.addEventListener("click", async () => {
-      if (element.disabled || !active() || ui.loading || ui.sending || context !== ui.context
+      if (element.disabled || !active() || flow.detail.pending || flow.mutation.pending || context !== ui.context
         || (group === "search" && searchSerial !== ui.searchSerial)) return;
       try { await callback(); } catch (error) { if (active() && context === ui.context) feedback(error.message || String(error), true); }
     });
@@ -167,52 +174,50 @@ window.MetadataUI = (() => {
     const count = cached?.releases?.length || 0;
     if (cached?.page && count >= cached.total) return null;
     if (cached?.page >= 20) return null;
-    const label = cached?.pending ? "Finding albums..." : cached?.error ? "Retry albums" : "More albums";
+    const label = cached?.request?.pending ? "Finding albums..." : cached?.error ? "Retry albums" : "More albums";
     return control(label, () => loadReleases(mbid, (cached?.page || 0) + 1),
-      !cached?.pending && ui.context.can_correct, group);
+      !cached?.request?.pending && ui.context.can_correct, group);
+  }
+  function editionPicker(mbid, releases, group, selectRelease) {
+    const detail = node("details");
+    detail.className = "approval-edition-picker";
+    const unique = albumOptions(releases);
+    detail.append(node("summary", unique.length ? `Choose album edition (${unique.length})` : "Choose album edition"));
+    if (!unique.length) detail.append(node("p", "No release options cached yet. You may approve the recording without an album.", "hint"));
+    for (const release of unique) {
+      const option = node("div", null, "approval-edition-option");
+      option.append(control(`Use ${editionLabel(release)}`, () => selectRelease(release.id), ui.context.can_correct, group));
+      detail.append(option);
+    }
+    const more = moreReleasesButton(mbid, group);
+    if (more) detail.append(more);
+    return detail;
   }
   function renderSuggestions() {
     const body = $("metadataSuggestions");
     const matches = choices().filter(item => item.kind !== "source" && item.kind !== "asis" && !item.asis);
     body.replaceChildren();
     for (const item of matches) {
-      const options = albumOptions(ui.releaseCache.get(item.mbid)?.releases);
-      // No release lookup is required to approve the recording automatically.
-      // Once editions arrive, every album is selectable with a single click.
-      const editions = options.length ? options : [null];
-      for (const [index, release] of editions.entries()) {
-        const row = node("tr"); row.dataset.choice = String(item.index ?? choices().indexOf(item));
-        const action = node("td", null, "approval-action");
-        const use = control("Use", () => useChoice(item, release?.id),
-          ui.context.can_correct && Boolean(ui.context.state === "NEEDS_APPROVAL" || item.mbid));
-        use.setAttribute("aria-label", `Use ${item.title} — ${release ? editionLabel(release) : "automatic release"}`);
-        action.append(use);
-        row.append(action);
-        if (!index) {
-          const title = node("td", null, "approval-track");
-          title.append(item.mbid ? mbLink("recording", item.mbid, item.title) : node("strong", item.title));
-          title.append(evidence(item));
-          const artist = node("td", item.artist || "—", "approval-artist");
-          const recommended = item.evidence?.candidate_duration_seconds;
-          const durationCell = node("td", Number.isFinite(recommended) ? duration(recommended) : "", "approval-duration");
-          const score = node("td", item.match_score ?? item.similarity ?? "—", "approval-score");
-          for (const cell of [title, artist, durationCell, score]) cell.rowSpan = editions.length;
-          row.append(title, artist);
-          const album = node("td", release ? editionLabel(release) : (item.album || "Automatic release"), "approval-album");
-          if (editions.length === 1 && item.mbid && ui.releaseCache.has(item.mbid)) {
-            const more = moreReleasesButton(item.mbid); if (more) album.append(more);
-          }
-          row.append(album, durationCell, score);
-          if (item.mbid && !ui.releaseCache.has(item.mbid)) loadReleases(item.mbid);
-        } else {
-          const album = node("td", editionLabel(release), "approval-album");
-          if (index === editions.length - 1) {
-            const more = moreReleasesButton(item.mbid); if (more) album.append(more);
-          }
-          row.append(album);
-        }
-        body.append(row);
+      const row = node("tr"); row.dataset.choice = String(item.index ?? choices().indexOf(item));
+      const action = node("td", null, "approval-action");
+      const use = control("Use", () => useChoice(item), ui.context.can_correct &&
+        Boolean(ui.context.state === "NEEDS_APPROVAL" || item.mbid));
+      use.setAttribute("aria-label", `Approve ${item.title} recording without choosing an album`);
+      action.append(use);
+      const title = node("td", null, "approval-track");
+      title.append(item.mbid ? mbLink("recording", item.mbid, item.title) : node("strong", item.title));
+      title.append(evidence(item));
+      const artist = node("td", item.artist || "—", "approval-artist");
+      const recommended = item.evidence?.candidate_duration_seconds;
+      const durationCell = node("td", Number.isFinite(recommended) ? duration(recommended) : "", "approval-duration");
+      const score = node("td", item.match_score ?? item.similarity ?? "—", "approval-score");
+      const album = node("td", item.album || "Album not selected", "approval-album");
+      if (item.mbid) {
+        album.append(editionPicker(item.mbid, ui.releaseCache.get(item.mbid)?.releases, "base", id => useChoice(item, id)));
+        if (!ui.releaseCache.has(item.mbid)) loadReleases(item.mbid);
       }
+      row.append(action, title, artist, album, durationCell, score);
+      body.append(row);
     }
     $("beetsEmpty").hidden = matches.length > 0;
   }
@@ -228,20 +233,24 @@ window.MetadataUI = (() => {
   async function loadReleases(mbid, page = 1) {
     if (!mbid) return;
     const existing = ui.releaseCache.get(mbid);
-    if (existing?.pending || (page === 1 && existing?.page)) return;
+    if (existing?.request?.pending || (page === 1 && existing?.page)) return;
     const context = ui.context, user = ui.user;
-    ui.releaseCache.set(mbid, {...existing, pending: true, releases: existing?.releases || []});
+    const request = existing?.request || new IngestorUI.AsyncState(`releases:${mbid}`);
+    const token = request.start();
+    ui.releaseCache.set(mbid, {...existing, request, error: null, releases: existing?.releases || []});
     try {
       const params = new URLSearchParams({user_id: user, recording_id: mbid, page: String(page)});
       const response = await fetch(`/api/musicbrainz/releases?${params}`, {cache: "no-store"});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Release lookup unavailable");
       if (context !== ui.context || user !== ui.user) return;
-      ui.releaseCache.set(mbid, {...data, pending: false,
+      request.finish(token);
+      ui.releaseCache.set(mbid, {...data, request,
         releases: albumOptions([...(existing?.releases || []), ...data.releases])});
     } catch (error) {
       if (context !== ui.context || user !== ui.user) return;
-      ui.releaseCache.set(mbid, {...existing, pending: false, releases: existing?.releases || [],
+      request.fail(token);
+      ui.releaseCache.set(mbid, {...existing, request, releases: existing?.releases || [],
         error: error.message || String(error)});
     }
     refreshReleaseTables();
@@ -317,7 +326,7 @@ window.MetadataUI = (() => {
   async function loadTrack(track, initialPane = "") {
     invalidateSearch(); ui.contextController?.abort(); stopAudio();
     const serial = ++ui.loadSerial, user = ui.user;
-    ui.track = track; ui.context = null; ui.loading = true; ui.actions = {base: [], search: []};
+    ui.track = track; ui.context = null; flow.detail.start(); ui.actions = {base: [], search: []};
     $("approvalWorkspace").hidden = true; $("approvalEmpty").hidden = true;
     $("mbResults").replaceChildren(); status(); feedback("Loading track...");
     $("metadataManualPane").open = initialPane === "manual";
@@ -328,23 +337,23 @@ window.MetadataUI = (() => {
       const data = await response.json();
       if (!active() || serial !== ui.loadSerial || user !== ui.user) return;
       if (!response.ok || data.error) throw new Error(data.error || "Track could not be loaded");
-      ui.loading = false; renderContext(data); sourceQuery(); feedback();
+      flow.detail.finish(); renderContext(data); sourceQuery(); feedback();
       $("approvalWorkspace").hidden = false;
       const cover = $("approvalCover"); cover.hidden = false;
       cover.src = `/api/tracks/${encodeURIComponent(track.id)}/artwork/current/image?user_id=${encodeURIComponent(user)}&v=${encodeURIComponent(data.revision)}`;
       rememberPosition(); updateButtons(); scheduleSearch();
     } catch (error) {
       if (active() && serial === ui.loadSerial && user === ui.user && error.name !== "AbortError") {
-        ui.loading = false; feedback(error.message || String(error), true); updateButtons();
+        flow.detail.fail(); feedback(error.message || String(error), true); updateButtons();
       }
     }
   }
   async function refreshQueue(preferredId = null, explicitTrack = null, initialPane = "") {
-    if (!state.user || ui.sending) return;
+    if (!state.user || flow.mutation.pending) return;
     invalidateSearch(); ui.contextController?.abort(); stopAudio(); ui.loadSerial += 1;
     ui.user = state.user; const user = ui.user, serial = ++ui.queueSerial;
     ui.scope = scope(); const requestedScope = ui.scope;
-    ui.queueLoading = true; ui.loading = false; ui.context = null; ui.track = null;
+    flow.queue.start(); flow.detail.finish(); ui.context = null; ui.track = null;
     ui.tracks = []; ui.index = -1; $("approvalPickerList").replaceChildren();
     $("approvalWorkspace").hidden = true; $("approvalEmpty").hidden = true;
     ui.actions = {base: [], search: []}; feedback("Loading music..."); updateButtons();
@@ -358,7 +367,7 @@ window.MetadataUI = (() => {
       const selected = preferredId || rememberedPosition();
       const index = ui.tracks.findIndex(track => track.id === selected);
       ui.index = ui.tracks.length ? Math.max(0, index) : -1;
-      ui.queueLoading = false; ui.submitted.clear(); ui.pickerPage = 1;
+      flow.queue.finish(); ui.submitted.clear(); ui.pickerPage = 1;
       $("approvalPickerSearch").value = ""; renderPicker(); updateButtons();
       if (ui.index >= 0) {
         await loadTrack(ui.tracks[ui.index], initialPane);
@@ -367,7 +376,7 @@ window.MetadataUI = (() => {
         feedback(); $("approvalEmpty").hidden = false;
         $("approvalEmpty").textContent = data.excluded ? "No reviewable music in this view." : "No music in this view.";
       }
-    } catch (error) { if (valid()) { ui.queueLoading = false; feedback(error.message || String(error), true); updateButtons(); } }
+    } catch (error) { if (valid()) { flow.queue.fail(); feedback(error.message || String(error), true); updateButtons(); } }
   }
   async function enter() {
     if (!state.user || state.tab !== "approval") return;
@@ -383,7 +392,7 @@ window.MetadataUI = (() => {
     return refreshQueue(track.id, track, initialPane);
   }
   async function navigate(index) {
-    if (!active() || ui.sending || ui.queueLoading || index < 0 || index >= ui.tracks.length) return;
+    if (!active() || flow.mutation.pending || flow.queue.pending || index < 0 || index >= ui.tracks.length) return;
     ui.index = index; $("approvalPicker").open = false;
     await loadTrack(ui.tracks[index]); renderPicker();
   }
@@ -410,10 +419,11 @@ window.MetadataUI = (() => {
     return $("mbEntity").value === "artist" ? artist.length >= 2 : Boolean(ui.artistId) || title.length + artist.length >= 2;
   }
   function scheduleSearch() {
-    if (!active() || ui.sending || ui.loading) return;
+    if (!active() || flow.mutation.pending || flow.detail.pending) return;
     invalidateSearch(); ui.page = 1; ui.effectiveQuery = null; ui.actions.search = [];
     $("mbResults").replaceChildren(); $("mbPrev").disabled = true; $("mbNext").disabled = true; $("mbPage").textContent = "";
     if (!ui.context || !canSearch()) { status("Enter a title or artist."); return; }
+    flow.search.start();
     status("Searching..."); ui.timer = setTimeout(search, Math.max(500, ui.retryUntil - Date.now()));
   }
   function resultTable(items, entity) {
@@ -449,32 +459,15 @@ window.MetadataUI = (() => {
         info.append(details);
         const cached = ui.releaseCache.get(item.id);
         const releases = albumOptions(cached?.releases?.length ? cached.releases : item.releases);
-        const editions = releases.length ? releases : [null];
-        for (const [index, release] of editions.entries()) {
-          const editionRow = index ? node("tr") : row;
-          const releaseAction = index ? node("td", null, "approval-action") : action;
-          const use = control("Use", () => submit("select_recording",
-            {mbid: item.id, ...(release ? {release_id: release.id} : {})}), ui.context.can_correct, "search");
-          use.setAttribute("aria-label", `Use ${item.title} — ${release ? editionLabel(release) : "automatic release"}`);
-          releaseAction.append(use); editionRow.append(releaseAction);
-          if (!index) {
-            const artist = node("td", item.artist || "—", "approval-artist");
-            const length = node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null), "approval-duration");
-            const album = node("td", release ? editionLabel(release) : "Automatic release", "approval-album");
-            if (editions.length === 1) {
-              const more = moreReleasesButton(item.id, "search"); if (more) album.append(more);
-            }
-            for (const cell of [info, artist, length]) cell.rowSpan = editions.length;
-            editionRow.append(info, artist, album, length);
-          } else {
-            const album = node("td", editionLabel(release), "approval-album");
-            if (index === editions.length - 1) {
-              const more = moreReleasesButton(item.id, "search"); if (more) album.append(more);
-            }
-            editionRow.append(album);
-          }
-          body.append(editionRow);
-        }
+        const use = control("Use", () => submit("select_recording", {mbid: item.id}), ui.context.can_correct, "search");
+        use.setAttribute("aria-label", `Use ${item.title} recording without choosing an album`);
+        action.append(use);
+        const album = node("td", "Album not selected", "approval-album");
+        album.append(editionPicker(item.id, releases, "search", release_id =>
+          submit("select_recording", {mbid: item.id, release_id})));
+        row.append(action, info, node("td", item.artist || "—", "approval-artist"), album,
+          node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null), "approval-duration"));
+        body.append(row);
         continue;
       }
       body.append(row);
@@ -482,7 +475,7 @@ window.MetadataUI = (() => {
     table.append(head, body); container.append(table); return container;
   }
   async function search() {
-    if (!active() || !ui.context || !canSearch() || ui.sending || ui.loading) return;
+    if (!active() || !ui.context || !canSearch() || flow.mutation.pending || flow.detail.pending) return;
     if (Date.now() < ui.retryUntil) {
       status(`MusicBrainz retry in ${Math.ceil((ui.retryUntil - Date.now()) / 1000)} s.`);
       clearTimeout(ui.timer); ui.timer = setTimeout(search, Math.max(500, ui.retryUntil - Date.now())); return;
@@ -496,17 +489,20 @@ window.MetadataUI = (() => {
     const artistId = effective ? effective.artist_id : ui.artistId;
     if (artistId && entity === "recording") params.set("artist_id", artistId);
     const valid = () => active() && serial === ui.searchSerial && user === ui.user && context === ui.context;
+    flow.search.start();
     status("Searching..."); $("mbPrev").disabled = true; $("mbNext").disabled = true;
     try {
       const response = await fetch(`/api/musicbrainz/search?${params}`, {cache: "no-store", signal: controller.signal});
       const data = await response.json(); if (!valid()) return;
       if (!response.ok) {
+        flow.search.fail();
         if (response.status === 429) {
           ui.retryUntil = Date.now() + 1000 * Math.max(1, Number(data.retry_after) || 5);
           ui.timer = setTimeout(search, Math.max(500, ui.retryUntil - Date.now()));
         }
         status(data.error || `Search failed (HTTP ${response.status}).`, true); return;
       }
+      flow.search.finish();
       ui.effectiveQuery = data.query_used || null;
       ui.maxPage = Math.max(1, Math.min(100, Math.ceil(data.total / data.limit)));
       $("mbPage").textContent = `${data.page} / ${ui.maxPage}`;
@@ -515,21 +511,21 @@ window.MetadataUI = (() => {
       if (data.items.length) $("mbResults").append(resultTable(data.items, entity));
       status(data.query_note || (data.items.length ? "" : "No results."), data.query_strategy === "title_only");
       updateButtons();
-    } catch (error) { if (valid() && error.name !== "AbortError") status(error.message || String(error), true); }
+    } catch (error) { if (valid() && error.name !== "AbortError") { flow.search.fail(); status(error.message || String(error), true); } }
   }
   async function submit(mode, extra = {}) {
     const context = ui.context;
-    if (!active() || !context?.can_correct || ui.sending || ui.loading || ui.queueLoading) return;
+    if (!active() || !context?.can_correct || flow.mutation.pending || flow.detail.pending || flow.queue.pending) return;
     if (mode === "approve" && (context.state !== "NEEDS_APPROVAL" || !context.approval_token)) return;
     const user = ui.user, serial = ui.loadSerial;
     const path = `/api/tracks/${encodeURIComponent(context.track_id)}/${mode === "approve" || mode === "retag" ? "action" : "metadata-correction"}`;
     const body = {user_id: user, mode, ...extra,
       ...(mode === "approve" ? {approval_token: context.approval_token} : {revision: context.revision})};
     const valid = () => active() && context === ui.context && serial === ui.loadSerial && user === ui.user;
-    ui.sending = true; invalidateSearch(); updateButtons(); feedback("Queuing change...");
+    flow.mutation.start(); invalidateSearch(); updateButtons(); feedback("Queuing change...");
     try {
       const data = await api(path, body, null, valid); if (!valid()) return;
-      ui.sending = false; ui.submitted.add(context.track_id);
+      flow.mutation.finish(); ui.submitted.add(context.track_id);
       let next = ui.index + 1;
       while (next < ui.tracks.length && ui.submitted.has(ui.tracks[next].id)) next += 1;
       if (next < ui.tracks.length) await navigate(next);
@@ -540,23 +536,23 @@ window.MetadataUI = (() => {
       }
       if (active() && user === ui.user) { feedback(data.message || "Change queued."); updateButtons(); }
       if (user === state.user) await refreshTracks(false);
-    } catch (error) { if (valid()) feedback(error.message || String(error), true); }
-    finally { if (valid()) { ui.sending = false; updateButtons(); scheduleSearch(); } }
+    } catch (error) { if (valid()) { flow.mutation.fail(); feedback(error.message || String(error), true); } }
+    finally { if (valid()) { flow.mutation.finish(); updateButtons(); scheduleSearch(); } }
   }
   async function decide(endpoint, payload) {
     const context = ui.context, serial = ui.loadSerial, user = ui.user;
-    if (!active() || !context?.can_correct || ui.sending || ui.loading) return;
+    if (!active() || !context?.can_correct || flow.mutation.pending || flow.detail.pending) return;
     const valid = () => active() && context === ui.context && serial === ui.loadSerial && user === ui.user;
-    ui.sending = true; invalidateSearch(); updateButtons();
+    flow.mutation.start(); invalidateSearch(); updateButtons();
     try {
       const data = await api(`/api/tracks/${encodeURIComponent(context.track_id)}/${endpoint}`, {user_id: user, revision: context.revision, ...payload}, null, valid);
       if (!valid()) return;
-      ui.sending = false; renderContext(data); feedback(data.message || "Saved.");
+      flow.mutation.finish(); renderContext(data); feedback(data.message || "Saved.");
       if (endpoint === "artist-alias") sourceQuery();
       scheduleSearch();
       if (user === state.user) await refreshTracks(false);
-    } catch (error) { if (valid()) feedback(error.message || String(error), true); }
-    finally { if (valid()) { ui.sending = false; updateButtons(); } }
+    } catch (error) { if (valid()) { flow.mutation.fail(); feedback(error.message || String(error), true); } }
+    finally { if (valid()) { flow.mutation.finish(); updateButtons(); } }
   }
 
   $("approvalPrevious").addEventListener("click", () => navigate(ui.index - 1));
@@ -565,7 +561,7 @@ window.MetadataUI = (() => {
   $("approvalFilter").addEventListener("change", () => { clearTimeout(ui.filterTimer); refreshQueue(); });
   $("approvalSearch").addEventListener("input", () => {
     invalidateSearch(); ui.contextController?.abort(); ui.loadSerial += 1; ui.queueSerial += 1;
-    ui.context = null; ui.loading = true; $("approvalWorkspace").hidden = true; updateButtons();
+    ui.context = null; flow.detail.start(); $("approvalWorkspace").hidden = true; updateButtons();
     clearTimeout(ui.filterTimer); ui.filterTimer = setTimeout(refreshQueue, 300);
   });
   $("approvalPicker").addEventListener("toggle", renderPicker);

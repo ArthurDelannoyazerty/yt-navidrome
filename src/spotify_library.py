@@ -6,6 +6,8 @@ Name-only library matches still require the user's confirmation.
 """
 from __future__ import annotations
 
+from state_machines import SPOTIFY_RESOLUTION, resolution_state, receipt_state
+
 import hashlib
 import json
 import shutil
@@ -208,6 +210,7 @@ async def process_link(pipeline, job, directory):
             raise DeferredOperation("Waiting for the chosen library track's current operation")
         if not await pipeline.usable_asset(target, store.current_asset(target["id"])):
             raise ValueError("The chosen audio is missing or changed; repair/redownload it before linking")
+        pipeline.checkpoint(job, "applying")
         with store.db() as con:
             con.execute("BEGIN IMMEDIATE")
             metadata_only(con, source["id"], job["user_id"])
@@ -264,8 +267,10 @@ async def process_resolution(pipeline, job, directory):
         raise ValueError("Spotify source changed; retry this track")
     pipeline.checkpoint(job, "resolving")
     store.set_operation(source["id"], "RUNNING", "spotify_resolve")
+    resolution = resolution_state(payload)
     resolved = payload.get("resolved_audio")
-    if not resolved:
+    if resolution == "UNRESOLVED":
+        resolution = SPOTIFY_RESOLUTION.send(resolution, "resolve")
         circuit = pipeline.downloader.circuit_status()
         if circuit["open"]:
             raise DeferredOperation("YouTube audio search is paused with the download cooldown", retry_at=circuit["until"])
@@ -273,7 +278,9 @@ async def process_resolution(pipeline, job, directory):
         pipeline.checkpoint(job)
         if not isinstance(resolved, dict):
             raise ValueError("spotDL returned an invalid audio match")
+        resolution = SPOTIFY_RESOLUTION.send(resolution, "found")
         payload["resolved_audio"] = resolved
+        payload["resolution_phase"] = resolution
         store.update("jobs", job["id"], payload=json.dumps(payload))
     ref = parse_source(resolved.get("url", ""))
     if ref.provider != "youtube" or ref.is_playlist:
@@ -290,13 +297,15 @@ async def process_resolution(pipeline, job, directory):
         if target["operation_state"] in {"FAILED", "STOPPED"}:
             raise ValueError("The matching YouTube track has a failed or stopped operation. Retry it or choose another audio URL")
         if target["operation_state"] != "IDLE":
+            payload["resolution_phase"] = SPOTIFY_RESOLUTION.send("RESOLVED", "reuse")
+            store.update("jobs", job["id"], payload=json.dumps(payload))
             raise DeferredOperation("Waiting for the existing YouTube track to finish processing or approval")
         if not target["current_asset_id"] or not await pipeline.usable_asset(target, store.current_asset(target["id"])):
             if not existing["download_enabled"]:
                 raise ValueError("The matching YouTube URL is disabled. Enable it or choose another audio URL")
             store.queue_track(target["id"], job["user_id"], {"mode": "ingest", "origin_id": existing["id"]})
             raise DeferredOperation("Queued the existing YouTube track for audio; waiting for its processing and approval")
-    pipeline.checkpoint(job)
+    pipeline.checkpoint(job, "applying")
     now = utcnow()
     with store.db() as con:
         con.execute("BEGIN IMMEDIATE")
@@ -340,7 +349,10 @@ async def process_resolution(pipeline, job, directory):
             # Keep the same operation ID: normal downloader receipts, source
             # cancellation, rate limits and candidate-hash approval now apply.
             payload = {"mode": "ingest", "origin_id": audio_id, "operation": operation,
+                       "resolution_phase": SPOTIFY_RESOLUTION.send("RESOLVED", "download"),
                        "spotify_origin_id": origin["id"]}
+            if json.loads(fresh_job["payload"] or "{}").get("stop_after_commit"):
+                payload["stop_after_commit"] = True
             con.execute("UPDATE jobs SET payload=?,stage='queued' WHERE id=?", (json.dumps(payload), job["id"]))
             con.execute("UPDATE tracks SET operation_kind='INGEST',operation_error=NULL,updated_at=? WHERE id=?", (now, source["id"]))
         con.execute(
@@ -351,6 +363,7 @@ async def process_resolution(pipeline, job, directory):
             (origin["id"], audio_id, resolved.get("version"), json.dumps({**resolved, "selected_by": "spotdl"}), now),
         )
     if target:
+        SPOTIFY_RESOLUTION.send("RESOLVED", "link")
         try:
             await finish_link(pipeline, job, store.operation_receipt(operation), directory)
         except Exception as exc:

@@ -15,6 +15,7 @@ from pathlib import Path
 from common import ROOT, atomic_json
 from http_policy import ApiDeferred, HttpPolicy
 from runtime import DeferredOperation, ProcessError, run_process
+from state_machines import UPDATE, prepare_update, transition_setting, cooldown_state
 
 
 class SpotDLRuntime:
@@ -41,7 +42,7 @@ class SpotDLRuntime:
     async def _request(self, mode, url, report, *, runtime=None):
         if mode != "smoke":
             cooldown = self.store.setting(f"spotdl_{mode}_cooldown", 0)
-            if cooldown > time.time():
+            if cooldown_state(cooldown, time.time()) == "WAITING":
                 raise DeferredOperation("Waiting for the shared Spotify provider cooldown", retry_at=cooldown)
         runtime = runtime or self.active()
         python = runtime["python"]
@@ -149,7 +150,7 @@ class SpotDLRuntime:
                         previous = None
                 except (ValueError, RuntimeError, KeyError):
                     report("WARNING", "Replacing an invalid active spotDL pointer")
-                self.store.set_setting("spotdl_update", {"status": "RUNNING", "at": time.time()})
+                prepare_update(self.store, "spotdl_update")
                 report("INFO", "Installing a fresh spotDL runtime; active operations keep their current runtime")
                 uv = shutil.which("uv")
                 if not uv:
@@ -158,22 +159,28 @@ class SpotDLRuntime:
                 python = folder / "bin" / "python"
                 await run_process([uv, "pip", "install", "--python", python, "--upgrade", "spotdl>=4.6.0,<5"],
                                   report, timeout=600)
+                transition_setting(self.store, "spotdl_update", UPDATE, "installed")
                 smoke = await self._request("smoke", None, report, runtime={"python": str(python)})
                 version = smoke.get("version")
                 if not isinstance(version, str) or not version:
                     raise RuntimeError("spotDL smoke check did not return a version")
                 active = {"python": str(python), "version": version, "installed_at": time.time()}
+                transition_setting(self.store, "spotdl_update", UPDATE, "verified")
                 if previous:
                     atomic_json(self.root / "previous.json", previous)
                 atomic_json(self.active_file, active)
                 activated = True
-                self.store.set_setting("spotdl_update", {"status": "OK", **active})
+                transition_setting(self.store, "spotdl_update", UPDATE, "activated", **active)
                 report("INFO", f"spotDL activated: {version}. API restart not required")
             except BaseException as exc:
                 # Cancellation has the same atomicity guarantee as a failed install.
                 if not activated:
                     shutil.rmtree(folder, ignore_errors=True)
-                self.store.set_setting("spotdl_update", {"status": "FAILED", "error": str(exc) or "Update cancelled", "at": time.time()})
+                phase = self.store.setting("spotdl_update", {}).get("phase", "IDLE")
+                event = "cancel" if isinstance(exc, asyncio.CancelledError) and phase != "ACTIVATING" else "fail"
+                if event in UPDATE.transitions.get(phase, {}):
+                    transition_setting(self.store, "spotdl_update", UPDATE, event,
+                                       error=str(exc) or "Update cancelled")
                 report("ERROR", f"spotDL update failed; previous runtime retained: {exc}")
                 raise
             keep = set(self.in_use) | {str(folder)}
@@ -196,6 +203,6 @@ class SpotDLRuntime:
             current = self.active()
             atomic_json(self.active_file, previous)
             atomic_json(previous_file, current)
-            self.store.set_setting("spotdl_update", {"status": "ROLLED_BACK", **previous})
+            transition_setting(self.store, "spotdl_update", UPDATE, "rollback", **previous)
             self.store.event("WARNING", f"spotDL rolled back to {previous['version']}; active operations unchanged", target="spotdl-update")
             return previous

@@ -375,6 +375,35 @@ class Bridge:
         write_loudness_tags(path, values)
         return {"file_path": str(path), "loudness": values}
 
+    def refresh_album_item(self, track, path):
+        """Update beets metadata from an album-only tag change, never moving files."""
+        from beets.dbcore.query import MatchQuery
+        from beets.library import Item
+        candidate = Path(path).resolve()
+        if not candidate.is_relative_to(self.directory) or not candidate.is_file():
+            raise ValueError("Refusing album metadata refresh outside the user library")
+        item = self.find_existing(track)
+        if item:
+            item.path = os.fsencode(candidate)
+            item.read()
+        else:
+            item = Item.from_path(str(candidate))
+            item.pipeline_id = track["id"]
+            item.add(self.lib)
+        if item.mb_albumid:
+            other = self.lib.albums(MatchQuery("mb_albumid", item.mb_albumid)).get()
+            if other:
+                item.album_id = other.id
+                item.store()
+            else:
+                item.album_id = None
+                item.store()
+                self.lib.add_album([item])
+        else:
+            item.album_id = None
+            item.store()
+        return self.result(item)
+
     def refresh_item(self, track):
         from beets.library import Item
 
@@ -450,9 +479,12 @@ class Bridge:
             item.update(selected["tags"])
             recording = selected.get("mbid") or item.mb_trackid
             if recording:
-                album_info, data = self.release_metadata(
-                    recording, overrides.get("release_id")
-                )
+                # A recording is not an album. Never silently select the oldest
+                # official release (which may be a preview or compilation).
+                exact_release = overrides.get("release_id")
+                if not exact_release and recording == track.get("mbid"):
+                    exact_release = track.get("release_id")
+                album_info, data = self.release_metadata(recording, exact_release) if exact_release else (None, None)
                 if data:
                     item.update(data)
                 else:
@@ -463,12 +495,12 @@ class Bridge:
                         item[field] = ""
                     for field in ("year", "month", "day", "original_year", "original_month", "original_day"):
                         item[field] = 0
-                    release_warning = (
-                        "Recording identity was applied without verified release metadata: "
-                        "no usable official MusicBrainz release was resolved for this recording. "
-                        "Use Search MusicBrainz to select a compatible edition if needed."
-                    )
-                    print(f"WARNING {release_warning}", file=sys.stderr)
+                    if exact_release:
+                        release_warning = (
+                            "The selected MusicBrainz release did not yield usable release metadata; "
+                            "recording identity was preserved without album tags."
+                        )
+                        print(f"WARNING {release_warning}", file=sys.stderr)
 
         if overrides.get("album") is not None and overrides["album"] != item.album:
             item.mb_albumid = ""
@@ -551,8 +583,8 @@ class Bridge:
         # last beets write as well, then synchronize the DB from the final file.
         if source_reset:
             clear_descriptive_tags(final_path, selected["source"])
-        elif release_warning:
-            # A release lookup can fail after the recording was identified.
+        elif replace_identity and not source_reset and not item.mb_albumid:
+            # No album was chosen. Never reuse unverified candidate edition tags.
             # Do not let beets republish an incompatible edition's raw tags.
             clear_release_tags(final_path, overrides.get("album"))
         artwork_result = None
@@ -627,6 +659,8 @@ def main(request):
         return bridge.repair_file(track, path)
     if mode == "refresh":
         return bridge.refresh_item(track)
+    if mode == "album_refresh":
+        return bridge.refresh_album_item(track, path)
     if mode == "inspect":
         item = bridge.find_existing(track)
         if item and item.get("pipeline_operation") == request.get("operation"):

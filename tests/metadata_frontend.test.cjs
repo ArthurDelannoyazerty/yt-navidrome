@@ -136,7 +136,7 @@ test('leaving the page cancels automatic search and prevents hidden provider req
 test('MusicBrainz use can select a compatible edition without trusting result tags',async()=>{
   const b=setup();await open(b,{tracks:summaries(1)});await search(b);
   assert.equal(buttons(b.get('mbResults'),'Use').length,1);
-  const pending=buttons(b.get('mbResults'),'Use')[0].listeners.click();
+  const pending=buttons(b.get('mbResults'),'Use Release')[0].listeners.click();
   const request=b.requests.at(-1);assert.match(request.url,/metadata-correction$/);
   assert.deepEqual(JSON.parse(request.options.body),{user_id:'admin',mode:'select_recording',mbid:MBID,release_id:RID,revision:'r'.repeat(64)});
   request.resolve({message:'Queued'});await pending;
@@ -230,11 +230,10 @@ test('one click on Beets album submits the exact release ID and keeps recommende
   const releaseB={id:'33333333-3333-4333-8333-333333333333',title:'Live album',date:'2010'};
   const b=setup();await open(b,{tracks:summaries(1),editions:[releaseA,releaseB]});
   const rows=b.get('metadataSuggestions').children;
-  assert.equal(rows.length,2);
-  assert.equal(rows[0].children[1].rowSpan,2);
+  assert.equal(rows.length,1);
   assert.equal(rows[0].children[4].textContent,'3:19');
-  assert.match(rows[1].children[1].textContent,/Live album/);
-  const pending=buttons(rows[1],'Use')[0].listeners.click();
+  assert.ok(buttons(rows[0],'Use Live album · 2010').length === 1);
+  const pending=buttons(rows[0],'Use Live album · 2010')[0].listeners.click();
   const request=b.requests.at(-1);
   assert.deepEqual(JSON.parse(request.options.body),{
     user_id:'admin',mode:'approve',index:3,release_id:releaseB.id,approval_token:'a'.repeat(64)
@@ -256,8 +255,8 @@ test('MusicBrainz shows one-click buttons for different releases',async()=>{
   await search(b,[{id:MBID,title:'Found',artist:'Artist',length_ms:199000,
     releases:[{id:RID,title:'Original'},another]}]);
   const use=buttons(b.get('mbResults'),'Use');
-  assert.equal(use.length,2);
-  const pending=use[1].listeners.click();
+  assert.equal(use.length,1); // Only one row per recording; album variants are nested.
+  const pending=buttons(b.get('mbResults'),'Use Compilation')[0].listeners.click();
   const request=b.requests.at(-1);
   assert.equal(JSON.parse(request.options.body).release_id,another.id);
   request.resolve({message:'Queued'});await pending;
@@ -274,8 +273,8 @@ test('additional release pages expand inline and preserve one-click album approv
   assert.match(request.url,/page=2/);
   const second={id:'33333333-3333-4333-8333-333333333333',title:'Rare compilation'};
   request.resolve({recording_id:MBID,page:2,total:101,releases:[second]});await pending;await tick();
-  assert.equal(b.get('metadataSuggestions').children.length,2);
-  const approved=buttons(b.get('metadataSuggestions').children[1],'Use')[0].listeners.click();
+  assert.equal(b.get('metadataSuggestions').children.length,1);
+  const approved=buttons(b.get('metadataSuggestions'),'Use Rare compilation')[0].listeners.click();
   const post=b.requests.at(-1);
   assert.equal(JSON.parse(post.options.body).release_id,second.id);
   post.resolve({message:'Queued'});await approved;

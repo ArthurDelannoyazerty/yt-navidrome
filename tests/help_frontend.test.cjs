@@ -33,7 +33,7 @@ function setup() {
     parseFromString(markup, type) { assert.equal(type, "image/svg+xml"); return {documentElement: {markup}}; }
   }
   vm.runInNewContext(readFileSync(require.resolve("../src/static/help-ui.js"), "utf8"),
-    {window, document, URL, MutationObserver, DOMParser});
+    {window, document, URL, MutationObserver, DOMParser, IngestorUI: require("../src/static/ui-state.js")});
   function loaded() {
     window.IngestorPele = {mount(target, source, options) {
       const result = renderer.IngestorPele.render(source, {fontSize: options.fontSize, idPrefix: "help-test"});

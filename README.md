@@ -91,6 +91,20 @@ reliably; these pre-upgrade sources cannot appear in Archived sources without
 an explicit migration from trustworthy external evidence. Back up the SQLite
 database before deploying the schema migration.
 
+## Explicit workflow contracts (schema 10)
+
+Source archive and purge now cancel exclusive queued and delayed work immediately.
+Running downloads receive a durable cancellation request; an in-progress file
+commit or committed cleanup drains safely before removal. Shared tracks, other
+sources and other library users are not stopped by a source-scoped action.
+
+Backend workflows have executable transition tables in `src/state_machines.py`.
+SQLite guards protect persistent states even when updated by direct SQL; browser
+async actors replace pending flags and fence stale completions. The contracts are
+inspectable at `/api/state-machines` or with
+`python tools/dump_state_machines.py`. See the complete [workflow audit](docs/state-machines.md)
+for the inventory, cancellation boundaries, migrations and test requirements.
+
 ## Track actions
 
 ### Redownload
@@ -253,7 +267,7 @@ private sources. See [Spotify setup and workflow](docs/spotify.md).
 
 ## SQLite schema versioning
 
-The database uses `PRAGMA user_version`. Fresh installations create schema v9.
+The database uses `PRAGMA user_version`. Fresh installations create schema v10.
 An unversioned database containing data is refused rather than silently changed.
 
 Existing versioned installations upgrade in place, with a consistent SQLite
@@ -270,7 +284,8 @@ backup under `state/backups/` before each versioned migration:
 - v7 → v8 distinguishes discovery origins from automatically selected audio
   origins and retains Spotify/audio associations through recording merges.
 
-- v8 → v9 retains source-to-origin attribution across playlist resyncs, enabling safe source purges.\n\nOrigin identity rejections, source snapshots, identification reports and explicit
+- v8 → v9 retains source-to-origin attribution across playlist resyncs, enabling safe source purges.
+- v9 → v10 installs executable workflow constraints and transition diagnostics, with a versioned backup first.\n\nOrigin identity rejections, source snapshots, identification reports and explicit
 artist aliases are retained in additive tables. Existing tracks, assets,
 memberships and confirmed identities are preserved.
 
@@ -480,3 +495,24 @@ exports, or remove those sources to remove the exports while retaining the music
 origins and discovery history. Online playlists are never edited. Rescan Navidrome
 after file-tag or artwork changes. See [Source links and playlists](docs/source-links-and-playlists.md)
 and [Track artwork](docs/track-artwork.md).
+
+## Persistent MusicBrainz catalogue and album organization
+
+The **Catalogue** tab searches and refreshes an incrementally cached, public
+MusicBrainz discography (including recordings you do not own). The **Graph** tab
+explores the same typed artist, work, recording, release and release-group
+relationships with independent node-type filters and a downloaded-only view.
+
+Album candidate comparison uses confirmed recording IDs and locally cached
+release relationships. Release selection is distinct from recording approval;
+no compatibility score is treated as a probability of identity. After an
+explicit preview, approved release changes retag audio **at its existing
+stable path**, preserving the recording ID and encoded audio; each edit has an
+undo snapshot. Automatic album preferences require an explicit per-source opt-in.
+
+**One-time migration required before bulk album corrections to legacy files.**
+See [Catalogue, Graph, albums, and NixOS path migration](docs/catalogue-graph-albums.md).
+Back up importer state, actual music, and Navidrome's own database, then run the
+move-only migration with the importer and Navidrome stopped. Verify that the
+Navidrome scan preserves song IDs and playlist/rating history before acknowledging
+and enabling album corrections. Do not attempt the migration with the old image.

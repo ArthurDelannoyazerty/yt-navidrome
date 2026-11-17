@@ -53,6 +53,10 @@ def test_schema_v4_upgrade_backs_up_and_preserves_data(db, track, environment):
     track, origin, audio = activate(db, track, environment)
     membership = db.rows("SELECT * FROM memberships")
     with db.db() as con:
+        # Construct a real pre-FSM schema: v4 had no v10 guard triggers.
+        # SQLite correctly refuses to drop columns still referenced by a guard.
+        for row in con.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'fsm_%'").fetchall():
+            con.execute('DROP TRIGGER "' + row[0].replace('"', '""') + '"')
         for column in ("download_enabled", "disabled_at", "disabled_reason"):
             con.execute(f"ALTER TABLE track_origins DROP COLUMN {column}")
         for column in ("download_failures", "cancel_requested", "stage"):
