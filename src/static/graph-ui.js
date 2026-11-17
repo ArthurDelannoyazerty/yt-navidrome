@@ -35,7 +35,14 @@ window.GraphUI = (() => {
       ui.user = user; ui.graph = result; ui.selected = null;
       ui.zoom = 1; ui.x = 0; ui.y = 0;
       draw(result);
-      status(`${result.nodes.length} nodes · ${result.edges.length} relationships · ${result.owned_recording_count} owned recordings indexed.${result.truncated ? " Graph truncated: enter an artist/music filter or focus on an ID to explore more." : ""}`);
+      const missingLinks = result.nodes.length && !result.edges.length
+        ? " No cached connections yet: open Catalogue, choose Index downloaded recordings, then Refresh progress. Indexing can take time."
+        : "";
+      const sampled = $g("graphView").value === "downloaded" &&
+        (result.owned_recording_count || 0) > result.nodes.filter(node => node.owned).length
+        ? " This is a bounded sample, not your complete music library; use a search or MusicBrainz ID to focus."
+        : "";
+      status(`${result.nodes.length} nodes · ${result.edges.length} relationships · ${result.owned_recording_count} owned recordings.${missingLinks}${sampled}${result.truncated ? " Graph truncated: enter an artist/music filter or focus on an ID to explore more." : ""}`);
     } catch (error) { if (serial === ui.serial && user === state.user) status(error.message, true); }
   }
   function positions(nodes, edges) {
