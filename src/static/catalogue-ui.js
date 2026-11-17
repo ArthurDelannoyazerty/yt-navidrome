@@ -25,6 +25,8 @@ window.CatalogueUI = (() => {
     ui.user = null; ui.detail = null; ui.results = []; ui.recommendations = [];
     ui.preview = null; ui.serial++;
     for (const id of ["catalogueResults", "catalogueRecommendations", "cataloguePreview", "catalogueHistory"]) byId(id).replaceChildren();
+    byId("catalogueResults").append(element("p", "Search to find cached MusicBrainz entries.", "hint"));
+    byId("catalogueDetail").replaceChildren(element("p", "Select an entry on the left to browse its discography or tracklist.", "hint"));
     for (const id of ["catalogueStatus", "catalogueAlbumStatus", "catalogueProgress"]) byId(id).textContent = "";
     byId("catalogueSources").replaceChildren();
   }
@@ -58,15 +60,25 @@ window.CatalogueUI = (() => {
   async function search(online = false) {
     const user = state.user, serial = ++ui.serial;
     const q = byId("catalogueQuery").value.trim(), kind = byId("catalogueKind").value;
+    const local_only = byId("catalogueLocalOnly").checked;
     if (q.length < 2) { message("Enter at least two characters.", true); return; }
     message(online ? "Searching MusicBrainz with shared API rate limiting..." : "Searching cached catalogue...");
-    const params = new URLSearchParams({user_id: user, kind, q, online: String(online)});
+    const params = new URLSearchParams({user_id: user, kind, q, online: String(online), local_only: String(local_only)});
     try {
       const result = await api(`/api/catalogue/search?${params}`);
       if (!current(user, serial)) return;
       ui.results = result.items || [];
-      byId("catalogueResults").replaceChildren(...ui.results.map(renderResult));
-      message(`${ui.results.length} ${online ? "online" : "cached"} results. ${online ? "They are now cached locally." : "Use Search MusicBrainz if the local catalogue is incomplete."}`);
+      const body = byId("catalogueResults");
+      body.replaceChildren(...ui.results.map(renderResult));
+      body.scrollTop = 0;
+      if (!ui.results.length) body.append(element("p",
+        local_only
+          ? "No linked local entries found. Index downloaded recordings to build missing relationships, or uncheck the filter to browse the full cache."
+          : "No matching catalogue entries found.", "hint"));
+      const scope = local_only ? "linked to your library" : "in the public catalogue";
+      message(`${ui.results.length} ${online ? "MusicBrainz" : "cached"} results ${scope}.` +
+        (local_only ? " Links can be incomplete until indexing finishes." :
+          online ? " Results are also saved in the cache." : " Use Search MusicBrainz to find more."));
     } catch (error) { if (current(user, serial)) message(error.message, true); }
   }
   function renderResult(item) {
@@ -74,7 +86,7 @@ window.CatalogueUI = (() => {
     row.append(element("h4", item.name));
     row.append(element("p", `${item.kind} · ${item.id}`, "hint"));
     const actions = element("div", null, "row");
-    actions.append(button("Inspect", () => openEntity(item.kind, item.id)));
+    actions.append(button("Select", () => openEntity(item.kind, item.id), false));
     const link = element("a", "MusicBrainz");
     link.href = `https://musicbrainz.org/${item.kind}/${item.id}`;
     link.rel = "noopener noreferrer"; link.target = "_blank";
@@ -86,7 +98,7 @@ window.CatalogueUI = (() => {
     const user = state.user, serial = ui.serial;
     const box = byId("catalogueDetail");
     box.replaceChildren(element("p", `Loading ${kind} details...`, "hint"));
-    message(`Inspecting ${kind} ${id}...`);
+    message(`Selecting ${kind} ${id}...`);
     const data = await api(`/api/catalogue/entity?${new URLSearchParams({user_id: user, kind, id})}`);
     if (!current(user, serial)) return;
     ui.detail = data;
@@ -138,10 +150,11 @@ window.CatalogueUI = (() => {
       raw.append(element("pre", JSON.stringify(data.entity.data, null, 2)));
       box.append(raw);
     }
-    message(`Inspecting ${data.entity?.name || kind}. Details are shown below.`);
-    // Search results may contain dozens of rows. Bring the selected details
-    // into view instead of making a successful Inspect click appear inert.
-    box.closest(".catalogue-details")?.scrollIntoView?.({behavior: "auto", block: "start"});
+    message(`Selected ${data.entity?.name || kind}. Details are shown on the right.`);
+    // The selected entry is beside search on desktop and below it on mobile.
+    if (window.innerWidth <= 850) {
+      box.closest(".catalogue-selection-card")?.scrollIntoView?.({behavior: "auto", block: "start"});
+    }
   }
   function displayProgress(data) {
     const counts = Object.entries(data.counts || {}).map(([k, count]) => `${k}: ${count}`).join(" · ");
@@ -172,7 +185,7 @@ window.CatalogueUI = (() => {
       card.append(element("p", `${entry.matched} of ${result.recording_count} known recordings occur on this release · ${entry.unmatched} unmatched · ${entry.release_tracks_cached} tracklist entries cached`, "hint"));
       card.append(element("p", `${entry.date || "Unknown date"} · ${entry.country || "Unknown country"} · ${entry.status || "Unknown status"}`, "hint"));
       const actions = element("div", null, "row");
-      actions.append(button("Inspect release", () => openEntity("release", entry.release_id)));
+      actions.append(button("Select release", () => openEntity("release", entry.release_id)));
       actions.append(button("Sync tracklist", async () => {
         await api("/api/catalogue/sync", {user_id: state.user, kind: "release", id: entry.release_id, sections: ["lookup"], force: true});
         message("Full release lookup queued. Refresh progress and compare again when complete.", false, "catalogueAlbumStatus");
@@ -252,6 +265,20 @@ window.CatalogueUI = (() => {
     const user = state.user, data = await api(`/api/catalogue/album-history?user_id=${encodeURIComponent(user)}`);
     if (user === state.user) displayHistory(data);
   }
+  function setResultsHeight() {
+    const slider = byId("catalogueResultsHeight");
+    const value = Math.min(720, Math.max(200, Number(slider.value) || 360));
+    byId("catalogueResults").style.maxHeight = `${value}px`;
+    byId("catalogueResultsHeightValue").textContent = `${value} px`;
+  }
+  byId("catalogueResultsHeight").addEventListener("input", setResultsHeight);
+  setResultsHeight();
+  byId("catalogueLocalOnly").addEventListener("change", () => {
+    if (byId("catalogueQuery").value.trim().length >= 2) {
+      // The online search is already cached; toggling does not re-query MusicBrainz.
+      search(false).catch(error => message(error.message, true));
+    }
+  });
   byId("catalogueSearchForm").addEventListener("submit", event => { event.preventDefault(); search(false).catch(error => message(error.message, true)); });
   byId("catalogueOnlineSearch").addEventListener("click", () => search(true).catch(error => message(error.message, true)));
   byId("catalogueRecommend").addEventListener("click", () => recommend().catch(error => message(error.message, true, "catalogueAlbumStatus")));
