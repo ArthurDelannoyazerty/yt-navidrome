@@ -84,10 +84,13 @@ window.CatalogueUI = (() => {
   }
   async function openEntity(kind, id) {
     const user = state.user, serial = ui.serial;
+    const box = byId("catalogueDetail");
+    box.replaceChildren(element("p", `Loading ${kind} details...`, "hint"));
+    message(`Inspecting ${kind} ${id}...`);
     const data = await api(`/api/catalogue/entity?${new URLSearchParams({user_id: user, kind, id})}`);
     if (!current(user, serial)) return;
     ui.detail = data;
-    const box = byId("catalogueDetail"); box.replaceChildren();
+    box.replaceChildren();
     box.append(element("h4", data.entity?.name || `${kind} ${id}`));
     box.append(element("p", `${kind} · ${id}`, "hint"));
     const actionRow = element("div", null, "row");
@@ -135,6 +138,10 @@ window.CatalogueUI = (() => {
       raw.append(element("pre", JSON.stringify(data.entity.data, null, 2)));
       box.append(raw);
     }
+    message(`Inspecting ${data.entity?.name || kind}. Details are shown below.`);
+    // Search results may contain dozens of rows. Bring the selected details
+    // into view instead of making a successful Inspect click appear inert.
+    box.closest(".catalogue-details")?.scrollIntoView?.({behavior: "smooth", block: "start"});
   }
   function displayProgress(data) {
     const counts = Object.entries(data.counts || {}).map(([k, count]) => `${k}: ${count}`).join(" · ");
