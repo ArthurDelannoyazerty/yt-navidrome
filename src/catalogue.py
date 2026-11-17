@@ -19,6 +19,7 @@ from pathlib import Path
 import requests
 
 from common import utcnow
+from localized_names import preferred_english_name
 from http_policy import ApiDeferred, HttpPolicy
 from musicbrainz_search import API_ROOT, USER_AGENT, terms, valid_id
 
@@ -580,7 +581,8 @@ class Catalogue:
                 return None
             release = json.loads(row["release_json"])
             return {"release_id": release_id, "recording_id": recording_id,
-                    "album": row["album"], "album_artist": "".join(
+                    "album": preferred_english_name(release),
+                    "native_album": row["album"], "album_artist": "".join(
                         str(item.get("name") or item.get("artist", {}).get("name") or "") + str(item.get("joinphrase") or "")
                         for item in release.get("artist-credit") or [] if isinstance(item, dict)),
                     "date": release.get("date"), "release_group_id": (release.get("release-group") or {}).get("id"),
