@@ -301,6 +301,8 @@ class AlbumManager:
             audio.pop(key, None)
         updates = {
             "album": tags["album"],
+            # The confirmed release's canonical name survives English aliases.
+            "originalalbum": tags.get("native_album") or tags["album"],
             "musicbrainz_albumid": tags["release_id"],
             "tracknumber": str(tags["position"]),
             "discnumber": str(tags["medium"]),
