@@ -604,7 +604,7 @@ class Catalogue:
                 english_credit.append(credited + str(item.get("joinphrase") or ""))
             return {"release_id": release_id, "recording_id": recording_id,
                     "album": preferred_english_name(release),
-                    "native_album": row["album"],
+                    "native_album": str(release.get("title") or row["album"]),
                     "album_artist": "".join(english_credit),
                     "native_album_artist": artist_credit(release),
                     "date": release.get("date"), "release_group_id": (release.get("release-group") or {}).get("id"),
