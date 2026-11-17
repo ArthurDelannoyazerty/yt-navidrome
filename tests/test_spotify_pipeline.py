@@ -422,7 +422,7 @@ def test_schema7_migration_preserves_existing_origins_as_discovery(db, track):
         con.execute("ALTER TABLE track_origins DROP COLUMN is_discovery")
         con.execute("PRAGMA user_version=7")
     Store(db.path).init()
-    assert db.one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION == 8
+    assert db.one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION == 9
     assert db.owned("track_origins", origin_id, "admin")["is_discovery"] == 1
     backups = list((db.path.parent / "backups").glob("*schema-v7*"))
     assert len(backups) == 1

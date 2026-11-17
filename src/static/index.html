@@ -19,7 +19,7 @@
     <h1>Music Ingestor</h1>
     <span class="brand-caption">Your Navidrome import desk</span>
   </div>
-  <label class="user-picker">Library user<select id="user" aria-label="Library user"><option value="">Loading…</option></select></label>
+  <label class="user-picker">Library user<select id="user" aria-label="Library user" required><option value="">Select a library user…</option></select></label>
 </header>
 
 <nav class="tabs" aria-label="Application sections">
@@ -231,6 +231,11 @@
       <div class="subpanel">
         <h3>Configured sources</h3>
         <div id="sources" class="source-list"></div>
+        <details id="archivedSourcesPanel" class="user-setup">
+          <summary>Archived sources (music retained)</summary>
+          <p class="hint">An archived source no longer syncs, but its origin history is kept. You may restore it or permanently remove music belonging only to that source.</p>
+          <div id="archivedSources" class="source-list"></div>
+        </details>
       </div>
     </div>
   </section>
@@ -364,6 +369,17 @@
     </details>
   </section>
 </main>
+
+<dialog id="chooseLibraryDialog" aria-labelledby="chooseLibraryHeading" class="library-chooser">
+  <form id="chooseLibraryForm">
+    <h2 id="chooseLibraryHeading">Choose your music library</h2>
+    <p>Select the account that will own imported songs and playlists. Your choice is saved in this browser only. You can change it later in the top-right corner.</p>
+    <label for="chooseLibraryUser">Library account</label>
+    <select id="chooseLibraryUser" aria-label="Choose library account" required></select>
+    <p class="hint">This selector is not a password or an authentication mechanism. The administration site should remain behind your authenticated reverse proxy.</p>
+    <div class="dialog-actions"><button type="submit">Use this library</button></div>
+  </form>
+</dialog>
 
 <dialog id="removeDialog" aria-labelledby="removeHeading">
   <form id="removeForm">

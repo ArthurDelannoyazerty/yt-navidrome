@@ -245,6 +245,28 @@ async function fixtureServer(t, data) {
   return "http://127.0.0.1:" + server.address().port;
 }
 
+test("real browser: first-visit account choice persists without silently picking admin", {timeout: 60000}, async t => {
+  const chrome = await browser(t);
+  if (!chrome) return;
+  const origin = await fixtureServer(t, fixtures());
+  await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelector('#chooseLibraryDialog')?.open === true");
+  assert.equal(await chrome.evaluate("document.querySelector('#user').value"), "");
+  assert.equal(await chrome.evaluate("document.querySelector('#urls').disabled"), true);
+  assert.equal(await chrome.evaluate("localStorage.getItem('music-explicit-user-v1')"), null);
+  await chrome.evaluate("document.querySelector('#chooseLibraryUser').value='guest'; document.querySelector('#chooseLibraryForm').requestSubmit()");
+  await chrome.until("document.querySelector('#user')?.value==='guest' && document.querySelector('#chooseLibraryDialog')?.open === false");
+  assert.equal(await chrome.evaluate("localStorage.getItem('music-explicit-user-v1')"), "guest");
+  await chrome.send("Page.reload", {ignoreCache: true});
+  await chrome.until("document.querySelector('#user')?.value==='guest'");
+  assert.equal(await chrome.evaluate("document.querySelector('#chooseLibraryDialog').open"), false);
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.until("localStorage.getItem('music-explicit-user-v1')==='admin'");
+  await chrome.send("Page.reload", {ignoreCache: true});
+  await chrome.until("document.querySelector('#user')?.value==='admin'");
+  assert.equal(await chrome.evaluate("document.querySelector('#chooseLibraryDialog').open"), false);
+});
+
 test("real browser: log following, focused removal, ignored navigation and mobile layout", {timeout: 60000}, async t => {
   const chrome = await browser(t);
   if (!chrome) return;
@@ -252,6 +274,8 @@ test("real browser: log following, focused removal, ignored navigation and mobil
   const origin = await fixtureServer(t, data);
   await chrome.send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 900, deviceScaleFactor: 1, mobile: false});
   await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length === 1 && document.querySelector('#logs').children.length === 240");
   assert.equal(await chrome.evaluate("document.querySelector('#notice').hidden || !document.querySelector('#notice').classList.contains('error')"), true);
 
@@ -299,6 +323,8 @@ test("real browser: stop the active source and queue another URL without removin
   const origin = await fixtureServer(t, data);
   await chrome.send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 900, deviceScaleFactor: 1, mobile: false});
   await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelector('.stop-download') && !document.querySelector('.stop-download').disabled");
   await chrome.evaluate("document.querySelector('.stop-download').click()");
   await chrome.until("document.querySelector('#tracks').textContent.includes('Downloads stopped')");
@@ -339,6 +365,8 @@ test("real browser: Approval is a two-column page with automatic search and one-
   const origin=await fixtureServer(t,data);
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
   await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
   assert.equal(await chrome.evaluate("!!document.querySelector('.review-toolbar,#startReview,#approveSelected,#metadataDialog')"),false);
   assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","sources","activity","maintenance","help"]);
@@ -394,6 +422,8 @@ test("real browser: Help lazily renders the workflow with local Pele and fits na
   await chrome.send("Page.addScriptToEvaluateOnNewDocument",{source:"window.styleViolations=[];document.addEventListener('securitypolicyviolation',event=>{if(event.effectiveDirective.startsWith('style-src'))window.styleViolations.push(event.violatedDirective);});"});
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
   await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1");
   assert.equal(await chrome.evaluate("typeof window.IngestorPele"),"undefined");
   await chrome.evaluate("document.querySelector('[data-tab=help]').click()");
@@ -434,6 +464,8 @@ test("real browser: the collapsed music picker is bounded, searchable and indepe
   const origin=await fixtureServer(t,data);
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
   await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===50");
   await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
   await chrome.until("!document.querySelector('#approvalWorkspace').hidden");
@@ -473,6 +505,8 @@ test("real browser: per-track cover comparison, pin, auto-selection and mobile l
   const origin = await fixtureServer(t, data);
   await chrome.send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 1000, deviceScaleFactor: 1, mobile: false});
   await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1 && window.ArtworkUI");
   await chrome.evaluate("document.querySelector('#tracks .action-menu summary').click(); [...document.querySelectorAll('#tracks button')].find(b=>b.textContent==='Artwork...').click()");
   await chrome.until("document.querySelector('#artworkDialog').open && document.querySelectorAll('#artworkCandidates input').length===2");

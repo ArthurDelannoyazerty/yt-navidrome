@@ -288,3 +288,12 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 @media (max-width: 420px) {
   .approval-search-form { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* First-visit chooser: foreground the ownership decision before import. */
+.library-chooser { max-width: min(460px, calc(100vw - 32px)); width: 100%; }
+.library-chooser::backdrop { background: rgba(20, 30, 27, .64); }
+.library-chooser select { width: 100%; margin: 10px 0 14px; }
+#archivedSourcesPanel { padding-top: 16px; }
+#archivedSourcesPanel .source-list { margin-top: 12px; }
+#archivedSourcesPanel .source { border-color: var(--border); }
+.REMOVED, .PURGING { background: var(--warn); color: #815a14; }

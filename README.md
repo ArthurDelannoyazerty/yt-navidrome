@@ -62,6 +62,35 @@ DESCRIPTION=Discovery Date: 2019-04-17--21-36-42 UTC
 
 Writing both keys keeps MediaFile/beets and common tag viewers compatible.
 
+## Account selection and archived sources
+
+On the first visit in a browser profile, choose a library in the modal account
+chooser. The choice is stored only in that browser's `localStorage` under
+`music-explicit-user-v1`; no password, cookie or server-side account login is
+created. The old automatically populated `music-user` preference is not trusted.
+Subsequent visits use the saved choice if the account still exists; otherwise
+the chooser reappears. The selector in the top-right corner switches library at
+any time and persists the explicit choice. Clearing site storage, incognito
+sessions or switching devices causes the chooser to reappear. Periodic prompts
+are not necessary; destructive operations require their own confirmations.
+
+**Sources → Archive source** disables monitoring, removes the exported playlist
+and current playlist memberships, but preserves the imported music and durable
+origin attribution. It remains visible under **Archived sources**, where it can
+be restored or purged. Restore schedules a new sync with monitoring off.
+
+**Remove source and its music…** previews the exact user's exclusive and shared
+tracks and requires two confirmations. The source purge is processed by the
+single-worker queue, with a durable cleanup receipt so file and beets cleanup
+can be retried. Tracks claimed by another source or independently added remain
+available, even if another source was previously archived. Source-origin
+attribution is retained across playlist resyncs, not only current memberships.
+
+Source records already deleted by older versions cannot be reconstructed
+reliably; these pre-upgrade sources cannot appear in Archived sources without
+an explicit migration from trustworthy external evidence. Back up the SQLite
+database before deploying the schema migration.
+
 ## Track actions
 
 ### Redownload
@@ -224,7 +253,7 @@ private sources. See [Spotify setup and workflow](docs/spotify.md).
 
 ## SQLite schema versioning
 
-The database uses `PRAGMA user_version`. Fresh installations create schema v8.
+The database uses `PRAGMA user_version`. Fresh installations create schema v9.
 An unversioned database containing data is refused rather than silently changed.
 
 Existing versioned installations upgrade in place, with a consistent SQLite
@@ -241,7 +270,7 @@ backup under `state/backups/` before each versioned migration:
 - v7 → v8 distinguishes discovery origins from automatically selected audio
   origins and retains Spotify/audio associations through recording merges.
 
-Origin identity rejections, source snapshots, identification reports and explicit
+- v8 → v9 retains source-to-origin attribution across playlist resyncs, enabling safe source purges.\n\nOrigin identity rejections, source snapshots, identification reports and explicit
 artist aliases are retained in additive tables. Existing tracks, assets,
 memberships and confirmed identities are preserved.
 
