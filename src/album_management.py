@@ -308,6 +308,7 @@ class AlbumManager:
             "discnumber": str(tags["medium"]),
         }
         optional = {"albumartist": tags.get("album_artist"),
+                    "originalalbumartist": tags.get("native_album_artist"),
                     "musicbrainz_albumartistid": tags.get("album_artist_ids") or [],
                     "date": tags.get("date"),
                     "musicbrainz_releasegroupid": tags.get("release_group_id"),
