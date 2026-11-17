@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from audio_tags import loudness_values, write_loudness_tags
+from localized_names import native_names, apply_to_opus, POLICY_TAG
 from source_metadata import clear_descriptive_tags, clear_release_tags, identification_hints
 from metadata_hints import evidence_for_candidate, search_hints
 from common import LIBRARY, ROOT, STATE, atomic_copy, atomic_json, music_comment, canonical_source_urls, user_name
@@ -339,6 +340,57 @@ class Bridge:
             )
         return None, None
 
+    def canonical_names(self, recording_id: str, release_id: str | None = None):
+        """Fetch MusicBrainz's canonical names alongside preferred aliases."""
+        from musicbrainz_search import valid_id
+
+        recording_id = valid_id(recording_id)
+        release_id = valid_id(release_id) if release_id else None
+        if not recording_id:
+            raise ValueError("A confirmed recording ID is required for localization")
+        mb = self.plugins["musicbrainz"]
+        recording = mb.mb_api.get_json(
+            mb.mb_api.api_root + "/recording/" + recording_id,
+            params={"inc": "artist-credits"},
+        )
+        self.raise_if_deferred()
+        if not isinstance(recording, dict) or recording.get("id") != recording_id or not recording.get("title"):
+            raise ValueError("MusicBrainz canonical recording response is invalid")
+        release = None
+        if release_id:
+            release = mb.mb_api.get_json(
+                mb.mb_api.api_root + "/release/" + release_id,
+                params={"inc": "artist-credits"},
+            )
+            self.raise_if_deferred()
+            if not isinstance(release, dict) or release.get("id") != release_id or not release.get("title"):
+                raise ValueError("MusicBrainz canonical release response is invalid")
+        return native_names(recording, release)
+
+    def localize_existing(self, track, path):
+        """Retag a staged copy without changing identity, album edition, or audio."""
+        if not track.get("mbid") or track.get("metadata_edited"):
+            raise ValueError("Only confirmed, unedited MusicBrainz recordings can be localized in bulk")
+        mb = self.plugins["musicbrainz"]
+        info = mb.track_for_id(track["mbid"])
+        self.raise_if_deferred()
+        if not info or str(info.track_id).lower() != track["mbid"].lower():
+            raise ValueError("MusicBrainz recording identity changed during localization")
+        album = None
+        if track.get("release_id"):
+            album, merged = self.release_metadata(track["mbid"], track["release_id"])
+            # release_metadata() already verifies exact recording membership.
+            # Its merged metadata is a beets item-data dict, not a TrackInfo.
+            if album is None or merged is None:
+                raise ValueError("Confirmed release no longer contains this recording")
+        native = self.canonical_names(track["mbid"], track.get("release_id"))
+        display = {"title": info.title, "artist": info.artist}
+        if album is not None:
+            display["album"] = album.album
+            display["albumartist"] = (getattr(album, "albumartist", None)
+                                      or getattr(album, "artist", None) or "")
+        return apply_to_opus(path, display, native, include_album=album is not None)
+
     def measure_loudness(self, item):
         """Force fresh true-peak analysis, including when source gain tags exist.
 
@@ -553,6 +605,9 @@ class Bridge:
         elif not item.mb_albumid:
             item.album_id = None
 
+        # Resolve canonical names before touching the published audio.
+        native = (self.canonical_names(item.mb_trackid, item.mb_albumid or None)
+                  if replace_identity and not source_reset and item.mb_trackid else None)
         item.write()
         item.store()
         final_destination.parent.mkdir(parents=True, exist_ok=True)
@@ -630,6 +685,17 @@ class Bridge:
         # Plugins may write the file again, so force the raw compatibility tags last.
         self.write_discovery_tags(final_path, track.get("discovered_at"), self.source_urls(track))
         write_loudness_tags(final_path, loudness)
+        if native is not None:
+            apply_to_opus(final_path, {"title": item.title, "artist": item.artist,
+                                       "album": item.album, "albumartist": item.albumartist}, native,
+                          include_album=bool(item.mb_albumid),
+                          clear_unassigned_album=not bool(item.mb_albumid))
+        elif source_reset:
+            # Source reset must also drop the prior localization marker.
+            from mutagen.oggopus import OggOpus
+            audio = OggOpus(str(final_path))
+            audio.pop(POLICY_TAG, None)
+            audio.save()
         if source_reset or (replace_identity and not item.mb_albumid):
             # Synchronize beets with the actual Opus fields after selective tag
             # cleanup, including normal recording-only approval (no release).
@@ -683,6 +749,8 @@ def main(request):
         return bridge.repair_file(track, path)
     if mode == "refresh":
         return bridge.refresh_item(track)
+    if mode == "language":
+        return bridge.localize_existing(track, path)
     if mode == "album_refresh":
         return bridge.refresh_album_item(track, path)
     if mode == "inspect":

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Literal
 from pydantic import BaseModel, Field
 from fastapi import Query
 
 from album_management import AlbumManager
 from catalogue import Catalogue, ENTITY_KINDS
+from language_jobs import preview as language_preview, queue as queue_languages
 
 
 class SyncRequest(BaseModel):
@@ -46,6 +48,12 @@ class PreferenceInput(BaseModel):
 class IndexLibraryInput(BaseModel):
     user_id: str
     limit: int = Field(default=500, ge=1, le=5000)
+
+
+class LanguageApplyInput(BaseModel):
+    user_id: str
+    limit: int = Field(default=3, ge=1, le=5000)
+    confirmed: Literal[True]
 
 
 async def cache_worker(catalogue, stopping):
@@ -108,6 +116,17 @@ def install_catalogue_routes(app, store, pipeline):
         result = catalogue.index_recordings(row["mbid"] for row in rows)
         return {**result, "queued_or_cached": len(rows),
                 "message": "Indexing runs in the background and respects MusicBrainz's shared limiter."}
+
+    @app.get("/api/catalogue/language-preview")
+    async def preview_language(user_id: str):
+        store.require_user(user_id)
+        return await asyncio.to_thread(language_preview, store, user_id)
+
+    @app.post("/api/catalogue/language-apply")
+    async def apply_language(data: LanguageApplyInput):
+        albums.require_migration_complete()
+        store.require_user(data.user_id)
+        return await asyncio.to_thread(queue_languages, store, data.user_id, data.limit)
 
     @app.get("/api/catalogue/graph")
     def graph(user_id: str, view: str = "downloaded", kinds: str = "artist,recording,release,release-group,work",

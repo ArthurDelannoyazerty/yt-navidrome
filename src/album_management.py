@@ -301,11 +301,14 @@ class AlbumManager:
             audio.pop(key, None)
         updates = {
             "album": tags["album"],
+            # The confirmed release's canonical name survives English aliases.
+            "originalalbum": tags.get("native_album") or tags["album"],
             "musicbrainz_albumid": tags["release_id"],
             "tracknumber": str(tags["position"]),
             "discnumber": str(tags["medium"]),
         }
         optional = {"albumartist": tags.get("album_artist"),
+                    "originalalbumartist": tags.get("native_album_artist"),
                     "musicbrainz_albumartistid": tags.get("album_artist_ids") or [],
                     "date": tags.get("date"),
                     "musicbrainz_releasegroupid": tags.get("release_group_id"),

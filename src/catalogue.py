@@ -19,6 +19,7 @@ from pathlib import Path
 import requests
 
 from common import utcnow
+from localized_names import artist_credit, preferred_english_name
 from http_policy import ApiDeferred, HttpPolicy
 from musicbrainz_search import API_ROOT, USER_AGENT, terms, valid_id
 
@@ -120,7 +121,8 @@ class Catalogue:
         # Never downgrade detailed cached metadata to a sparse search snippet.
         combined = {**(json.loads(previous["data"]) if previous else {}), **data}
         content = _payload(combined)
-        name = _safe_name(combined.get("title") or combined.get("name"))
+        name = _safe_name(preferred_english_name(
+            combined, field="title" if combined.get("title") else "name"))
         changed = not previous or previous["data"] != content
         con.execute("""INSERT INTO entities(kind,id,name,data,fetched_at,checked_at,changed_at)
                        VALUES (?,?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET
@@ -284,7 +286,8 @@ class Catalogue:
             filtered = [item for item in items if _id(item.get("id"))
                         and (owned_ids is None or _id(item["id"]) in owned_ids)]
             return {"items": [{"kind": kind, "id": item["id"],
-                               "name": _safe_name(item.get("title") or item.get("name")),
+                               "name": _safe_name(preferred_english_name(
+                                   item, field="title" if item.get("title") else "name")),
                                "data": item, "cached": False}
                               for item in filtered[:limit]],
                     "total": raw.get("count", len(items)), "remote": True,
@@ -294,9 +297,12 @@ class Catalogue:
         with self.db() as con:
             # Filter BEFORE the result cap. A global top-40 followed by a local
             # filter would omit legitimate local artists with common names.
+            escaped = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             matches = con.execute("""SELECT kind,id,name,data,checked_at FROM entities
-                WHERE kind=? AND name LIKE ? ESCAPE '\\' COLLATE NOCASE
-                ORDER BY name""", (kind, "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"))
+                WHERE kind=? AND (name LIKE ? ESCAPE '\\' COLLATE NOCASE
+                OR COALESCE(json_extract(data,'$.title'),json_extract(data,'$.name'),'')
+                   LIKE ? ESCAPE '\\' COLLATE NOCASE)
+                ORDER BY name""", (kind, escaped, escaped))
             results = []
             for row in matches:
                 if owned_ids is not None and row["id"] not in owned_ids:
@@ -579,10 +585,28 @@ class Catalogue:
             if not row:
                 return None
             release = json.loads(row["release_json"])
+            credits = release.get("artist-credit") or []
+            english_credit = []
+            for item in credits:
+                if not isinstance(item, dict):
+                    continue
+                artist = item.get("artist") or {}
+                credited = str(item.get("name") or artist.get("name") or "")
+                identity = _id(artist.get("id"))
+                if identity:
+                    cached_artist = con.execute(
+                        "SELECT data FROM entities WHERE kind='artist' AND id=?",
+                        (identity,)).fetchone()
+                    if cached_artist:
+                        alias = preferred_english_name(json.loads(cached_artist["data"]), field="name")
+                        if alias and alias != (json.loads(cached_artist["data"]).get("name") or ""):
+                            credited = alias
+                english_credit.append(credited + str(item.get("joinphrase") or ""))
             return {"release_id": release_id, "recording_id": recording_id,
-                    "album": row["album"], "album_artist": "".join(
-                        str(item.get("name") or item.get("artist", {}).get("name") or "") + str(item.get("joinphrase") or "")
-                        for item in release.get("artist-credit") or [] if isinstance(item, dict)),
+                    "album": preferred_english_name(release),
+                    "native_album": str(release.get("title") or row["album"]),
+                    "album_artist": "".join(english_credit),
+                    "native_album_artist": artist_credit(release),
                     "date": release.get("date"), "release_group_id": (release.get("release-group") or {}).get("id"),
                     "album_artist_ids": [credit["artist"]["id"] for credit in release.get("artist-credit") or []
                                          if isinstance(credit, dict) and isinstance(credit.get("artist"), dict)

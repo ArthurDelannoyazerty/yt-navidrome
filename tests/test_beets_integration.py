@@ -16,6 +16,7 @@ def test_config_keeps_native_match_thresholds():
     config = yaml.safe_load((ROOT / "beets.yaml").read_text())
     assert "match" not in config
     assert config["original_date"] is True
+    assert config["languages"] == ["en"]
     assert config["lyrics"]["synced"] is True
     assert config["lyrics"]["sources"] == ["lrclib"]
 
@@ -102,6 +103,12 @@ with patch("requests.sessions.Session.send", no_network):
         fixture_album,
         fixture_track.merge_with_album(fixture_album),
     )
+    # MusicBrainz canonical spellings are obtained separately from beets'
+    # English-preferred display data. No network is used in this fixture.
+    b.canonical_names = lambda recording, release=None: {
+        "title": "原曲の題名", "artist": "原作家",
+        "album": "元のアルバム" if release else "",
+    }
     b.plugins["fetchart"].art_for_album = lambda *args, **kwargs: SimpleNamespace(
         path=os.fsencode(cover)
     )
@@ -135,6 +142,10 @@ with patch("requests.sessions.Session.send", no_network):
     expected = "Discovery Date: 2021-04-17--21-36-42 UTC"
     assert tags.year == 1999 and tags.month == 3 and tags.day == 4
     assert tags.album == "Real Artist Album"
+    assert raw["originaltitle"] == ["原曲の題名"]
+    assert raw["originalartist"] == ["原作家"]
+    assert raw["originalalbum"] == ["元のアルバム"]
+    assert raw["ingestor_language_policy"] == ["english-first-v1"]
     assert tags.comments == expected
     assert raw["comment"] == [expected]
     assert raw["description"] == [expected]
@@ -156,6 +167,25 @@ with patch("requests.sessions.Session.send", no_network):
     assert replacement["file_path"] == str(final)
     assert final.exists() and not final.with_name(final.stem + ".1.opus").exists()
     assert Path(b.find_existing(track).path.decode()) == final
+
+    # Library-wide language pass only touches a staged copy; no audio
+    # download, identity reassignment, or random album selection.
+    track["mbid"] = fixture_track.track_id
+    track["release_id"] = fixture_album.album_id
+    track["metadata_edited"] = 0
+    b.plugins["musicbrainz"].track_for_id = lambda mbid: fixture_track
+    localized_copy = path.with_name("language-" + user + ".opus")
+    copyfile(final, localized_copy)
+    localized = b.localize_existing(track, localized_copy)
+    local_tags = OggOpus(localized_copy)
+    assert localized["title"] == "Fixture Song"
+    assert local_tags["originaltitle"] == ["原曲の題名"]
+    assert local_tags["originalartist"] == ["原作家"]
+    assert local_tags["originalalbum"] == ["元のアルバム"]
+    assert local_tags["musicbrainz_trackid"] == [fixture_track.track_id]
+    assert local_tags["musicbrainz_albumid"] == [fixture_album.album_id]
+    assert final.exists() and localized_copy.exists()
+    localized_copy.unlink()
 
     # A different or unregistered asset must not be allowed to overwrite an
     # occupied slot; it must fail instead of allocating a numbered path.
