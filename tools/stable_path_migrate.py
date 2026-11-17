@@ -50,6 +50,12 @@ class Migration:
         finally:
             con.close()
 
+    @staticmethod
+    def resolve_beets_path(value, user_root: Path) -> Path:
+        """Beets 2.14 can store paths relative to the configured user library."""
+        stored = Path(os.fsdecode(value))
+        return (stored if stored.is_absolute() else user_root / stored).resolve()
+
     def inspect(self):
         if not self.database.is_file():
             raise ValueError("No importer database at " + str(self.database))
@@ -93,7 +99,7 @@ class Migration:
                 raise ValueError(f"Missing beets item/database for {user}/{row['id']}")
             with sqlite3.connect(beets_db) as bcon:
                 br = bcon.execute("SELECT path FROM items WHERE id=?", (row["beets_id"],)).fetchone()
-                if br is None or os.fsdecode(br[0]) != str(old):
+                if br is None or self.resolve_beets_path(br[0], user_root) != old:
                     raise ValueError(f"Beets item path mismatch for {user}/{row['id']}")
             plans.append({"track_id": row["id"], "user": user,
                           "asset_id": row["current_asset_id"], "beets_id": row["beets_id"],
@@ -152,9 +158,14 @@ class Migration:
         with sqlite3.connect(beets_db) as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT path FROM items WHERE id=?", (entry["beets_id"],)).fetchone()
-            if not row or os.fsdecode(row[0]) not in {entry["source"], entry["destination"]}:
+            user_root = (self.library / entry["user"]).resolve()
+            if not row or self.resolve_beets_path(row[0], user_root) not in {old, new}:
                 raise ValueError("Beets item changed concurrently")
-            con.execute("UPDATE items SET path=? WHERE id=?", (os.fsencode(entry["destination"]), entry["beets_id"]))
+            # Preserve beets' existing path representation. Relative beets rows
+            # are relative to this user's configured library, not /app/src.
+            relative = not Path(os.fsdecode(row[0])).is_absolute()
+            destination = new.relative_to(user_root) if relative else new
+            con.execute("UPDATE items SET path=? WHERE id=?", (os.fsencode(destination), entry["beets_id"]))
 
     def rewrite_playlists(self):
         # Import after env has been configured, not before.

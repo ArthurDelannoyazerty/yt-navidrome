@@ -135,7 +135,8 @@ def create_app(store=None, start_workers=True):
                 # move-only migration and Navidrome canary verification first.
                 for existing in store.rows("""SELECT id,user_id,file_path FROM tracks
                     WHERE current_asset_id IS NOT NULL AND health='AVAILABLE'
-                    AND file_path IS NOT NULL"""):
+                    AND file_path IS NOT NULL
+                    AND temporary_candidate_sha256 IS NULL"""):
                     expected = (LIBRARY / existing["user_id"] / "audio" /
                                 (existing["id"] + ".opus")).resolve()
                     if Path(existing["file_path"]).resolve() != expected:
