@@ -16,7 +16,7 @@ from typing import Any
 from audio_tags import REPAIRABLE_ISSUES
 from artwork import SCHEMA as ARTWORK_SCHEMA, Artwork, transfer_origin
 from library_query import track_where
-from common import STATE, utcnow, user_name
+from common import LIBRARY, STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, correction_revision, prepare_correction
 from state_machines import (
     JOB, JOB_CONTROL, SOURCE, RECEIPT, DOWNLOAD_PERMISSION, COMMIT_STAGES, JOB_STAGES, SOURCE_INACTIVE,
@@ -1333,6 +1333,15 @@ class Store:
                 else:
                     origin = self._select_origin_locked(con, track_id, user, payload.get("origin_id"))
                 payload["origin_id"] = origin["id"]
+            elif mode == "language":
+                if (track["health"] != "AVAILABLE" or track["operation_state"] != "IDLE"
+                        or not track["file_path"] or not track["mbid"]
+                        or track["metadata_edited"] or not track["current_asset_id"]):
+                    raise ValueError("Language updates require idle, confirmed, unedited local music")
+                path = Path(track["file_path"]).resolve()
+                root = (LIBRARY / user).resolve()
+                if path != root / "audio" / (track_id + ".opus") or not path.is_file():
+                    raise ValueError("Language updates require the canonical, existing audio path")
             elif mode in {"repair", "source_links"}:
                 if track["health"] != "AVAILABLE" or not track["file_path"]:
                     raise ValueError("Tag/loudness repair requires an available audio file")
@@ -1411,7 +1420,8 @@ class Store:
         return {"message": f"Queued {queued} tracks", "queued": queued, "skipped": skipped,
                 "scope": "library_user", "user_id": user}
 
-    def commit_repair(self, track_id, asset_id, fingerprint, beets_id, operation_id, action="repair"):
+    def commit_repair(self, track_id, asset_id, fingerprint, beets_id, operation_id, action="repair",
+                      matched_title=None):
         """Commit updated file provenance and a replay-safe completion receipt."""
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -1423,10 +1433,11 @@ class Store:
                 (fingerprint["sha256"], fingerprint["size_bytes"], fingerprint["mtime_ns"], asset_id),
             )
             con.execute(
-                """UPDATE tracks SET beets_id=?,health='AVAILABLE',operation_state='IDLE',
-                   operation_kind=NULL,operation_error=NULL,pending_operation=NULL,
-                   choices='[]',selected=NULL,temp_path=NULL,updated_at=? WHERE id=?""",
-                (beets_id, utcnow(), track_id),
+                """UPDATE tracks SET beets_id=?,matched_title=COALESCE(?,matched_title),
+                   health='AVAILABLE',operation_state='IDLE',operation_kind=NULL,
+                   operation_error=NULL,pending_operation=NULL,choices='[]',
+                   selected=NULL,temp_path=NULL,updated_at=? WHERE id=?""",
+                (beets_id, matched_title, utcnow(), track_id),
             )
             resolved_kinds = REPAIRABLE_ISSUES if action == "repair" else ("DISCOVERY_COMMENT_MISMATCH", "SOURCE_COMMENT_MISMATCH")
             placeholders = ",".join("?" for _ in resolved_kinds)
