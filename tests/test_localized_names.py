@@ -1,0 +1,96 @@
+"""English preference and lossless preservation of canonical MusicBrainz names."""
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+from mutagen.oggopus import OggOpus
+
+from localized_names import (
+    LANGUAGE_POLICY, apply_to_opus, artist_credit, is_localized,
+    native_names, preferred_english_name,
+)
+
+
+def test_musicbrainz_english_aliases_are_opt_in_and_not_guessed():
+    raw = {"title": "踊子プリムロゼのテーマ", "aliases": [
+        {"name": "Random search hint", "locale": "en", "type": "Search hint", "primary": True},
+        {"name": "Primrose, the Dancer", "locale": "en", "type": None, "primary": True},
+        {"name": "Odoriko", "locale": "en", "type": None, "primary": False},
+    ]}
+    assert preferred_english_name(raw) == "Primrose, the Dancer"
+    assert preferred_english_name({"title": "踊子プリムロゼのテーマ"}) == "踊子プリムロゼのテーマ"
+    assert preferred_english_name({"title": "元のタイトル", "aliases": [
+        {"name": "English version", "locale": "en-US", "primary": True},
+    ]}) == "English version"
+    assert preferred_english_name({"title": "元", "aliases": [
+        {"name": "Legal Alias", "locale": "en", "type": "Legal name", "primary": True},
+    ]}) == "元"
+
+
+def test_canonical_credit_keeps_actual_credited_script():
+    raw = {"title": "踊子プリムロゼのテーマ", "artist-credit": [
+        {"name": "西木康智", "joinphrase": " feat. ",
+         "artist": {"name": "Yasunori Nishiki"}},
+        {"name": "歌手", "artist": {"name": "Singer"}},
+    ]}
+    assert artist_credit(raw) == "西木康智 feat. 歌手"
+    assert native_names(raw, {"title": "オクトパストラベラー"}) == {
+        "title": "踊子プリムロゼのテーマ",
+        "artist": "西木康智 feat. 歌手",
+        "album": "オクトパストラベラー",
+    }
+
+
+@pytest.fixture
+def audio(tmp_path):
+    path = tmp_path / "test.opus"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:sample_rate=48000", "-t", "0.2",
+         "-c:a", "libopus", str(path)], check=True,
+    )
+    tags = OggOpus(str(path))
+    tags["musicbrainz_trackid"] = ["11111111-1111-4111-8111-111111111111"]
+    tags["musicbrainz_albumid"] = ["22222222-2222-4222-8222-222222222222"]
+    tags["metadata_block_picture"] = ["test-artwork-not-decoded"]
+    tags["comment"] = ["Discovery Date: keep"]
+    tags["r128_track_gain"] = ["-200"]
+    tags["title"] = ["踊子プリムロゼのテーマ"]
+    tags["artist"] = ["西木康智"]
+    tags["album"] = ["旧アルバム"]
+    tags.save()
+    return path
+
+
+def test_localization_preserves_identity_loudness_art_and_original_names(audio):
+    native = {"title": "踊子プリムロゼのテーマ", "artist": "西木康智",
+              "album": "オクトパストラベラー"}
+    result = apply_to_opus(audio,
+                           {"title": "Primrose, the Dancer", "artist": "Yasunori Nishiki",
+                            "album": "Octopath Traveler"},
+                           native, include_album=True)
+    tags = OggOpus(str(audio))
+    assert result["title"] == "Primrose, the Dancer"
+    assert tags["originaltitle"] == ["踊子プリムロゼのテーマ"]
+    assert tags["originalartist"] == ["西木康智"]
+    assert tags["originalalbum"] == ["オクトパストラベラー"]
+    assert tags["musicbrainz_trackid"] == ["11111111-1111-4111-8111-111111111111"]
+    assert tags["musicbrainz_albumid"] == ["22222222-2222-4222-8222-222222222222"]
+    assert tags["metadata_block_picture"] == ["test-artwork-not-decoded"]
+    assert tags["comment"] == ["Discovery Date: keep"]
+    assert tags["r128_track_gain"] == ["-200"]
+    assert tags["ingestor_language_policy"] == [LANGUAGE_POLICY]
+    assert is_localized(audio)
+
+
+def test_recording_only_approval_does_not_assign_album(audio):
+    apply_to_opus(audio, {"title": "Primrose, the Dancer",
+                          "artist": "Yasunori Nishiki"},
+                  {"title": "踊子プリムロゼのテーマ", "artist": "西木康智"},
+                  include_album=False, clear_unassigned_album=True)
+    tags = OggOpus(str(audio))
+    assert tags["album"] == ["旧アルバム"]  # Existing album tag is not guessed.
+    assert "originalalbum" not in tags
+    assert tags["originaltitle"] == ["踊子プリムロゼのテーマ"]
