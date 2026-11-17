@@ -193,7 +193,7 @@ async function fixtureServer(t, data) {
         response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
         return;
       }
-      else if (url.pathname === "/api/sources") result = [];
+      else if (url.pathname === "/api/sources") result = data.sources || [];
       else if (url.pathname === "/api/disabled-origins") result = data.disabled;
       else if (url.pathname === "/api/ignored") result = data.ignored;
       else if (url.pathname === "/api/events") result = data.events.filter(event => event.id > Number(url.searchParams.get("after") || 0));
@@ -529,5 +529,37 @@ test("real browser: per-track cover comparison, pin, auto-selection and mobile l
   await chrome.screenshot("artwork-gallery-mobile");
   await chrome.evaluate("document.querySelector('#artworkClose').click()");
   await chrome.until("!document.querySelector('#artworkDialog').open");
+  assert.deepEqual(chrome.errors, []);
+});
+
+test("real browser: source actions stack vertically without crushing playlist URLs", {timeout: 60000}, async t => {
+  const chrome = await browser(t); if (!chrome) return;
+  const data = fixtures();
+  data.sources = [{
+    id: "playlist-source", user_id: "admin", provider: "youtube", is_playlist: true,
+    monitored: true, status: "IDLE", title: "Soundtrack playlist",
+    url: "https://www.youtube.com/playlist?list=PL1234567890long-source-identifier",
+  }];
+  const origin = await fixtureServer(t, data);
+  await chrome.send("Emulation.setDeviceMetricsOverride",
+    {width: 1280, height: 900, deviceScaleFactor: 1, mobile: false});
+  await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=sources]').click()");
+  await chrome.until("document.querySelectorAll('#sources .source-buttons button').length === 4");
+
+  const geometry = "(() => {const row=document.querySelector('#sources .source'); const buttons=[...row.querySelectorAll('.source-buttons button')].map(button=>button.getBoundingClientRect()); const details=row.querySelector('.source-details').getBoundingClientRect(); const url=row.querySelector('.url').getBoundingClientRect(); return { stacked:buttons.every((r,i)=>!i || r.top>=buttons[i-1].bottom+4), detailsWidth:details.width, urlWidth:url.width, withinPage:row.getBoundingClientRect().right<=innerWidth };})()";
+  const desktop = await chrome.evaluate(geometry);
+  assert.equal(desktop.stacked, true, "All four source actions must appear on separate lines");
+  assert.ok(desktop.urlWidth >= 160, "Playlist URL must retain a readable column");
+  assert.equal(desktop.withinPage, true);
+
+  await chrome.send("Emulation.setDeviceMetricsOverride",
+    {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
+  const mobile = await chrome.evaluate(geometry);
+  assert.equal(mobile.stacked, true);
+  assert.ok(mobile.urlWidth >= 200, "On mobile, the URL gets the full source row");
+  assert.equal(mobile.withinPage, true);
   assert.deepEqual(chrome.errors, []);
 });
