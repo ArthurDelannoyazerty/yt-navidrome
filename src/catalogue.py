@@ -220,7 +220,7 @@ class Catalogue:
         if kind not in ENTITY_KINDS:
             raise ValueError("Unknown catalogue entity type")
         self.store.require_user(user_id)
-        owned = {row["mbid"] for row in self.store.rows(
+        owned = {_id(row["mbid"]) for row in self.store.rows(
             """SELECT DISTINCT mbid FROM tracks WHERE user_id=? AND mbid IS NOT NULL
                AND current_asset_id IS NOT NULL AND health='AVAILABLE'
                AND temporary_candidate_sha256 IS NULL""", (user_id,))
@@ -282,7 +282,7 @@ class Catalogue:
                 for item in items:
                     self.ingest(con, kind, item)
             filtered = [item for item in items if _id(item.get("id"))
-                        and (owned_ids is None or item["id"] in owned_ids)]
+                        and (owned_ids is None or _id(item["id"]) in owned_ids)]
             return {"items": [{"kind": kind, "id": item["id"],
                                "name": _safe_name(item.get("title") or item.get("name")),
                                "data": item, "cached": False}
