@@ -170,8 +170,12 @@ def test_existing_library_localization_is_previewed_and_confirmed(db, environmen
     assert result["skipped"]["manual_or_busy"] == 1
     assert result["sample"][0]["id"] == first
     with TestClient(create_app(db, start_workers=False)) as client:
+        guest_preview = client.get("/api/catalogue/language-preview",
+                                   params={"user_id": "guest"})
+        assert guest_preview.status_code == 200
+        assert guest_preview.json()["eligible"] == 0, "No other library's tracks should leak"
         assert client.get("/api/catalogue/language-preview",
-                          params={"user_id": "guest"}).status_code == 400
+                          params={"user_id": "missing-library"}).status_code == 400
         assert client.post("/api/catalogue/language-apply", json={
             "user_id": "admin", "limit": 3,
         }).status_code == 422
