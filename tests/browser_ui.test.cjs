@@ -194,6 +194,12 @@ async function fixtureServer(t, data) {
         return;
       }
       else if (url.pathname === "/api/sources") result = data.sources || [];
+      else if (url.pathname === "/api/catalogue/sources") result = [];
+      else if (url.pathname === "/api/catalogue/progress") result = {counts:{}, active:[]};
+      else if (url.pathname === "/api/catalogue/album-history") result = [];
+      else if (url.pathname === "/api/catalogue/search") result = {items:data.catalogueSearch || [], remote:false};
+      else if (url.pathname === "/api/catalogue/entity") result = data.catalogueEntity ||
+        {entity:null, scopes:[], relations:[], tracks:[]};
       else if (url.pathname === "/api/disabled-origins") result = data.disabled;
       else if (url.pathname === "/api/ignored") result = data.ignored;
       else if (url.pathname === "/api/events") result = data.events.filter(event => event.id > Number(url.searchParams.get("after") || 0));
@@ -561,5 +567,27 @@ test("real browser: source actions stack vertically without crushing playlist UR
   assert.equal(mobile.stacked, true);
   assert.ok(mobile.urlWidth >= 200, "On mobile, the URL gets the full source row");
   assert.equal(mobile.withinPage, true);
+  assert.deepEqual(chrome.errors, []);
+});
+
+
+test("real browser: inspecting a catalogue artist reveals its details", {timeout: 60000}, async t => {
+  const chrome = await browser(t); if (!chrome) return;
+  const data = fixtures();
+  data.catalogueSearch = [{kind:"artist", id:"11111111-1111-4111-8111-111111111111", name:"Creo"}];
+  data.catalogueEntity = {entity:{name:"Creo", data:{name:"Creo"}}, scopes:[], relations:[], tracks:[]};
+  const origin = await fixtureServer(t, data);
+  await chrome.send("Emulation.setDeviceMetricsOverride",
+    {width: 1280, height: 560, deviceScaleFactor: 1, mobile: false});
+  await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
+  await chrome.evaluate("document.querySelector('#catalogueQuery').value='Creo'; document.querySelector('#catalogueSearchForm').requestSubmit()");
+  await chrome.until("document.querySelector('#catalogueResults button')?.textContent === 'Inspect'");
+  await chrome.evaluate("document.querySelector('#catalogueResults button').click()");
+  await chrome.until("document.querySelector('#catalogueDetail h4')?.textContent === 'Creo'");
+  assert.ok(await chrome.evaluate("scrollY > 0"), "Inspect scrolls the selected entry into view");
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueStatus').textContent"), /Inspecting Creo/);
   assert.deepEqual(chrome.errors, []);
 });

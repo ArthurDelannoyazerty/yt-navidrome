@@ -63,3 +63,19 @@ test("Graph tab ignores responses from the previous library", async () => {
   await first;
   assert.doesNotMatch(b.get("graphStatus").textContent, /Private/);
 });
+
+
+test("Graph explains why owned recordings have no cached relationship edges", async () => {
+  const {b, graph} = harness();
+  b.get("graphView").value = "downloaded";
+  const pending = graph.refresh(), request = b.requests.at(-1);
+  request.resolve({
+    nodes:[{kind:"recording", id:"recording:test", label:"Creo - Sample", owned:true}],
+    edges:[], owned_recording_count:350, truncated:false
+  });
+  await pending;
+  const message = b.get("graphStatus").textContent;
+  assert.match(message, /1 nodes · 0 relationships/);
+  assert.match(message, /Index downloaded recordings/);
+  assert.match(message, /bounded sample/);
+});

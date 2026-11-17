@@ -445,6 +445,21 @@ class Bridge:
 
         source_reset = bool(selected and selected.get("kind") == "source")
         replace_identity = bool(selected and not selected.get("asis"))
+        # Beets' Item.move() disambiguates an occupied destination by appending
+        # ".1", ".2", etc. That breaks Navidrome's path-based continuity when
+        # an existing recording is reapproved. Explicitly publish into the
+        # immutable per-track slot instead. Never overwrite an unrelated file.
+        slot = self.directory / "audio" / f"{track['id']}.opus"
+        final_destination = slot.resolve()
+        if not final_destination.is_relative_to(self.directory) or slot.is_symlink():
+            raise ValueError("Stable audio destination is outside this user's library")
+        if slot.exists():
+            old_path = track.get("file_path")
+            if not slot.is_file() or not old_path or Path(old_path).resolve() != final_destination:
+                raise ValueError(
+                    "Stable audio destination is already occupied by a different asset; "
+                    "do not create a numbered audio path"
+                )
         if replace_identity:
             # Clear stale art, lyrics, artists and IDs on the candidate, not the
             # still-playing active file. Reload the beets row to avoid old tags
@@ -540,8 +555,16 @@ class Bridge:
 
         item.write()
         item.store()
-        item.move(with_album=False)
-        final_path = Path(os.fsdecode(item.path))
+        final_destination.parent.mkdir(parents=True, exist_ok=True)
+        # The reviewed candidate lives on the state disk, which can differ
+        # from the music filesystem. atomic_copy stages on the destination
+        # filesystem and replaces the stable path atomically, with no ".1"
+        # fallback. The caller keeps the old bytes/DB in its rollback backup.
+        if Path(path).resolve() != final_destination:
+            atomic_copy(Path(path), final_destination)
+        item.path = os.fsencode(final_destination)
+        item.store()
+        final_path = final_destination
         if not final_path.is_file():
             raise RuntimeError("beets did not produce a final audio file")
         warnings: list[str] = []

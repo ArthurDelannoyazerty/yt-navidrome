@@ -40,6 +40,7 @@ def test_real_beets_adapter_and_raw_discovery_tags(environment, db, user, tmp_pa
     script = r'''
 import os, sys
 from pathlib import Path
+from shutil import copyfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -142,8 +143,31 @@ with patch("requests.sessions.Session.send", no_network):
     assert tags.r128_track_gain is not None
     assert not final.with_suffix(".lrc").exists()
 
-    # Updating discovery history must preserve all music metadata and both raw tags.
+    # Reapproving an existing recording must never let beets rename its
+    # occupied permanent path to audio/<track-id>.1.opus. This was observed
+    # in production after the move-only stable-path migration.
     track["beets_id"] = result["beets_id"]
+    track["file_path"] = str(final)
+    candidate = path.with_name("reapprove-" + user + ".opus")
+    copyfile(final, candidate)
+    replacement = b.finalize(track, candidate, selected,
+                             operation="test-reapproval",
+                             overrides={"release_id": fixture_album.album_id})
+    assert replacement["file_path"] == str(final)
+    assert final.exists() and not final.with_name(final.stem + ".1.opus").exists()
+    assert Path(b.find_existing(track).path.decode()) == final
+
+    # A different or unregistered asset must not be allowed to overwrite an
+    # occupied slot; it must fail instead of allocating a numbered path.
+    invalid = {**track, "file_path": None}
+    try:
+        b.finalize(invalid, candidate, selected, operation="test-collision")
+    except ValueError as error:
+        assert "Stable audio destination is already occupied" in str(error)
+    else:
+        raise AssertionError("Unowned audio destination was overwritten")
+
+    # Updating discovery history must preserve all music metadata and both raw tags.
     track["discovered_at"] = "2019-01-02T03:04:05Z"
     b.finalize(track, final, None, mode="comment")
     tags = MediaFile(str(final))
