@@ -554,16 +554,18 @@ class Catalogue:
                 seed += [("recording", rid) for rid, row in owned.items()
                          if query in (row.get("matched_title") or "").casefold()]
             elif view == "downloaded":
-                # Keep room for neighbors instead of spending the whole budget
-                # on a flat list of 5,000 owned recording nodes.
-                seed = [("recording", rid) for rid in sorted(owned)[:45]]
+                # Prefer already-linked owned recordings. The former UUID-only
+                # sample could display 45 disconnected nodes even when the
+                # catalogue contained relationships for other downloaded songs.
+                seed = sorted((("recording", rid) for rid in owned),
+                              key=lambda key: (-len(adjacency.get(key, ())), key[1]))[:45]
             else:
                 seed = sorted(names, key=lambda key: (-len(adjacency.get(key, [])), key))[:60]
             # In downloaded mode, search results are restricted to owned recordings
             # and their public-MusicBrainz neighbors, never other users' files.
             if view == "downloaded":
                 if not query and not focus:
-                    seed = [("recording", rid) for rid in sorted(owned)[:45]]
+                    pass  # already selected most-connected owned recordings above
                 elif focus:
                     seed = [s for s in seed if s[0] != "recording" or s[1] in owned]
                 else:
