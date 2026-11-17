@@ -149,6 +149,67 @@ def test_local_catalogue_filter_waits_for_relationship_index(db, environment):
                                         local_only=True)["items"]} == {ARTIST}
 
 
+def test_existing_library_localization_is_previewed_and_confirmed(db, environment):
+    """Indexing stays read-only; explicit language jobs do not queue downloads."""
+    import json
+    from mutagen.oggopus import OggOpus
+    from language_jobs import preview as english_preview
+    cat = Catalogue(db)
+    cat.init()
+    first, path, _ = add_audio_track(db, environment, RECORDING_1)
+    edited, _, _ = add_audio_track(db, environment, RECORDING_2)
+    tagged, tagged_path, _ = add_audio_track(db, environment, RECORDING_4)
+    db.execute("UPDATE tracks SET metadata_edited=1 WHERE id=?", (edited,))
+    already = OggOpus(tagged_path)
+    already["INGESTOR_LANGUAGE_POLICY"] = ["english-first-v1"]
+    already.save()
+
+    result = english_preview(db, "admin")
+    assert result["eligible"] == 1
+    assert result["skipped"]["already_localized"] == 1
+    assert result["skipped"]["manual_or_busy"] == 1
+    assert result["sample"][0]["id"] == first
+    with TestClient(create_app(db, start_workers=False)) as client:
+        assert client.get("/api/catalogue/language-preview",
+                          params={"user_id": "guest"}).status_code == 400
+        assert client.post("/api/catalogue/language-apply", json={
+            "user_id": "admin", "limit": 3,
+        }).status_code == 422
+        queued = client.post("/api/catalogue/language-apply", json={
+            "user_id": "admin", "limit": 3, "confirmed": True,
+        })
+        assert queued.status_code == 200
+        assert queued.json()["queued"] == 1
+        job = db.one("SELECT kind,payload FROM jobs WHERE target=? ORDER BY id DESC", (first,))
+        assert job["kind"] == "track" and json.loads(job["payload"])["mode"] == "language"
+        assert db.one("SELECT operation_state FROM tracks WHERE id=?", (first,))["operation_state"] == "QUEUED"
+        assert OggOpus(path)["title"] == ["Track"], "Queueing is read-only until the worker runs"
+        assert client.post("/api/catalogue/language-apply", json={
+            "user_id": "admin", "limit": 3, "confirmed": True,
+        }).json()["queued"] == 0
+
+
+def test_confirmed_release_alias_is_english_and_native_album_is_preserved(db, environment):
+    """Album-only edits never change the confirmed MusicBrainz recording."""
+    from mutagen.oggopus import OggOpus
+    cat, albums = setup_catalogue(db)
+    tid, path, _ = add_audio_track(db, environment, RECORDING_2)
+    with cat.db() as con:
+        cat.upsert_entity(con, "release", RELEASE_B, {
+            "id": RELEASE_B, "title": "オリジナル・サウンドトラック",
+            "aliases": [{"name": "Original Soundtrack",
+                         "locale": "en", "primary": True}],
+        })
+    tags = cat.release_assignment(RELEASE_B, RECORDING_2)
+    assert tags["album"] == "Original Soundtrack"
+    assert tags["native_album"] == "オリジナル・サウンドトラック"
+    albums._retag(path, tags)
+    raw = OggOpus(path)
+    assert raw["album"] == ["Original Soundtrack"]
+    assert raw["originalalbum"] == ["オリジナル・サウンドトラック"]
+    assert raw["musicbrainz_trackid"] == [RECORDING_2]
+
+
 def test_catalogue_entity_link_timestamps_and_discography_refresh(db):
     catalogue = Catalogue(db)
     catalogue.init()
