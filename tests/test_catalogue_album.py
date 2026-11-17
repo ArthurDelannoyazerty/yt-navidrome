@@ -149,6 +149,20 @@ def test_local_catalogue_filter_waits_for_relationship_index(db, environment):
                                         local_only=True)["items"]} == {ARTIST}
 
 
+def test_catalogue_prefers_english_alias_but_finds_native_script(db):
+    cat = Catalogue(db)
+    cat.init()
+    with cat.db() as con:
+        cat.ingest(con, "artist", {
+            "id": ARTIST, "name": "西木康智",
+            "aliases": [{"name": "Yasunori Nishiki", "locale": "en", "primary": True}],
+        })
+    assert cat.get("artist", ARTIST)["entity"]["name"] == "Yasunori Nishiki"
+    assert [r["id"] for r in cat.search("artist", "Yasunori")["items"]] == [ARTIST]
+    assert [r["id"] for r in cat.search("artist", "西木")["items"]] == [ARTIST]
+    assert cat.get("artist", ARTIST)["entity"]["data"]["name"] == "西木康智"
+
+
 def test_existing_library_localization_is_previewed_and_confirmed(db, environment):
     """Indexing stays read-only; explicit language jobs do not queue downloads."""
     import json
