@@ -387,7 +387,8 @@ class Bridge:
         display = {"title": info.title, "artist": info.artist}
         if album is not None:
             display["album"] = album.album
-            display["albumartist"] = album.albumartist
+            display["albumartist"] = (getattr(album, "albumartist", None)
+                                      or getattr(album, "artist", None) or "")
         return apply_to_opus(path, display, native, include_album=album is not None)
 
     def measure_loudness(self, item):
