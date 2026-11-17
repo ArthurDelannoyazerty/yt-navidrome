@@ -19,7 +19,7 @@ from pathlib import Path
 import requests
 
 from common import utcnow
-from localized_names import preferred_english_name
+from localized_names import artist_credit, preferred_english_name
 from http_policy import ApiDeferred, HttpPolicy
 from musicbrainz_search import API_ROOT, USER_AGENT, terms, valid_id
 
@@ -585,11 +585,28 @@ class Catalogue:
             if not row:
                 return None
             release = json.loads(row["release_json"])
+            credits = release.get("artist-credit") or []
+            english_credit = []
+            for item in credits:
+                if not isinstance(item, dict):
+                    continue
+                artist = item.get("artist") or {}
+                credited = str(item.get("name") or artist.get("name") or "")
+                identity = _id(artist.get("id"))
+                if identity:
+                    cached_artist = con.execute(
+                        "SELECT data FROM entities WHERE kind='artist' AND id=?",
+                        (identity,)).fetchone()
+                    if cached_artist:
+                        alias = preferred_english_name(json.loads(cached_artist["data"]), field="name")
+                        if alias:
+                            credited = alias
+                english_credit.append(credited + str(item.get("joinphrase") or ""))
             return {"release_id": release_id, "recording_id": recording_id,
                     "album": preferred_english_name(release),
-                    "native_album": row["album"], "album_artist": "".join(
-                        str(item.get("name") or item.get("artist", {}).get("name") or "") + str(item.get("joinphrase") or "")
-                        for item in release.get("artist-credit") or [] if isinstance(item, dict)),
+                    "native_album": row["album"],
+                    "album_artist": "".join(english_credit),
+                    "native_album_artist": artist_credit(release),
                     "date": release.get("date"), "release_group_id": (release.get("release-group") or {}).get("id"),
                     "album_artist_ids": [credit["artist"]["id"] for credit in release.get("artist-credit") or []
                                          if isinstance(credit, dict) and isinstance(credit.get("artist"), dict)
