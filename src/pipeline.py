@@ -767,6 +767,18 @@ class Pipeline:
             atomic_json(manifest_file, manifest)
         actual = await asyncio.to_thread(sha256_file, path)
         self.checkpoint(job, "applying")
+        if mode == "language" and actual == manifest["before"]:
+            # A separate, persistent original-byte snapshot permits manual
+            # recovery even after the normal repair staging directory is gone.
+            backup_path = STATE / "language-undo" / track["user_id"] / (
+                track["id"] + "-" + manifest["before"] + ".opus")
+            if not backup_path.is_file():
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                if shutil.disk_usage(backup_path.parent).free < path.stat().st_size + 256 * 1024 * 1024:
+                    raise ValueError("Not enough SSD space for language-tag undo backup")
+                await asyncio.to_thread(atomic_copy, path, backup_path)
+            if await asyncio.to_thread(sha256_file, backup_path) != manifest["before"]:
+                raise ValueError("Language undo backup is missing or corrupt")
         swap = swap_phase(actual, manifest["before"], manifest["after"])
         if swap == SwapPhase.STAGED:
             staged = Path(manifest["staged"])
@@ -782,9 +794,12 @@ class Pipeline:
             raise ValueError("Audio changed during beets synchronization")
         self.store.commit_repair(track["id"], asset["id"],
                                  {"sha256": digest, "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns},
-                                 refreshed.get("beets_id"), operation, action=mode)
+                                 refreshed.get("beets_id"), operation, action=mode,
+                                 matched_title=refreshed.get("matched_title") if mode == "language" else None)
         shutil.rmtree(directory, ignore_errors=True)
-        self.report(job)("INFO", "Updated source links without downloading or re-encoding" if mode == "source_links" else "Repaired discovery and loudness tags without redownloading or changing identity")
+        self.report(job)("INFO", "Updated English display and original-language tags, without re-downloading or changing MusicBrainz identity" if mode == "language" else
+                         "Updated source links without downloading or re-encoding" if mode == "source_links" else
+                         "Repaired discovery and loudness tags without redownloading or changing identity")
 
     async def process_track(self, job):
         self.store.job_checkpoint(job["id"])
@@ -858,7 +873,7 @@ class Pipeline:
             finally:
                 if retained:
                     retained.unlink(missing_ok=True)
-        if mode in {"repair", "source_links"}:
+        if mode in {"repair", "source_links", "language"}:
             await self.repair_tags(job, track, directory, operation, mode)
             return
         if mode == "comment":
