@@ -254,6 +254,21 @@
       <button id="catalogueIndexLibrary" type="button" class="secondary">Index downloaded recordings</button></div>
       <p id="catalogueProgress" class="hint" role="status"></p>
     </section>
+    <section class="catalogue-details" aria-label="English-first music names">
+      <h3>English-first names</h3>
+      <p class="hint">Global default: prefer MusicBrainz English aliases for titles and artists; preserve canonical names in ORIGINALTITLE, ORIGINALARTIST and ORIGINALALBUM Opus tags. Missing English names are not invented. Catalogue indexing never edits audio.</p>
+      <div class="row"><button id="catalogueLanguagePreview" type="button" class="secondary">Review existing-library English tagging</button></div>
+      <p id="catalogueLanguageStatus" class="hint" role="status" aria-live="polite"></p>
+      <div id="catalogueLanguagePlan" hidden>
+        <p id="catalogueLanguageCounts" class="hint"></p>
+        <div id="catalogueLanguageSample" class="catalogue-results"></div>
+        <div class="row">
+          <button id="catalogueLanguageCanary" type="button" class="secondary">Apply to first 3 tracks</button>
+          <button id="catalogueLanguageBulk" type="button">Apply to remaining eligible tracks</button>
+        </div>
+        <p class="hint">Back up music, importer and Navidrome first. Apply three tracks, let Navidrome scan and verify song IDs/playlists/ratings before applying the rest. User-edited metadata and busy tracks are excluded; stable paths and recording IDs remain unchanged.</p>
+      </div>
+    </section>
     <section class="catalogue-details" aria-label="Album organization">
       <h3>Organize albums</h3>
       <p class="hint">Select one or more imported sources. Albums are recommendations, not recording identification. Existing tags only change after a reviewed preview and confirmation.</p>
@@ -417,6 +432,13 @@
         <dt>Failed / FAILED</dt><dd>Open the error, fix the cause if needed, then Retry.</dd>
         <dt>Idle / IDLE</dt><dd>No operation is running. Temporary audio remains marked until its metadata is approved.</dd>
       </dl>
+    </details>
+    <details class="help-detail"><summary>English-first titles and original-script metadata</summary>
+      <p><strong>Global language policy:</strong> MusicBrainz aliases may be English translations, transliterations or commonly used English spellings. beets prefers an existing English alias for approved recording and artist names (and album titles of confirmed releases); it keeps canonical MusicBrainz names when no English alias exists. No machine translation is generated, and no per-user setting is needed.</p>
+      <p><strong>Original names:</strong> the importer writes the canonical recording/artist/release names to the Opus/Vorbis fields ORIGINALTITLE, ORIGINALARTIST and ORIGINALALBUM when the corresponding identity is confirmed. These store the canonical MusicBrainz spellings, not the oldest historical performance or album. The usual TITLE, ARTIST and ALBUM tags are the preferred display names. Your player may need custom-tag configuration to show original-name fields.</p>
+      <p><strong>Individual approval:</strong> choose a MusicBrainz recording using Use; its English-preferred name and canonical name are stored together. Use with a specific release to also assign an album. A recording-only approval never invents an edition or takes an arbitrary album; Unknown Album is expected until an edition is chosen.</p>
+      <p><strong>Existing-library scan:</strong> Index downloaded recordings only updates the public MusicBrainz catalogue and does not retag or download audio. To apply English names to existing local files, open Catalogue → English-first names → Review existing-library English tagging. Back up your library, use Apply to first 3 tracks, check Navidrome song IDs, favorites and playlists, then explicitly queue the remaining eligible tracks. This uses copy-on-write, SHA checks and local undo copies. It skips busy music and manually edited metadata and never changes MusicBrainz identities or album assignments.</p>
+      <p><strong>Album comparison:</strong> a reviewed exact release can supply an English title from an available cached alias, retaining its canonical title in ORIGINALALBUM. No English release alias means the canonical album title stays. Album-only edits do not select an alternate edition or re-download audio.</p>
     </details>
     <details class="help-detail"><summary>MusicBrainz Catalogue, local search and graph</summary>
       <p><strong>Catalogue cache vs downloaded library:</strong> the catalogue stores public MusicBrainz artists, recordings, album editions, album families and compositions, including entries from online searches that are not downloaded. The <strong>Only items linked to my library</strong> checkbox (on by default) uses exact MusicBrainz IDs from locally approved recordings and their cached relationships; it never guesses from matching names. If a local artist or album is missing, choose <strong>Index downloaded recordings</strong> and wait for its relationships, or uncheck the filter to explore all cached entities.</p>
