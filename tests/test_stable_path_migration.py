@@ -173,3 +173,58 @@ def test_temporary_waiting_audio_is_exempt_from_stable_path_startup_guard(db, en
     # The approved-path startup check must agree with the offline migration.
     with TestClient(create_app(db, start_workers=True)) as client:
         assert client.get("/").status_code == 200
+
+
+def test_relative_beets_paths_resolve_from_user_library_and_stay_relative(db, environment):
+    """Real beets rows use paths like Artist/Album/Artist - Song.opus."""
+    tid, old, digest, beets_db = fixture_legacy(db, environment)
+    user_root = environment[1] / "admin"
+    relative = old.relative_to(user_root)
+    with sqlite3.connect(beets_db) as con:
+        con.execute("UPDATE items SET path=? WHERE id=23", (os.fsencode(relative),))
+
+    migration = Migration(*environment)
+    plan = migration.inspect()
+    assert len(plan["entries"]) == 1
+    assert plan["entries"][0]["source"] == str(old)
+    with migration.locked():
+        result = migration.apply(backup_confirmed=True)
+    assert result["state"] == "AWAITING_NAVIDROME_SCAN"
+    destination = user_root / "audio" / (tid + ".opus")
+    assert not old.exists() and sha256_file(destination) == digest
+    with sqlite3.connect(beets_db) as con:
+        raw = con.execute("SELECT path FROM items WHERE id=23").fetchone()[0]
+        assert os.fsdecode(raw) == "audio/" + tid + ".opus"
+    assert db.one("SELECT file_path FROM tracks WHERE id=?", (tid,))["file_path"] == str(destination)
+
+
+def test_relative_beets_path_survives_interrupted_move(db, environment):
+    """A crash after moving audio must resume with a relative beets DB row."""
+    tid, old, digest, beets_db = fixture_legacy(db, environment)
+    user_root = environment[1] / "admin"
+    with sqlite3.connect(beets_db) as con:
+        con.execute("UPDATE items SET path=? WHERE id=23",
+                    (os.fsencode(old.relative_to(user_root)),))
+    migration = Migration(*environment)
+    plan = migration.inspect()
+    migration.save(plan)
+    destination = Path(plan["entries"][0]["destination"])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    old.replace(destination)
+    with migration.locked():
+        result = migration.apply(backup_confirmed=True)
+    assert result["state"] == "AWAITING_NAVIDROME_SCAN"
+    assert sha256_file(destination) == digest
+    with sqlite3.connect(beets_db) as con:
+        row = con.execute("SELECT path FROM items WHERE id=23").fetchone()
+        assert os.fsdecode(row[0]) == "audio/" + tid + ".opus"
+
+
+def test_relative_beets_path_mismatch_still_blocks_migration(db, environment):
+    """The fix must not silently accept an unrelated beets item path."""
+    tid, old, _, beets_db = fixture_legacy(db, environment)
+    with sqlite3.connect(beets_db) as con:
+        con.execute("UPDATE items SET path=? WHERE id=23", (b"Elsewhere/Other Song.opus",))
+    with pytest.raises(ValueError, match="Beets item path mismatch"):
+        Migration(*environment).inspect()
+    assert old.exists()
