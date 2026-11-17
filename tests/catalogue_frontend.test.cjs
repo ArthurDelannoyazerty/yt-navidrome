@@ -67,6 +67,7 @@ test("Graph tab ignores responses from the previous library", async () => {
 
 test("Graph explains why owned recordings have no cached relationship edges", async () => {
   const {b, graph} = harness();
+  b.get("graphView").value = "downloaded";
   const pending = graph.refresh(), request = b.requests.at(-1);
   request.resolve({
     nodes:[{kind:"recording", id:"recording:test", label:"Creo - Sample", owned:true}],
