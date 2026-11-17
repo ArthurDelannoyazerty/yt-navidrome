@@ -27,6 +27,10 @@ window.CatalogueUI = (() => {
     for (const id of ["catalogueResults", "catalogueRecommendations", "cataloguePreview", "catalogueHistory"]) byId(id).replaceChildren();
     byId("catalogueResults").append(element("p", "Search to find cached MusicBrainz entries.", "hint"));
     byId("catalogueDetail").replaceChildren(element("p", "Select an entry on the left to browse its discography or tracklist.", "hint"));
+    byId("catalogueLanguagePlan").hidden = true;
+    byId("catalogueLanguageSample").replaceChildren();
+    byId("catalogueLanguageStatus").textContent = "";
+    ui.languageBusy = false;
     for (const id of ["catalogueStatus", "catalogueAlbumStatus", "catalogueProgress"]) byId(id).textContent = "";
     byId("catalogueSources").replaceChildren();
   }
@@ -265,6 +269,51 @@ window.CatalogueUI = (() => {
     const user = state.user, data = await api(`/api/catalogue/album-history?user_id=${encodeURIComponent(user)}`);
     if (user === state.user) displayHistory(data);
   }
+  async function previewEnglishNames() {
+    const user = state.user, serial = ui.serial;
+    message("Checking approved local audio without changing files...", false, "catalogueLanguageStatus");
+    const result = await api(`/api/catalogue/language-preview?user_id=${encodeURIComponent(user)}`);
+    if (!current(user, serial)) return;
+    const omitted = result.skipped || {};
+    byId("catalogueLanguageCounts").textContent =
+      `${result.eligible} eligible tracks. Already localized: ${omitted.already_localized || 0}; ` +
+      `busy/manually edited: ${omitted.manual_or_busy || 0}; unavailable/unsafe: ${omitted.invalid_or_missing || 0}.`;
+    const examples = byId("catalogueLanguageSample");
+    examples.replaceChildren(...(result.sample || []).map(track => {
+      const p = element("p", track.current_name, "hint");
+      p.title = track.id;
+      return p;
+    }));
+    byId("catalogueLanguagePlan").hidden = false;
+    byId("catalogueLanguageCanary").disabled = !result.eligible;
+    byId("catalogueLanguageBulk").disabled = !result.eligible;
+    message("Review the count and back up music, importer state and Navidrome before applying.", false, "catalogueLanguageStatus");
+  }
+  async function applyEnglishNames(limit) {
+    if (ui.languageBusy) return;
+    const user = state.user, serial = ui.serial;
+    const canary = limit === 3;
+    if (!confirm(canary
+      ? "Backed up music, importer and Navidrome? Queue English-first metadata updates for up to THREE existing tracks, then verify Navidrome before continuing?"
+      : "Only after the 3-track Navidrome check: backed up music, importer and Navidrome? Queue English-first metadata updates for all remaining eligible tracks (up to 5,000). No downloads, identity changes or album guesses.")) return;
+    ui.languageBusy = true;
+    byId("catalogueLanguageCanary").disabled = true;
+    byId("catalogueLanguageBulk").disabled = true;
+    message("Queuing English-name updates...", false, "catalogueLanguageStatus");
+    try {
+      const result = await api("/api/catalogue/language-apply",
+        {user_id: user, limit, confirmed: true});
+      if (!current(user, serial)) return;
+      message(`${result.queued} track(s) queued. Watch Activity; wait for Navidrome to scan and verify identities and playlists.`,
+              false, "catalogueLanguageStatus");
+      byId("catalogueLanguagePlan").hidden = true;
+    } catch (error) {
+      if (current(user, serial)) message(error.message, true, "catalogueLanguageStatus");
+    } finally {
+      ui.languageBusy = false;
+    }
+  }
+
   function setResultsHeight() {
     const slider = byId("catalogueResultsHeight");
     const value = Math.min(720, Math.max(200, Number(slider.value) || 360));
@@ -284,6 +333,10 @@ window.CatalogueUI = (() => {
   byId("catalogueRecommend").addEventListener("click", () => recommend().catch(error => message(error.message, true, "catalogueAlbumStatus")));
   byId("catalogueHistoryRefresh").addEventListener("click", () => loadHistory().catch(error => message(error.message, true, "catalogueAlbumStatus")));
   byId("catalogueRefreshProgress").addEventListener("click", () => refreshProgress().catch(error => message(error.message, true)));
+  byId("catalogueLanguagePreview").addEventListener("click", () =>
+    previewEnglishNames().catch(error => message(error.message, true, "catalogueLanguageStatus")));
+  byId("catalogueLanguageCanary").addEventListener("click", () => applyEnglishNames(3));
+  byId("catalogueLanguageBulk").addEventListener("click", () => applyEnglishNames(5000));
   byId("catalogueIndexLibrary").addEventListener("click", async () => {
     if (!confirm("Queue local recordings for rate-limited background MusicBrainz indexing? A large library may take hours; audio is not modified.")) return;
     try {
