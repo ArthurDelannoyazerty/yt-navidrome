@@ -211,31 +211,102 @@ class Catalogue:
             finally:
                 response.close()
 
-    def search(self, kind, query, *, remote=False, limit=40):
+    def locally_available_ids(self, user_id, kind):
+        """Cached MusicBrainz IDs linked to approved audio in this user's library.
+
+        IDs are not inferred from artist names: unrelated public artists may
+        have identical names. Unindexed relationships remain unknown.
+        """
+        if kind not in ENTITY_KINDS:
+            raise ValueError("Unknown catalogue entity type")
+        self.store.require_user(user_id)
+        owned = {row["mbid"] for row in self.store.rows(
+            """SELECT DISTINCT mbid FROM tracks WHERE user_id=? AND mbid IS NOT NULL
+               AND current_asset_id IS NOT NULL AND health='AVAILABLE'
+               AND temporary_candidate_sha256 IS NULL""", (user_id,))
+                 if _id(row["mbid"])}
+        if kind == "recording" or not owned:
+            return owned if kind == "recording" else set()
+        ids = {entity_kind: set() for entity_kind in ENTITY_KINDS}
+        ids["recording"] = owned
+
+        def batches(values):
+            values = sorted(values)
+            for start in range(0, len(values), 400):
+                yield values[start:start + 400]
+
+        with self.db() as con:
+            for batch in batches(owned):
+                marks = ",".join("?" for _ in batch)
+                for link in con.execute(
+                    f"""SELECT source_kind,source_id,target_kind,target_id FROM links
+                        WHERE (source_kind='recording' AND source_id IN ({marks}))
+                           OR (target_kind='recording' AND target_id IN ({marks}))""",
+                    (*batch, *batch),
+                ):
+                    ids[link["source_kind"]].add(link["source_id"])
+                    ids[link["target_kind"]].add(link["target_id"])
+                # Release lookups may contain tracklists before recording browse.
+                for row in con.execute(
+                    f"SELECT DISTINCT release_id FROM release_tracks WHERE recording_id IN ({marks})",
+                    batch,
+                ):
+                    ids["release"].add(row["release_id"])
+            if kind in {"artist", "release-group"}:
+                for batch in batches(ids["release"]):
+                    marks = ",".join("?" for _ in batch)
+                    for link in con.execute(
+                        f"""SELECT source_kind,source_id,target_kind,target_id FROM links
+                            WHERE (source_kind='release' AND source_id IN ({marks}))
+                               OR (target_kind='release' AND target_id IN ({marks}))""",
+                        (*batch, *batch),
+                    ):
+                        ids[link["source_kind"]].add(link["source_id"])
+                        ids[link["target_kind"]].add(link["target_id"])
+        return ids[kind]
+
+    def search(self, kind, query, *, remote=False, limit=40, user_id=None, local_only=False):
         if kind not in ENTITY_KINDS:
             raise ValueError("Unknown catalogue entity type")
         query = str(query).strip()[:180]
+        owned_ids = (self.locally_available_ids(user_id, kind) if local_only else None)
         if len(query) < 2:
-            return {"items": [], "remote": bool(remote)}
+            return {"items": [], "remote": bool(remote), "local_only": bool(local_only)}
         if remote:
             expression = terms(query)
             raw = self.request("/" + kind, {"query": expression, "limit": min(limit, 50)})
-            plural = kind.replace("-", "-") + "s"
+            plural = kind + "s"
             items = [item for item in raw.get(plural) or [] if isinstance(item, dict)]
+            # Cache public search metadata, even if this specific user hides it.
             with self.db() as con:
                 for item in items:
                     self.ingest(con, kind, item)
+            filtered = [item for item in items if _id(item.get("id"))
+                        and (owned_ids is None or item["id"] in owned_ids)]
             return {"items": [{"kind": kind, "id": item["id"],
                                "name": _safe_name(item.get("title") or item.get("name")),
-                               "data": item, "cached": False} for item in items if _id(item.get("id"))],
-                    "total": raw.get("count", len(items)), "remote": True}
+                               "data": item, "cached": False}
+                              for item in filtered[:limit]],
+                    "total": raw.get("count", len(items)), "remote": True,
+                    "local_only": bool(local_only)}
+        if local_only and not owned_ids:
+            return {"items": [], "remote": False, "local_only": True}
         with self.db() as con:
+            # Filter BEFORE the result cap. A global top-40 followed by a local
+            # filter would omit legitimate local artists with common names.
             matches = con.execute("""SELECT kind,id,name,data,checked_at FROM entities
                 WHERE kind=? AND name LIKE ? ESCAPE '\\' COLLATE NOCASE
-                ORDER BY name LIMIT ?""", (kind, "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%", limit)).fetchall()
-            return {"items": [{"kind": r["kind"], "id": r["id"], "name": r["name"],
-                                "data": json.loads(r["data"]), "checked_at": r["checked_at"],
-                                "cached": True} for r in matches], "remote": False}
+                ORDER BY name""", (kind, "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"))
+            results = []
+            for row in matches:
+                if owned_ids is not None and row["id"] not in owned_ids:
+                    continue
+                results.append({"kind": row["kind"], "id": row["id"], "name": row["name"],
+                                "data": json.loads(row["data"]), "checked_at": row["checked_at"],
+                                "cached": True})
+                if len(results) >= limit:
+                    break
+            return {"items": results, "remote": False, "local_only": bool(local_only)}
 
     def get(self, kind, identity):
         if kind not in ENTITY_KINDS or not (identity := _id(identity)):
