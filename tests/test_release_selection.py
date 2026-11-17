@@ -165,6 +165,11 @@ mb = SimpleNamespace(
     album_for_id=lambda rid: wrong_album if rid == wrong_release else None,
 )
 b.plugins["musicbrainz"] = mb
+# The live code fetches canonical MusicBrainz spellings separately. Stub that
+# lookup, too, so the fully offline fixture has valid original-name metadata.
+b.canonical_names = lambda *_: {
+    "title": "Example", "artist": "Ganja White Night", "album": "",
+}
 b.plugins["lyrics"].add_item_lyrics = lambda *a, **k: None
 track = {"id": "release-regression", "user_id": "admin", "title": "Ganja White Night - Example",
          "discovered_at": "2021-01-02T03:04:05Z"}
