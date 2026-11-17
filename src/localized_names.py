@@ -10,7 +10,7 @@ from mutagen.oggopus import OggOpus
 
 LANGUAGE_POLICY = "english-first-v1"
 NATIVE_KEYS = {"title": "ORIGINALTITLE", "artist": "ORIGINALARTIST",
-               "album": "ORIGINALALBUM"}
+               "album": "ORIGINALALBUM", "albumartist": "ORIGINALALBUMARTIST"}
 POLICY_TAG = "INGESTOR_LANGUAGE_POLICY"
 
 
@@ -53,6 +53,7 @@ def native_names(recording, release=None):
              "artist": artist_credit(recording), "album": ""}
     if release is not None:
         names["album"] = str(release.get("title") or "").strip()[:1000]
+        names["albumartist"] = artist_credit(release)
     return names
 
 
@@ -60,7 +61,7 @@ def apply_to_opus(path, display: dict, native: dict, *, include_album=False,
                   clear_unassigned_album=False):
     """Update names only, preserving the existing identity and other tags."""
     audio = OggOpus(str(path))
-    keys = ("title", "artist", "album") if include_album else ("title", "artist")
+    keys = ("title", "artist", "album", "albumartist") if include_album else ("title", "artist")
     for key in keys:
         value = str(display.get(key) or "").strip()[:1000]
         if value:
@@ -72,6 +73,7 @@ def apply_to_opus(path, display: dict, native: dict, *, include_album=False,
             audio.pop(NATIVE_KEYS[key], None)
     if not include_album and clear_unassigned_album:
         audio.pop(NATIVE_KEYS["album"], None)
+        audio.pop(NATIVE_KEYS["albumartist"], None)
     audio[POLICY_TAG] = [LANGUAGE_POLICY]
     audio.save()
     return {"title": (audio.get("title") or [""])[0],
@@ -79,7 +81,8 @@ def apply_to_opus(path, display: dict, native: dict, *, include_album=False,
             "album": (audio.get("album") or [""])[0],
             "originaltitle": (audio.get(NATIVE_KEYS["title"]) or [""])[0],
             "originalartist": (audio.get(NATIVE_KEYS["artist"]) or [""])[0],
-            "originalalbum": (audio.get(NATIVE_KEYS["album"]) or [""])[0]}
+            "originalalbum": (audio.get(NATIVE_KEYS["album"]) or [""])[0],
+            "originalalbumartist": (audio.get(NATIVE_KEYS["albumartist"]) or [""])[0]}
 
 
 def is_localized(path):
