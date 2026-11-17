@@ -30,6 +30,23 @@ def artist_credit(data):
     return "".join(parts).strip()[:1000]
 
 
+def preferred_english_name(data, *, field="title"):
+    """Use only a locale-marked English alias, not a guessed translation."""
+    canonical = str(data.get(field) or "").strip()[:1000]
+    aliases = data.get("aliases") or []
+    suitable = []
+    for alias in aliases:
+        if not isinstance(alias, dict):
+            continue
+        locale = str(alias.get("locale") or "").replace("_", "-").lower()
+        name = str(alias.get("name") or "").strip()[:1000]
+        kind = str(alias.get("type") or "").casefold()
+        if ((locale == "en" or locale.startswith("en-")) and name
+                and kind not in {"legal name", "search hint", "misspelling"}):
+            suitable.append((not bool(alias.get("primary")), locale != "en", name))
+    return min(suitable)[2] if suitable else canonical
+
+
 def native_names(recording, release=None):
     """Canonical MusicBrainz fields independent of preferred aliases."""
     names = {"title": str(recording.get("title") or "").strip()[:1000],
