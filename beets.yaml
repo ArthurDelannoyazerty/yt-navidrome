@@ -3,6 +3,10 @@
 plugins: [musicbrainz, chroma, fetchart, embedart, lyrics, replaygain]
 threaded: false
 original_date: true
+# Prefer an existing English MusicBrainz alias; fall back to canonical spelling.
+# Canonical names are saved separately in Opus ORIGINALTITLE/ORIGINALARTIST/
+# ORIGINALALBUM fields by the importer, without translating unsupported names.
+languages: [en]
 import:
   write: true
   copy: false
