@@ -207,6 +207,52 @@ def test_existing_library_localization_is_previewed_and_confirmed(db, environmen
         }).json()["queued"] == 0
 
 
+def test_language_job_preserves_stable_path_and_creates_undo_copy(db, environment):
+    """A confirmed language job swaps only tags and refreshes the current asset."""
+    import asyncio
+    from mutagen.oggopus import OggOpus
+    from localized_names import apply_to_opus, LANGUAGE_POLICY
+    from pipeline import Pipeline
+    tid, path, original_sha = add_audio_track(db, environment, RECORDING_1)
+    assert path.parent.name == "audio"
+    db.queue_track(tid, "admin", {"mode": "language"})
+    job = db.claim()
+    assert job and job["target"] == tid
+
+    worker = Pipeline(db)
+
+    async def fake_beets_bridge(job, track, directory, mode, **kwargs):
+        if mode == "language":
+            assert kwargs["path"] != str(path)
+            return apply_to_opus(kwargs["path"],
+                {"title": "Primrose, the Dancer", "artist": "Yasunori Nishiki",
+                 "album": "Octopath Traveler"},
+                {"title": "踊子プリムロゼのテーマ", "artist": "西木康智",
+                 "album": "オクトパストラベラー"}, include_album=True)
+        assert mode == "refresh"
+        return {"beets_id": 17, "matched_title": "Yasunori Nishiki - Primrose, the Dancer"}
+
+    worker.bridge = fake_beets_bridge
+    asyncio.run(worker.process_track(job))
+
+    new_row = db.one("SELECT file_path,mbid,release_id,matched_title FROM tracks WHERE id=?", (tid,))
+    assert new_row["file_path"] == str(path)
+    assert new_row["mbid"] == RECORDING_1
+    assert new_row["release_id"] == RELEASE_A
+    assert new_row["matched_title"] == "Yasunori Nishiki - Primrose, the Dancer"
+    assert db.one("SELECT state FROM jobs WHERE id=?", (job["id"],))["state"] == "RUNNING"
+    raw = OggOpus(path)
+    assert raw["title"] == ["Primrose, the Dancer"]
+    assert raw["originaltitle"] == ["踊子プリムロゼのテーマ"]
+    assert raw["ingestor_language_policy"] == [LANGUAGE_POLICY]
+    assert db.one("SELECT sha256 FROM assets WHERE track_id=? AND state='CURRENT'", (tid,))["sha256"] == sha256_file(path)
+    snapshots = list((environment[0] / "language-undo" / "admin").glob(tid + "-*.opus"))
+    assert len(snapshots) == 1
+    assert sha256_file(snapshots[0]) == original_sha
+    assert OggOpus(snapshots[0])["title"] == ["Track"]
+    assert not list((environment[1] / "admin" / "audio").glob(tid + ".1.opus"))
+
+
 def test_confirmed_release_alias_is_english_and_native_album_is_preserved(db, environment):
     """Album-only edits never change the confirmed MusicBrainz recording."""
     from mutagen.oggopus import OggOpus
