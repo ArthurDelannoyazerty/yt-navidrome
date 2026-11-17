@@ -168,6 +168,25 @@ with patch("requests.sessions.Session.send", no_network):
     assert final.exists() and not final.with_name(final.stem + ".1.opus").exists()
     assert Path(b.find_existing(track).path.decode()) == final
 
+    # Library-wide language pass only touches a staged copy; no audio
+    # download, identity reassignment, or random album selection.
+    track["mbid"] = fixture_track.track_id
+    track["release_id"] = fixture_album.album_id
+    track["metadata_edited"] = 0
+    b.plugins["musicbrainz"].track_for_id = lambda mbid: fixture_track
+    localized_copy = path.with_name("language-" + user + ".opus")
+    copyfile(final, localized_copy)
+    localized = b.localize_existing(track, localized_copy)
+    local_tags = OggOpus(localized_copy)
+    assert localized["title"] == "Fixture Song"
+    assert local_tags["originaltitle"] == ["原曲の題名"]
+    assert local_tags["originalartist"] == ["原作家"]
+    assert local_tags["originalalbum"] == ["元のアルバム"]
+    assert local_tags["musicbrainz_trackid"] == [fixture_track.track_id]
+    assert local_tags["musicbrainz_albumid"] == [fixture_album.album_id]
+    assert final.exists() and localized_copy.exists()
+    localized_copy.unlink()
+
     # A different or unregistered asset must not be allowed to overwrite an
     # occupied slot; it must fail instead of allocating a numbered path.
     invalid = {**track, "file_path": None}
