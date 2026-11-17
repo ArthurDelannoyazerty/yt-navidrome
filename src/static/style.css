@@ -104,7 +104,8 @@ td:last-child { width: 26%; min-width: 240px; }
 .warning-text, .issue-link { color: #815a14; }.issue-link { font-size: 12px; }
 .source { border-bottom: 1px solid var(--border); padding: 14px 0; display: flex; justify-content: space-between; gap: 12px; }
 .source:last-child { border: 0; }.source-details { min-width: 0; flex: 1; }.source p { margin: 3px 0; }
-.source-buttons { display: flex; gap: 6px; align-items: flex-start; }
+.source-buttons { display: flex; flex-direction: column; align-items: stretch; gap: 6px; flex: 0 0 174px; max-width: 42%; }
+.source-buttons button { width: 100%; white-space: normal; }
 dl { display: grid; grid-template-columns: 140px 1fr; gap: 8px; margin: 0 0 16px; }dt { color: var(--muted); }dd { margin: 0; overflow-wrap: anywhere; }
 #logs { height: 480px; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; font: 12px/1.6 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .log-ERROR { color: #a0322e; }.log-WARNING { color: #815a14; }.log-DEBUG { color: var(--muted); }
@@ -157,7 +158,7 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   [data-panel=music] thead { display: none; }#tracks, #tracks tr, #tracks td { display: block; width: 100%; min-width: 0; max-width: none; }
   #tracks tr { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; padding: 16px; }#tracks td { padding: 5px 0; border: 0; }
   #tracks td:nth-child(2)::before { content: "Playlists: "; font-size: 11px; color: var(--muted); }#tracks td:nth-child(2)>div { display: inline; margin-right: 5px; }#tracks td:nth-child(2):empty { display: none; }
-  #tracks td:last-child { margin-top: 8px; }.approval { max-width: none; }.source { flex-direction: column; }.subpanel { padding: 16px; }
+  #tracks td:last-child { margin-top: 8px; }.approval { max-width: none; }.source { flex-direction: column; }.source-buttons { flex: none; width: min(100%, 220px); max-width: 100%; }.subpanel { padding: 16px; }
 }
 
 .maintenance-controls{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.button-link{display:inline-block;padding:9px 12px;border:1px solid var(--border);border-radius:6px;text-decoration:none}.issue-pagination{justify-content:space-between;margin:12px 0}.file-tags{grid-column:1/-1}.tag-field{display:grid;grid-template-columns:150px 1fr;gap:12px;padding:5px 0;overflow-wrap:anywhere}.tag-field code{white-space:pre-wrap;font-size:12px}.issue-list{max-height:560px;overflow:auto}.metadata-tabs [aria-pressed=true]{outline:2px solid var(--accent)}
