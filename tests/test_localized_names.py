@@ -36,10 +36,12 @@ def test_canonical_credit_keeps_actual_credited_script():
         {"name": "歌手", "artist": {"name": "Singer"}},
     ]}
     assert artist_credit(raw) == "西木康智 feat. 歌手"
-    assert native_names(raw, {"title": "オクトパストラベラー"}) == {
+    assert native_names(raw, {"title": "オクトパストラベラー",
+                               "artist-credit": [{"name": "西木康智"}]}) == {
         "title": "踊子プリムロゼのテーマ",
         "artist": "西木康智 feat. 歌手",
         "album": "オクトパストラベラー",
+        "albumartist": "西木康智",
     }
 
 
