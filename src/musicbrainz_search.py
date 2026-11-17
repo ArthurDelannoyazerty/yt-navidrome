@@ -16,6 +16,7 @@ from collections import OrderedDict
 import requests
 
 from http_policy import ApiDeferred, HttpPolicy
+from state_machines import CACHE, cache_state
 from metadata_hints import clean_search_text, normalized_words
 
 API_ROOT = "https://musicbrainz.org/ws/2/"
@@ -206,21 +207,27 @@ class MusicBrainzSearch:
 
     async def _cached(self, key, request):
         cached = self.cache.get(key)
-        if cached and cached[0] > time.monotonic():
+        phase = cache_state(cached, key in self.pending, time.monotonic())
+        if phase == "FRESH":
             self.cache.move_to_end(key)
             return copy.deepcopy(cached[1])
-        if key not in self.pending:
+        if phase != "FETCHING":
+            CACHE.send(phase, "fetch")
             if len(self.pending) >= 4:
                 raise ApiDeferred("MusicBrainz search is busy; retry shortly", retry_at=time.time() + 2)
 
             async def fetch():
                 try:
                     result = await asyncio.to_thread(request)
+                    CACHE.send("FETCHING", "resolve")
                     self.cache[key] = (time.monotonic() + 120, result)
                     self.cache.move_to_end(key)
                     while len(self.cache) > 128:
                         self.cache.popitem(last=False)
                     return result
+                except BaseException:
+                    CACHE.send("FETCHING", "fail_stale" if cached else "fail_empty")
+                    raise
                 finally:
                     self.pending.pop(key, None)
 

@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from common import ROOT, STATE, atomic_json
+from state_machines import CIRCUIT, UPDATE, circuit_state, prepare_update, transition_setting
 
 
 class ProcessError(RuntimeError):
@@ -134,7 +135,8 @@ class DownloaderRuntime:
         state["failure_times"] = failures
         state["failures"] = len(failures)
         state["until"] = until
-        state["open"] = until > now
+        state["phase"] = circuit_state(state, now)
+        state["open"] = state["phase"] == "OPEN"
         state.setdefault("opens", 0)
         return state
 
@@ -152,7 +154,8 @@ class DownloaderRuntime:
         opens = int(previous.get("opens") or 0)
         previous_until = float(previous.get("until") or 0)
         until = previous_until if previous_until > now else 0.0
-        if failures >= threshold and not until:
+        phase = circuit_state(previous, now)
+        if (failures >= threshold or phase == "HALF_OPEN") and not until:
             opens += 1
             until = now + min(maximum, base * (2 ** min(opens - 1, 4)))
 
@@ -164,6 +167,8 @@ class DownloaderRuntime:
             "until": until,
             "reason": reason,
             "last_success_at": previous.get("last_success_at"),
+            "phase": CIRCUIT.send(phase, "blocked" if phase == "HALF_OPEN" else "threshold")
+                     if until and phase != "OPEN" else phase,
         }
         self.store.set_setting("youtube_download_circuit", state)
         paused = 0
@@ -180,8 +185,13 @@ class DownloaderRuntime:
         opens = int(current.get("opens") or 0)
         if not failures and until <= now:
             opens = 0
+        phase = circuit_state(current, now)
+        if phase == "HALF_OPEN":
+            phase = CIRCUIT.send(phase, "success")
+            until, opens, failures = 0.0, 0, []
         current.update(
             {
+                "phase": phase,
                 "failure_times": failures,
                 "failures": len(failures),
                 "opens": opens,
@@ -275,9 +285,7 @@ class DownloaderRuntime:
                     previous = self.active()
                 except (RuntimeError, ValueError, KeyError):
                     report("WARNING", "Replacing an invalid active downloader pointer")
-                self.store.set_setting(
-                    "downloader_update", {"status": "RUNNING", "at": time.time()}
-                )
+                prepare_update(self.store, "downloader_update")
                 report(
                     "INFO",
                     "Installing a fresh nightly yt-dlp runtime; active downloads remain unchanged",
@@ -306,6 +314,7 @@ class DownloaderRuntime:
                     report,
                     timeout=600,
                 )
+                transition_setting(self.store, "downloader_update", UPDATE, "installed")
                 version = await run_process(
                     [
                         python,
@@ -329,24 +338,29 @@ class DownloaderRuntime:
                     "version": version.strip(),
                     "installed_at": time.time(),
                 }
+                transition_setting(self.store, "downloader_update", UPDATE, "verified")
                 if previous:
                     atomic_json(self.root / "previous.json", previous)
                 atomic_json(self.active_file, active)
-                self.store.set_setting("downloader_update", {"status": "OK", **active})
+                transition_setting(self.store, "downloader_update", UPDATE, "activated", **active)
                 report(
                     "INFO",
                     f"Downloader activated: {version.strip()}. API restart not required",
                 )
-            except Exception as exc:
-                shutil.rmtree(folder, ignore_errors=True)
-                self.store.set_setting(
-                    "downloader_update",
-                    {"status": "FAILED", "error": str(exc), "at": time.time()},
-                )
-                report(
-                    "ERROR",
-                    f"Downloader update failed; previous runtime retained: {exc}",
-                )
+            except BaseException as exc:
+                # A failure after the pointer swap must never delete the active runtime.
+                try:
+                    activated = Path(self.active()["python"]).parent.parent == folder
+                except (OSError, ValueError, RuntimeError, KeyError):
+                    activated = False
+                if not activated:
+                    shutil.rmtree(folder, ignore_errors=True)
+                phase = self.store.setting("downloader_update", {}).get("phase", "IDLE")
+                event = "cancel" if isinstance(exc, asyncio.CancelledError) and phase != "ACTIVATING" else "fail"
+                if event in UPDATE.transitions.get(phase, {}):
+                    transition_setting(self.store, "downloader_update", UPDATE, event,
+                                       error=str(exc) or "Update cancelled")
+                report("ERROR", f"Downloader update interrupted; active runtime preserved: {exc}")
                 raise
             keep = self.in_use | {str(folder)}
             if previous:
@@ -372,7 +386,5 @@ class DownloaderRuntime:
                 "WARNING",
                 f"Downloader rolled back to {previous['version']}; active downloads unchanged",
             )
-            self.store.set_setting(
-                "downloader_update", {"status": "ROLLED_BACK", **previous}
-            )
+            transition_setting(self.store, "downloader_update", UPDATE, "rollback", **previous)
             return previous

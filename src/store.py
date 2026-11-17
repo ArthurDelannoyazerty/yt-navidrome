@@ -18,8 +18,13 @@ from artwork import SCHEMA as ARTWORK_SCHEMA, Artwork, transfer_origin
 from library_query import track_where
 from common import STATE, utcnow, user_name
 from source_metadata import SCHEMA as METADATA_SCHEMA, correction_revision, prepare_correction
+from state_machines import (
+    JOB, JOB_CONTROL, SOURCE, RECEIPT, DOWNLOAD_PERMISSION, COMMIT_STAGES, JOB_STAGES, SOURCE_INACTIVE,
+    SOURCE_PURGING, JobPhase, InvalidTransition, job_phase, receipt_state,
+    guard_schema, validate_database,
+)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class JobCancelled(RuntimeError):
@@ -282,7 +287,7 @@ DROP_ORDER = [
     "metadata_artist_aliases",
     "origin_identity_rejections", "origin_metadata", "identification_reports", "integrity_issues", "ignored_origins", "ignored_tracks", "identity_history",
     "assets", "source_origins", "memberships", "track_origins", "tracks", "operation_receipts",
-    "jobs", "sources",
+    "jobs", "sources", "state_transition_log",
     "events", "settings", "api_clock", "quota", "users",
 ]
 
@@ -364,7 +369,7 @@ class Store:
                 con.execute("PRAGMA foreign_keys=ON")
                 tables = set()
 
-            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"Unsupported database schema {version}; expected {SCHEMA_VERSION}. "
                     "Restore a backup or run a supported migration."
@@ -449,13 +454,17 @@ class Store:
                 columns = {row["name"] for row in con.execute("PRAGMA table_info(track_origins)")}
                 if "is_discovery" not in columns:
                     spotify_migration = "ALTER TABLE track_origins ADD COLUMN is_discovery INTEGER NOT NULL DEFAULT 1;\n"
+            if version == 9:
+                self.backup_database("schema-v9")
+            validate_database(con)
+            backfill = "" if version >= 9 else (
+                "INSERT OR IGNORE INTO source_origins(source_id,origin_id) "
+                "SELECT source_id,origin_id FROM memberships;\n"
+            )
+            # Attribution backfill, guards and version advance commit together.
             con.executescript("BEGIN IMMEDIATE;\n" + spotify_migration + SCHEMA + METADATA_SCHEMA + ARTWORK_SCHEMA
+                              + backfill + guard_schema()
                               + f"\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;")
-            if version < 9:
-                # Backfill associations for the currently configured sources.
-                # Already removed sources cannot be reconstructed reliably.
-                con.execute("""INSERT OR IGNORE INTO source_origins(source_id,origin_id)
-                               SELECT source_id,origin_id FROM memberships""")
             con.executemany(
                 "INSERT OR IGNORE INTO users VALUES (?)",
                 [("admin",), ("guest",)],
@@ -580,14 +589,42 @@ class Store:
             payload.setdefault("operation", uuid.uuid4().hex)
         args = (user, kind, target, json.dumps(payload), utcnow())
         sql = "INSERT OR IGNORE INTO jobs(user_id,kind,target,payload,created_at) VALUES (?,?,?,?,?)"
-        if con is not None:
-            return con.execute(sql, args).rowcount > 0
-        return self.execute(sql, args) > 0
+        if con is None:
+            with self.db() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                return self.enqueue(kind, target, user, payload, con=connection)
+        if kind == "track":
+            has_albums = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='album_changes'").fetchone()
+            if has_albums and con.execute("""SELECT 1 FROM jobs j JOIN album_changes a ON a.id=j.target
+                WHERE j.kind='album' AND j.state IN ('PENDING','RUNNING') AND a.track_id=? AND j.user_id=? LIMIT 1""",
+                (target, user)).fetchone():
+                raise ValueError("An album-only operation is in progress for this track")
+        if kind == "sync":
+            source = con.execute("SELECT status FROM sources WHERE id=? AND user_id=?", (target, user)).fetchone()
+            if not source or source["status"] in SOURCE_INACTIVE:
+                return False
+        if kind == "track" and con.execute(
+            """SELECT 1 FROM source_origins so JOIN sources s ON s.id=so.source_id
+               JOIN track_origins o ON o.id=so.origin_id
+               WHERE o.track_id=? AND o.user_id=? AND s.user_id=?
+                 AND s.status IN ('PURGING','PURGE_FAILED') LIMIT 1""", (target, user, user)
+        ).fetchone():
+            from source_purge import _plan
+            for source in con.execute(
+                "SELECT id FROM sources WHERE user_id=? AND status IN ('PURGING','PURGE_FAILED')", (user,)
+            ).fetchall():
+                exclusive, _ = _plan(con, source["id"], user)
+                if target in exclusive:
+                    raise ValueError("Source cleanup is in progress for this track")
+        return con.execute(sql, args).rowcount > 0
 
     @staticmethod
     def _finish_cancelled_locked(con, job):
-        con.execute("UPDATE jobs SET state='CANCELLED',cancel_requested=1,finished_at=? WHERE id=?",
-                    (utcnow(), job["id"]))
+        if job["state"] in {"DONE", "FAILED", "CANCELLED"}:
+            return
+        target_state = JOB.send(job["state"], "cancel")
+        con.execute("UPDATE jobs SET state=?,cancel_requested=1,finished_at=? WHERE id=?",
+                    (target_state, utcnow(), job["id"]))
         if job["kind"] == "track":
             con.execute(
                 """UPDATE tracks SET operation_state='STOPPED',operation_error=?,updated_at=?
@@ -597,6 +634,50 @@ class Store:
                  utcnow(), job["target"], job["target"], job["id"]),
             )
 
+    def request_job_cancellation(self, con, job, reason: str) -> str:
+        """A durable cancel request never interrupts a filesystem commit.
+
+        Callers may signal the event-loop task *after* this transaction commits.
+        Delayed jobs use PENDING + not_before and are cancelled here immediately.
+        """
+        if job["state"] not in {"PENDING", "RUNNING"}:
+            return "TERMINAL"
+        payload = json.loads(job["payload"] or "{}")
+        committed = con.execute("SELECT 1 FROM operation_receipts WHERE operation_id=?",
+                                (payload.get("operation"),)).fetchone()
+        stage = STATE / "staging" / job["target"]
+        if (committed or job["stage"] in COMMIT_STAGES
+                or (job["kind"] == "track" and (stage / "apply-request.json").exists())):
+            payload["stop_after_commit"] = True
+            con.execute("UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), job["id"]))
+            JOB_CONTROL.send("COMMITTING", "request_stop_after_commit")
+            return "COMMITTING"
+        phase = job_phase(dict(job), time.time())
+        if phase == JobPhase.CANCELLING:
+            return "CANCELLING"
+        JOB_CONTROL.send(phase, "cancel" if job["state"] == "PENDING" else "request_cancel")
+        con.execute("UPDATE jobs SET cancel_requested=1,error=? WHERE id=?", (redact(reason), job["id"]))
+        if job["state"] == "PENDING":
+            self._finish_cancelled_locked(con, job)
+            return "CANCELLED"
+        return "CANCELLING"
+
+    def transition_source(self, con, source_id: str, user: str, event: str, **fields):
+        source = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?", (source_id, user)).fetchone()
+        if not source:
+            raise LookupError("Source not found for this library user")
+        target = SOURCE.send(source["status"], event)
+        allowed = {"monitored", "next_sync", "error", "playlist_path", "synced_at", "title"}
+        if not fields.keys() <= allowed:
+            raise ValueError("Invalid source transition fields")
+        if target in SOURCE_INACTIVE:
+            fields.update(monitored=0, next_sync=0)
+        fields["status"] = target
+        assignments = ",".join(f"{key}=?" for key in fields)
+        con.execute(f"UPDATE sources SET {assignments} WHERE id=? AND user_id=?",
+                    (*fields.values(), source_id, user))
+        return target
+
     def job_checkpoint(self, job_id: int, stage: str | None = None):
         """Serialize stop requests with stage boundaries, before any publication."""
         with self.db() as con:
@@ -604,7 +685,20 @@ class Store:
             job = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not job or job["state"] == "CANCELLED" or job["cancel_requested"]:
                 raise JobCancelled("Track operation was stopped")
+            next_stage = stage or job["stage"]
+            payload = json.loads(job["payload"] or "{}")
+            if next_stage not in COMMIT_STAGES and payload.get("stop_after_commit"):
+                receipt = con.execute("SELECT finalized_at FROM operation_receipts WHERE operation_id=?",
+                                      (payload.get("operation"),)).fetchone()
+                applying = (STATE / "staging" / job["target"] / "apply-request.json").exists()
+                # Recover an already-started swap/receipt before stopping. A mere
+                # queued stage after restart is not evidence that cleanup is safe.
+                unfinished = (receipt is not None and receipt["finalized_at"] is None) or (receipt is None and applying)
+                if not unfinished:
+                    raise JobCancelled("Source removed; committed work finished at a safe boundary")
             if stage:
+                if stage not in JOB_STAGES:
+                    raise InvalidTransition(f"Unknown job stage: {stage!r}")
                 con.execute("UPDATE jobs SET stage=? WHERE id=?", (stage, job_id))
 
     def finish_job(self, job_id: int):
@@ -616,7 +710,8 @@ class Store:
             if job["cancel_requested"] or job["state"] == "CANCELLED":
                 self._finish_cancelled_locked(con, job)
             elif job["state"] == "RUNNING":
-                con.execute("UPDATE jobs SET state='DONE',finished_at=?,error=NULL WHERE id=?", (utcnow(), job_id))
+                con.execute("UPDATE jobs SET state=?,finished_at=?,error=NULL WHERE id=?",
+                            (JOB.send(job["state"], "finish"), utcnow(), job_id))
 
     def finish_cancelled_job(self, job_id: int):
         with self.db() as con:
@@ -634,13 +729,21 @@ class Store:
             if current["cancel_requested"] or current["state"] == "CANCELLED":
                 self._finish_cancelled_locked(con, current)
                 return
-            con.execute("UPDATE jobs SET state='FAILED',error=?,finished_at=? WHERE id=?",
-                        (redact(error), utcnow(), job["id"]))
+            if current["state"] not in {"PENDING", "RUNNING"}:
+                return
+            con.execute("UPDATE jobs SET state=?,error=?,finished_at=? WHERE id=?",
+                        (JOB.send(current["state"], "fail"), redact(error), utcnow(), job["id"]))
             if job["kind"] == "track":
                 con.execute("UPDATE tracks SET operation_state=?,operation_kind=?,operation_error=?,updated_at=? WHERE id=?",
                             ("STOPPED" if stopped else "FAILED", kind.upper(), redact(error), utcnow(), job["target"]))
             elif job["kind"] == "sync":
-                con.execute("UPDATE sources SET status='FAILED',error=? WHERE id=?", (redact(error), job["target"]))
+                con.execute("UPDATE sources SET status='FAILED',error=? WHERE id=? AND status NOT IN ('REMOVED','PURGING','PURGE_FAILED')", (redact(error), job["target"]))
+            elif job["kind"] == "purge_source":
+                con.execute("UPDATE sources SET status='PURGE_FAILED',error=? WHERE id=? AND user_id=? AND status='PURGING'",
+                            (redact(error), job["target"], job["user_id"]))
+            elif job["kind"] == "album":
+                con.execute("UPDATE album_changes SET error=? WHERE id=? AND user_id=?",
+                            (redact(error), job["target"], job["user_id"]))
 
     def disable_origin(self, track_id: str, origin_id: str, user: str, reason: str = "Disabled by user"):
         """Disable network use without removing audio, provenance or memberships."""
@@ -652,6 +755,8 @@ class Store:
                 raise LookupError("Origin not found on this track in the selected library")
             if not origin["downloadable"]:
                 raise ValueError("This origin provides metadata only; it has no audio download to disable")
+            if origin["download_enabled"]:
+                DOWNLOAD_PERMISSION.send("ENABLED", "disable")
             con.execute("UPDATE track_origins SET download_enabled=0,disabled_at=COALESCE(disabled_at,?),disabled_reason=? WHERE id=?",
                         (utcnow(), redact(reason)[:1000], origin_id))
             job = con.execute("SELECT * FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')",
@@ -680,6 +785,14 @@ class Store:
     def enable_origin(self, track_id: str, origin_id: str, user: str):
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
+            origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=? AND user_id=?",
+                                 (origin_id, track_id, user)).fetchone()
+            if not origin:
+                raise LookupError("Origin not found on this track in the selected library")
+            if not origin["downloadable"]:
+                raise ValueError("This origin provides metadata only")
+            if not origin["download_enabled"]:
+                DOWNLOAD_PERMISSION.send("DISABLED", "enable")
             changed = con.execute(
                 "UPDATE track_origins SET download_enabled=1,disabled_at=NULL,disabled_reason=NULL WHERE id=? AND track_id=? AND user_id=?",
                 (origin_id, track_id, user),
@@ -781,7 +894,7 @@ class Store:
                     (reason, utcnow(), job["target"]),
                 )
             elif job["kind"] == "sync":
-                con.execute("UPDATE sources SET status='DEFERRED',error=? WHERE id=?", (reason, job["target"]))
+                con.execute("UPDATE sources SET status='DEFERRED',error=? WHERE id=? AND status NOT IN ('REMOVED','PURGING','PURGE_FAILED')", (reason, job["target"]))
         return retry_at
 
     def defer_pending_youtube_jobs(self, retry_at: float, reason: str) -> int:
@@ -835,6 +948,7 @@ class Store:
         row = self.one("SELECT * FROM operation_receipts WHERE operation_id=?", (operation_id,))
         if row:
             row["result"] = json.loads(row["result"] or "{}")
+            row["phase"] = receipt_state(row)
         return row
 
     @staticmethod
@@ -853,10 +967,13 @@ class Store:
         )
 
     def finalize_receipt(self, operation_id: str):
-        self.execute(
-            "UPDATE operation_receipts SET finalized_at=COALESCE(finalized_at,?) WHERE operation_id=?",
-            (utcnow(), operation_id),
-        )
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT finalized_at FROM operation_receipts WHERE operation_id=?", (operation_id,)).fetchone()
+            if not row or receipt_state(row) == "FINALIZED":
+                return
+            RECEIPT.send(receipt_state(row), "finalize")
+            con.execute("UPDATE operation_receipts SET finalized_at=? WHERE operation_id=?", (utcnow(), operation_id))
 
     def receipts_with_followups(self):
         rows = self.rows(
@@ -873,27 +990,33 @@ class Store:
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
-                "SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 AND not_before<=? ORDER BY CASE WHEN kind='purge_source' THEN 0 ELSE 1 END,id LIMIT 1",
+                "SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 AND not_before<=? ORDER BY CASE WHEN json_extract(payload,'$.stop_after_commit')=1 THEN 0 WHEN kind='purge_source' THEN 1 ELSE 2 END,id LIMIT 1",
                 (time.time(),),
             ).fetchone()
             if not row:
                 return None
-            con.execute("UPDATE jobs SET state='RUNNING',error=NULL WHERE id=?", (row["id"],))
+            con.execute("UPDATE jobs SET state=?,error=NULL WHERE id=?", (JOB.send(row["state"], "claim"), row["id"]))
             if row["kind"] == "track":
                 con.execute(
                     "UPDATE tracks SET operation_state='RUNNING',operation_error=NULL,updated_at=? WHERE id=?",
                     (utcnow(), row["target"]),
                 )
-            return dict(row)
+            return dict(con.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
 
     def recover(self):
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             for job in con.execute("SELECT * FROM jobs WHERE cancel_requested=1 AND state IN ('PENDING','RUNNING')").fetchall():
                 self._finish_cancelled_locked(con, job)
-        self.execute("UPDATE jobs SET state='PENDING' WHERE state='RUNNING'")
-        self.execute("UPDATE tracks SET operation_state='QUEUED',updated_at=? WHERE operation_state='RUNNING'", (utcnow(),))
-        self.execute("UPDATE sources SET status='PENDING' WHERE status='SYNCING'")
+            con.execute("UPDATE jobs SET state='PENDING' WHERE state='RUNNING'")
+            con.execute("UPDATE tracks SET operation_state='QUEUED',updated_at=? WHERE operation_state='RUNNING'", (utcnow(),))
+            con.execute("UPDATE sources SET status='PENDING' WHERE status='SYNCING'")
+        from state_machines import UPDATE, transition_setting
+        for key in ("downloader_update", "spotdl_update"):
+            value = self.setting(key, {})
+            phase = value.get("phase", value.get("status"))
+            if phase in {"RUNNING", "INSTALLING", "VALIDATING", "ACTIVATING"}:
+                transition_setting(self, key, UPDATE, "recover", error="Service restarted during update")
         # Publish candidates left waiting by older versions without changing
         # their reviewed bytes, choices, operation ID or approval token.
         for track in self.rows("SELECT * FROM tracks WHERE operation_state='NEEDS_APPROVAL' AND current_asset_id IS NULL"):
@@ -908,7 +1031,7 @@ class Store:
                 "SELECT status FROM sources WHERE user_id=? AND provider=? AND source_key=?",
                 (user, ref.provider, ref.key),
             ).fetchone()
-            if existing and (existing["status"] in {"PURGING", "REMOVED"} or con.execute(
+            if existing and (existing["status"] in SOURCE_INACTIVE or con.execute(
                 """SELECT 1 FROM jobs WHERE kind='purge_source' AND user_id=?
                    AND target IN (
                        SELECT id FROM sources
@@ -974,6 +1097,9 @@ class Store:
         stats = {"entries": len(snapshot.entries), "created": 0, "ignored": 0}
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
+            current = con.execute("SELECT status FROM sources WHERE id=? AND user_id=?", (source["id"], source["user_id"])).fetchone()
+            if not current or current["status"] in SOURCE_INACTIVE:
+                raise JobCancelled("Source was archived or purged while its scan was running")
             con.execute("DELETE FROM memberships WHERE source_id=?", (source["id"],))
             touched: set[str] = set()
             for entry in snapshot.entries:
@@ -1108,6 +1234,10 @@ class Store:
                 raise LookupError("Track not found for this user")
             if con.execute("SELECT 1 FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')", (track_id,)).fetchone():
                 raise ValueError("This track already has an active job")
+            if (con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='album_changes'").fetchone()
+                    and con.execute("""SELECT 1 FROM jobs j JOIN album_changes a ON a.id=j.target
+                    WHERE j.kind='album' AND a.track_id=? AND j.state IN ('PENDING','RUNNING') LIMIT 1""", (track_id,)).fetchone()):
+                raise ValueError("An album-only update is pending for this music")
             if track["operation_kind"] == "SPOTIFY_LINK" and track["operation_state"] in {"QUEUED", "RUNNING", "DEFERRED"}:
                 raise ValueError("Wait for the Spotify link to finish updating this track")
             payload = dict(payload)

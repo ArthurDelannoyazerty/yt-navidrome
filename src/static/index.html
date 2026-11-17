@@ -10,7 +10,9 @@
   <script src="/static/spotify-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/metadata-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/help-ui.js?v=__STATIC_VERSION__" defer></script>
-<script src="/static/artwork-ui.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/artwork-ui.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/catalogue-ui.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/graph-ui.js?v=__STATIC_VERSION__" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -25,6 +27,8 @@
 <nav class="tabs" aria-label="Application sections">
   <button type="button" class="tab active" data-tab="music">Music</button>
   <button type="button" class="tab" data-tab="approval">Approval</button>
+  <button type="button" class="tab" data-tab="catalogue">Catalogue</button>
+  <button type="button" class="tab" data-tab="graph">Graph</button>
   <button type="button" class="tab" data-tab="sources">Sources</button>
   <button type="button" class="tab" data-tab="activity">Activity</button>
   <button type="button" class="tab" data-tab="maintenance">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></button>
@@ -206,6 +210,70 @@
         </details>
       </div>
     </div>
+  </section>
+
+  <section class="panel catalogue-panel" data-panel="catalogue" id="cataloguePanel" hidden>
+    <div class="panel-heading"><div><span class="eyebrow">MUSICBRAINZ</span><h2>Catalogue</h2>
+      <p class="hint">Explore cached artists, recordings, works, albums and editions. Cached music does not mean downloaded music.</p></div></div>
+    <form id="catalogueSearchForm" class="track-toolbar">
+      <label class="control-field">Type<select id="catalogueKind">
+        <option value="artist">Artists</option><option value="release-group">Album families</option>
+        <option value="release">Release editions</option><option value="recording">Recordings</option>
+        <option value="work">Compositions</option></select></label>
+      <label class="control-field search-field">Name<input id="catalogueQuery" type="search" placeholder="Search an artist or album" required minlength="2"></label>
+      <button id="catalogueCachedSearch" class="secondary" type="submit">Search cache</button>
+      <button id="catalogueOnlineSearch" type="button">Search MusicBrainz</button>
+    </form>
+    <p id="catalogueStatus" class="hint" role="status" aria-live="polite"></p>
+    <div id="catalogueResults" class="catalogue-results"></div>
+    <section class="catalogue-details" aria-label="Catalogue item details">
+      <h3>Selected entry</h3><div id="catalogueDetail"><p class="hint">Choose an entry to browse its discography or tracklist.</p></div>
+    </section>
+    <section class="catalogue-details" aria-label="MusicBrainz synchronization">
+      <h3>Cache synchronization</h3>
+      <div class="row"><button id="catalogueRefreshProgress" type="button" class="secondary">Refresh progress</button>
+      <button id="catalogueIndexLibrary" type="button" class="secondary">Index downloaded recordings</button></div>
+      <p id="catalogueProgress" class="hint" role="status"></p>
+    </section>
+    <section class="catalogue-details" aria-label="Album organization">
+      <h3>Organize albums</h3>
+      <p class="hint">Select one or more imported sources. Albums are recommendations, not recording identification. Existing tags only change after a reviewed preview and confirmation.</p>
+      <label class="control-field">Sources (Ctrl/Cmd + click for multiple)
+        <select id="catalogueSources" multiple size="5" aria-label="Collections for album matching"></select></label>
+      <label class="control-field">Optional individual track IDs (comma or newline separated)
+        <textarea id="catalogueTrackIDs" rows="2" placeholder="Paste one or more track IDs"></textarea></label>
+      <div class="row"><button id="catalogueRecommend" type="button">Compare albums</button>
+        <button id="catalogueHistoryRefresh" class="secondary" type="button">Refresh changes</button></div>
+      <p id="catalogueAlbumStatus" class="hint" role="status" aria-live="polite"></p>
+      <div id="catalogueRecommendations" class="catalogue-results"></div>
+      <div id="cataloguePreview"></div>
+      <h4>Past album changes and undo</h4><div id="catalogueHistory"></div>
+    </section>
+  </section>
+
+  <section class="panel" data-panel="graph" id="graphPanel" hidden>
+    <div class="panel-heading"><div><span class="eyebrow">RELATIONSHIPS</span><h2>Music graph</h2>
+      <p class="hint">Explore a bounded neighborhood of the cached MusicBrainz graph. Graph controls do not modify metadata.</p></div></div>
+    <form id="graphSearchForm" class="graph-controls">
+      <label>View<select id="graphView"><option value="downloaded">Downloaded library</option>
+        <option value="catalogue">Entire cached catalogue</option></select></label>
+      <label>Filter artist or music<input id="graphQuery" type="search" placeholder="Artist, song, or album"></label>
+      <label>Focus MusicBrainz ID (optional)<input id="graphFocus" type="text" placeholder="UUID"></label>
+      <button type="submit">Explore</button>
+    </form>
+    <fieldset class="graph-filters"><legend>Visible node types</legend>
+      <label><input type="checkbox" class="graph-type" value="recording" checked> Music / recordings</label>
+      <label><input type="checkbox" class="graph-type" value="artist" checked> Artists</label>
+      <label><input type="checkbox" class="graph-type" value="release" checked> Albums / releases</label>
+      <label><input type="checkbox" class="graph-type" value="release-group" checked> Album families</label>
+      <label><input type="checkbox" class="graph-type" value="work" checked> Compositions</label>
+    </fieldset>
+    <div class="row"><button id="graphZoomIn" class="secondary" type="button" aria-label="Zoom in">Zoom +</button>
+      <button id="graphZoomOut" class="secondary" type="button" aria-label="Zoom out">Zoom −</button>
+      <button id="graphZoomReset" class="secondary" type="button">Reset view</button></div>
+    <p id="graphStatus" class="hint" role="status" aria-live="polite"></p>
+    <div class="graph-stage"><svg id="graphSvg" role="img" aria-label="Interactive artist, recording and album relationship graph" viewBox="0 0 1000 640" tabindex="0"></svg></div>
+    <div id="graphDetails" class="catalogue-details" aria-live="polite"></div>
   </section>
 
   <section class="panel" data-panel="sources" hidden>

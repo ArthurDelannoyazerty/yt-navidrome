@@ -369,7 +369,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
   assert.equal(await chrome.evaluate("!!document.querySelector('.review-toolbar,#startReview,#approveSelected,#metadataDialog')"),false);
-  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","sources","activity","maintenance","help"]);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","catalogue","graph","sources","activity","maintenance","help"]);
   await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
   await chrome.until("!document.querySelector('#approvalWorkspace').hidden && document.querySelectorAll('#mbResults tbody tr').length===1");
   assert.equal(await chrome.evaluate("document.querySelector('#approvalFilter').value"),"NEEDS_APPROVAL");

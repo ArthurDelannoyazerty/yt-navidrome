@@ -11,8 +11,10 @@ import:
   incremental: false
   singletons: true
 paths:
-  default: $albumartist/$album/$artist - $title
-  singleton: $artist/Non-Album/$artist - $title
+  # Permanent music paths are independent of album metadata.
+  # The one-time migration moves legacy approved files here before bulk retagging.
+  default: audio/$pipeline_id
+  singleton: audio/$pipeline_id
 fetchart:
   auto: false
   sources: [coverart]

@@ -23,6 +23,7 @@ import requests
 
 from common import atomic_json, user_name
 from http_policy import ApiDeferred, HttpPolicy
+from state_machines import AUTH, OAUTH_ATTEMPT, credential_state
 
 SCOPES = frozenset({"playlist-read-private", "playlist-read-collaborative"})
 CALLBACK_PATH = "/api/spotify/callback"
@@ -112,6 +113,7 @@ class SpotifyAuth:
                 token, error = {}, str(exc)
         connected = bool(client and token.get("client_id") == client and token.get("refresh_token"))
         return {"configured": bool(client), "connected": connected,
+                "state": credential_state(token, time.time(), configured=bool(client and connected)),
                 "account_id": token.get("account_id") if connected else None,
                 "spotify_user_id": token.get("spotify_user_id") if connected else None,
                 "display_name": token.get("display_name") if connected else None,
@@ -132,6 +134,7 @@ class SpotifyAuth:
                     path.unlink(missing_ok=True)
             atomic_json(pending / (digest(state) + ".json"), {
                 "user": user, "cookie_hash": digest(cookie), "verifier": verifier,
+                "phase": OAUTH_ATTEMPT.initial,
                 "expires_at": time.time() + 600, "client_id": client, "redirect_uri": redirect,
             })
         url = "https://accounts.spotify.com/authorize?" + urlencode({
@@ -153,14 +156,20 @@ class SpotifyAuth:
                 raise ValueError("Spotify authorization expired or has already been used") from None
             if not secrets.compare_digest(pending["cookie_hash"], digest(cookie)):
                 raise ValueError("Spotify authorization belongs to a different browser")
+            phase = pending.get("phase", OAUTH_ATTEMPT.initial)
+            if phase != OAUTH_ATTEMPT.initial:
+                raise ValueError("Spotify authorization was already consumed")
             path.unlink(missing_ok=True)  # One-use, including denial and failed exchange.
             client, redirect = configuration()
             if (pending["expires_at"] <= time.time() or pending["client_id"] != client
                     or pending["redirect_uri"] != redirect):
+                OAUTH_ATTEMPT.send(phase, "expire")
                 raise ValueError("Spotify authorization expired; connect again")
             user = self.store.require_user(pending["user"])
             if denied or not code:
+                OAUTH_ATTEMPT.send(phase, "deny")
                 raise ValueError("Spotify access was not granted; the existing connection was not changed")
+            phase = OAUTH_ATTEMPT.send(phase, "consume")
             http = HttpPolicy(self.store)
             raw = request_json(http, "POST", "https://accounts.spotify.com/api/token", data={
                 "grant_type": "authorization_code", "client_id": client, "code": code,
@@ -179,6 +188,7 @@ class SpotifyAuth:
                          display_name=profile.get("display_name") or profile["id"])
             self._directory()
             atomic_json(self._path(user), token)
+            OAUTH_ATTEMPT.send(phase, "connected")
         return user
 
     @staticmethod
@@ -204,10 +214,14 @@ class SpotifyAuth:
         client, _ = configuration()
         with _LOCK:
             token = self._read(user)
-            if not token or token.get("client_id") != client:
+            phase = credential_state(token, time.time(), configured=bool(token and token.get("client_id") == client))
+            if phase == "DISCONNECTED":
                 raise ValueError("Connect Spotify for this library in Sources before syncing")
-            if token.get("expires_at", 0) > time.time() + 60 and token.get("access_token") != rejected:
+            if phase == "CONNECTED" and token.get("access_token") != rejected:
                 return token["access_token"]
+            if phase == "CONNECTED":
+                phase = AUTH.send(phase, "reject")
+            phase = AUTH.send(phase, "refresh")
             try:
                 raw = request_json(http, "POST", "https://accounts.spotify.com/api/token", data={
                     "grant_type": "refresh_token", "client_id": client, "refresh_token": token["refresh_token"],
@@ -217,8 +231,12 @@ class SpotifyAuth:
                     # A revoked/expired refresh grant cannot recover by retrying.
                     # Leave other users and all imported sources/music untouched.
                     self._path(user).unlink(missing_ok=True)
+                    AUTH.send(phase, "revoke")
+                else:
+                    AUTH.send(phase, "transient_failure")
                 raise
             token = self._validated(raw, client, token)
+            AUTH.send(phase, "success")
             atomic_json(self._path(user), token)
             return token["access_token"]
 

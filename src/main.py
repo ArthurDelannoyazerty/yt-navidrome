@@ -22,15 +22,17 @@ from audio_tags import inspect_tags
 from common import LIBRARY, ROOT, utcnow
 from pipeline import Pipeline, write_playlist
 from metadata_routes import install_metadata_routes
+from catalogue_routes import install_catalogue_routes, cache_worker
 from review_routes import install_review_routes
 from artwork_routes import install_artwork_routes
 from providers import parse_source
 from store import SCHEMA_VERSION, Store
+from state_machines import MACHINES, SOURCE_INACTIVE, SERVICE
 
 STATIC_ROOT = ROOT / "static"
 INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
 _asset_digest = hashlib.sha256()
-for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js", "help-ui.js", "pele-flowchart.js"):
+for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js", "help-ui.js", "pele-flowchart.js", "catalogue-ui.js", "graph-ui.js"):
     _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
@@ -91,57 +93,92 @@ class EventHandler(logging.Handler):
 def create_app(store=None, start_workers=True):
     store = store or Store()
     pipeline = Pipeline(store)
+    # Public catalogue has its own SQLite file; local decisions stay in ingestor.sqlite.
+    catalogue, albums = None, None
 
     @asynccontextmanager
     async def lifespan(app):
-        store.path.parent.mkdir(parents=True, exist_ok=True)
-        lock = (store.path.parent / "instance.lock").open("w")
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lock.close()
-            raise RuntimeError("Run one API worker/replica per state directory")
-        try:
-            # Migrations must not run concurrently with another live instance.
-            store.init()
-        except BaseException:
-            lock.close()
-            raise
-        handler = EventHandler(store)
-        logging.getLogger().addHandler(handler)
+        pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "start")
         tasks = []
-        if start_workers:
-            store.recover()
-            for binary in ("ffmpeg", "fpcalc", "deno"):
-                if not shutil.which(binary):
-                    store.event("ERROR", f"Required binary not found: {binary}", target="startup")
-            tasks = [
-                asyncio.create_task(pipeline.work(), name="worker"),
-                asyncio.create_task(pipeline.schedule(), name="scheduler"),
-            ]
-
-            def report_task_failure(task):
-                if not task.cancelled() and task.exception():
-                    store.event(
-                        "ERROR",
-                        f"{task.get_name()} stopped unexpectedly: {task.exception()}",
-                        target="server",
-                    )
-
-            for task in tasks:
-                task.add_done_callback(report_task_failure)
-            app.state.worker_tasks = tasks
+        handler = None
+        lock = None
         try:
+            store.path.parent.mkdir(parents=True, exist_ok=True)
+            lock = (store.path.parent / "instance.lock").open("w")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError("Run one API worker/replica per state directory") from None
+            # The move-only migration and Navidrome verification form one
+            # maintenance boundary. Never resume ingestion, metadata changes or
+            # scheduled sync while track IDs/ratings are awaiting verification.
+            journal = store.path.parent / "stable-path-migration.json"
+            if journal.is_file():
+                state = json.loads(journal.read_text(encoding="utf-8")).get("state")
+                if state != "COMPLETE":
+                    raise RuntimeError(
+                        f"Stable-path migration is {state or 'unrecognized'} (not acknowledged). "
+                        "Keep the importer stopped, verify Navidrome track IDs, "
+                        "playlists and ratings, then acknowledge the migration "
+                        "with tools/stable_path_migrate.py ack."
+                    )
+            store.init()
+            catalogue.init()
+            albums.init()
+            pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "migrated")
+            handler = EventHandler(store)
+            logging.getLogger().addHandler(handler)
+            pipeline.stopping.clear()
+            if start_workers:
+                # A newly deployed image must not start creating identifier-based
+                # paths alongside legacy album-derived paths. Perform the offline
+                # move-only migration and Navidrome canary verification first.
+                for existing in store.rows("""SELECT id,user_id,file_path FROM tracks
+                    WHERE current_asset_id IS NOT NULL AND health='AVAILABLE'
+                    AND file_path IS NOT NULL"""):
+                    expected = (LIBRARY / existing["user_id"] / "audio" /
+                                (existing["id"] + ".opus")).resolve()
+                    if Path(existing["file_path"]).resolve() != expected:
+                        raise RuntimeError(
+                            "Legacy album-derived file paths exist in this library. "
+                            "Stop the importer, back up music and Navidrome, and "
+                            "run tools/stable_path_migrate.py before starting workers."
+                        )
+                store.recover()
+                for binary in ("ffmpeg", "fpcalc", "deno"):
+                    if not shutil.which(binary):
+                        store.event("ERROR", f"Required binary not found: {binary}", target="startup")
+                tasks = [asyncio.create_task(pipeline.work(), name="worker"),
+                         asyncio.create_task(pipeline.schedule(), name="scheduler"),
+                         asyncio.create_task(cache_worker(catalogue, pipeline.stopping), name="catalogue-worker")]
+
+                def report_task_failure(task):
+                    if not task.cancelled() and task.exception():
+                        if "fail" in SERVICE.transitions[pipeline.lifecycle]:
+                            pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "fail")
+                        store.event("ERROR", f"{task.get_name()} stopped unexpectedly: {task.exception()}",
+                                    target="server")
+
+                for task in tasks:
+                    task.add_done_callback(report_task_failure)
+            app.state.worker_tasks = tasks
+            pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "ready")
             yield
+        except BaseException:
+            if "fail" in SERVICE.transitions[pipeline.lifecycle]:
+                pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "fail")
+            raise
         finally:
+            pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "stop")
             pipeline.stopping.set()
             for task in tasks + list(pipeline.children):
                 task.cancel()
-            await asyncio.gather(
-                *tasks, *list(pipeline.children), return_exceptions=True
-            )
-            logging.getLogger().removeHandler(handler)
-            lock.close()
+            await asyncio.gather(*tasks, *list(pipeline.children), return_exceptions=True)
+            if handler:
+                logging.getLogger().removeHandler(handler)
+            if lock:
+                lock.close()
+            pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "stopped")
 
     app = FastAPI(title="Music Ingestor", lifespan=lifespan)
     app.state.store = store
@@ -149,6 +186,7 @@ def create_app(store=None, start_workers=True):
     install_metadata_routes(app, store)
     install_review_routes(app, store)
     install_artwork_routes(app, store)
+    catalogue, albums = install_catalogue_routes(app, store, pipeline)
     app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 
     @app.middleware("http")
@@ -210,7 +248,7 @@ def create_app(store=None, start_workers=True):
     @app.get("/healthz")
     def health():
         store.one("SELECT 1")
-        if any(task.done() for task in getattr(app.state, "worker_tasks", [])):
+        if pipeline.lifecycle == "FAILED" or any(task.done() for task in getattr(app.state, "worker_tasks", [])):
             raise HTTPException(
                 503, "A background worker stopped; inspect the event log and restart"
             )
@@ -256,19 +294,24 @@ def create_app(store=None, start_workers=True):
     @app.post("/api/sources/{source_id}/purge")
     def purge_source(source_id: str, data: SourcePurgeInput):
         from source_purge import queue
-        return queue(store, source_id, data.user_id, data.source_url)
+        result = queue(store, source_id, data.user_id, data.source_url)
+        for job_id in result.pop("interrupt_job_ids", []):
+            pipeline.cancel_job(job_id)
+        return result
 
     @app.post("/api/sources/{source_id}/retry")
     def retry_source(source_id: str, data: ActionInput):
-        source = store.owned("sources", source_id, data.user_id)
-        if source["status"] in {"PURGING", "REMOVED"} or store.one(
-            "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND user_id=? AND state IN ('PENDING','RUNNING')",
-            (source_id, data.user_id),
-        ):
-            raise ValueError("Source purge is already in progress")
-        if not store.enqueue("sync", source_id, data.user_id):
-            raise ValueError("This source already has an active sync")
-        store.update("sources", source["id"], status="PENDING", error=None)
+        with store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            source = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?", (source_id, data.user_id)).fetchone()
+            if not source:
+                raise LookupError("Source not found for this user")
+            if source["status"] in SOURCE_INACTIVE:
+                raise ValueError("Restore archived sources or retry their cleanup first")
+            if not store.enqueue("sync", source_id, data.user_id, con=con):
+                raise ValueError("This source already has an active sync")
+            if source["status"] != "PENDING":
+                store.transition_source(con, source_id, data.user_id, "queue", error=None)
         return {"message": "Source sync queued"}
 
     @app.post("/api/sources/{source_id}/monitoring")
@@ -276,7 +319,7 @@ def create_app(store=None, start_workers=True):
         with store.db() as con:
             con.execute("BEGIN IMMEDIATE")
             source = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?", (source_id, data.user_id)).fetchone()
-            if source and (source["status"] in {"PURGING", "REMOVED"} or con.execute(
+            if source and (source["status"] in SOURCE_INACTIVE or con.execute(
                 "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND user_id=? AND state IN ('PENDING','RUNNING')",
                 (source_id, data.user_id),
             ).fetchone()):
@@ -292,48 +335,29 @@ def create_app(store=None, start_workers=True):
 
     @app.post("/api/sources/{source_id}/restore")
     def restore_source(source_id: str, data: SourcePurgeInput):
-        source = store.owned("sources", source_id, data.user_id)
-        if source["url"] != data.source_url or source["status"] != "REMOVED":
-            raise ValueError("Only this user's archived source URL may be restored")
         with store.db() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute(
-                "SELECT 1 FROM jobs WHERE kind='purge_source' AND target=? AND state IN ('PENDING','RUNNING')",
-                (source_id,),
-            ).fetchone():
-                raise ValueError("Source purge is already in progress")
-            con.execute(
-                "UPDATE sources SET status='PENDING',error=NULL,next_sync=0 WHERE id=? AND user_id=? AND status='REMOVED'",
-                (source_id, data.user_id),
-            )
-            store.enqueue("sync", source_id, data.user_id, con=con)
+            source = con.execute("SELECT * FROM sources WHERE id=? AND user_id=?", (source_id, data.user_id)).fetchone()
+            if not source:
+                raise LookupError("Source not found for this user")
+            if source["url"] != data.source_url or source["status"] != "REMOVED":
+                raise ValueError("Only this user's archived source URL may be restored")
+            store.transition_source(con, source_id, data.user_id, "restore", error=None, next_sync=0, monitored=0)
+            if not store.enqueue("sync", source_id, data.user_id, con=con):
+                raise ValueError("This source already has active work")
         return {"message": "Source restored; synchronization queued. Monitoring remains off."}
 
     @app.delete("/api/sources/{source_id}")
     def delete_source(source_id: str, user_id: str):
-        """Archive the source, preserving its origin history for later cleanup."""
-        source = store.owned("sources", source_id, user_id)
-        if source["status"] == "REMOVED":
-            raise ValueError("This source is already archived")
-        with store.db() as con:
-            con.execute("BEGIN IMMEDIATE")
-            if con.execute(
-                """SELECT 1 FROM jobs WHERE target=? AND state IN ('PENDING','RUNNING')
-                   AND kind IN ('sync','purge_source')""", (source_id,),
-            ).fetchone():
-                raise ValueError("Wait until this source finishes syncing or purging")
-            con.execute(
-                """UPDATE sources SET status='REMOVED',monitored=0,next_sync=0,
-                   playlist_path=NULL WHERE id=? AND user_id=?""",
-                (source_id, user_id),
-            )
-            con.execute("DELETE FROM memberships WHERE source_id=?", (source_id,))
-        if source["playlist_path"]:
-            path = Path(source["playlist_path"]).resolve()
-            playlist_dir = (LIBRARY / user_id / "000000-playlists").resolve()
-            if path.parent == playlist_dir:
-                path.unlink(missing_ok=True)
-        return {"message": "Source archived; music retained. You can purge it from Archived sources."}
+        from source_purge import archive
+        result = archive(store, source_id, user_id)
+        for job_id in result.pop("interrupt_job_ids", []):
+            pipeline.cancel_job(job_id)
+        return result
+
+    @app.get("/api/state-machines")
+    def state_machine_catalog():
+        return {"schema": SCHEMA_VERSION, "machines": [m.describe() for m in MACHINES.values()]}
 
     @app.get("/api/tracks")
     def tracks(

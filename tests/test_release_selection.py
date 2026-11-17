@@ -180,7 +180,12 @@ assert result["release_id"] is None
 assert raw["musicbrainz_trackid"] == [recording]
 assert not raw.get("musicbrainz_albumid") and not raw.get("album")
 assert not raw.get("date")
-assert any("without verified release metadata" in w for w in result["warnings"])
+# Recording-only approval skips edition lookup. A genuinely unknown
+# release date is still reported; an unchosen edition is not a provider error.
+assert any("Release date is unknown" in w for w in result["warnings"])
+assert not any("selected MusicBrainz release" in w for w in result["warnings"])
+stored = b.lib.get_item(result["beets_id"])
+assert stored and not stored.mb_albumid and not stored.album and not stored.year
 assert raw.get("r128_track_gain") and raw.get("replaygain_track_peak")
 assert raw["comment"] == raw["description"]
 print("Recording-only fallback with real beets passed")

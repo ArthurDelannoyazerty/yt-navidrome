@@ -7,6 +7,7 @@ from pathlib import Path
 
 import common
 from runtime import DeferredOperation
+from state_machines import SOURCE, SOURCE_INACTIVE, SOURCE_PURGING, COMMIT_STAGES
 
 
 def _source(con, source_id: str, user: str, url: str | None = None) -> dict:
@@ -65,38 +66,77 @@ def preview(store, source_id: str, user: str) -> dict:
     }
 
 
+def cancel_work(store, con, source_id: str, user: str) -> dict:
+    """Cancel only this source's exclusive work, including delayed retries."""
+    exclusive, shared = _plan(con, source_id, user)
+    exclusive = set(exclusive)
+    result = {"cancelled_jobs": 0, "cancelling_jobs": 0, "finishing_commits": 0,
+              "shared_tracks": len(shared), "interrupt_job_ids": []}
+    jobs = con.execute(
+        "SELECT * FROM jobs WHERE user_id=? AND state IN ('PENDING','RUNNING')",
+        (user,),
+    ).fetchall()
+    for job in jobs:
+        if not ((job["kind"] == "sync" and job["target"] == source_id)
+                or (job["kind"] == "track" and job["target"] in exclusive)):
+            continue
+        outcome = store.request_job_cancellation(con, job, "Source removed; exclusive queued work stopped")
+        if outcome == "CANCELLED":
+            result["cancelled_jobs"] += 1
+        elif outcome == "CANCELLING":
+            result["cancelling_jobs"] += 1
+            result["interrupt_job_ids"].append(job["id"])
+        elif outcome == "COMMITTING":
+            result["finishing_commits"] += 1
+    return result
+
+
+def archive(store, source_id: str, user: str) -> dict:
+    """Stop exclusive work and retain source history and already published music."""
+    store.require_user(user)
+    with store.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        source = _source(con, source_id, user)
+        if source["status"] in SOURCE_INACTIVE:
+            raise ValueError("This source is already archived or being purged")
+        store.transition_source(con, source_id, user, "archive", playlist_path=None)
+        result = cancel_work(store, con, source_id, user)
+        if source["playlist_path"]:
+            path = Path(source["playlist_path"]).resolve()
+            folder = (common.LIBRARY / user / "000000-playlists").resolve()
+            if path.parent != folder:
+                raise ValueError("Refusing to unlink a playlist outside this library")
+            # Serialize export/unlink with write_playlist's same SQLite lock.
+            path.unlink(missing_ok=True)
+        con.execute("DELETE FROM memberships WHERE source_id=?", (source_id,))
+    return {**result, "message": "Source archived; exclusive queued work stopped, music retained."}
+
+
 def queue(store, source_id: str, user: str, url: str) -> dict:
-    """Disable monitoring immediately; place purge ahead of ordinary queued jobs."""
+    """Durable cancel requests and source transition are one atomic operation."""
     store.require_user(user)
     with store.db() as con:
         con.execute("BEGIN IMMEDIATE")
         source = _source(con, source_id, user, url)
-        if source["status"] == "PURGING":
-            raise ValueError("This source is already being purged")
-        con.execute(
-            "UPDATE sources SET monitored=0,status='PURGING' WHERE id=? AND user_id=?",
-            (source_id, user),
-        )
-        # A pending resync must not repopulate the source before its purge runs.
-        con.execute(
-            """UPDATE jobs SET state='CANCELLED',cancel_requested=1,
-               error='Source purge requested',finished_at=?
-               WHERE kind='sync' AND user_id=? AND target=? AND state='PENDING'""",
-            (common.utcnow(), user, source_id),
-        )
+        event = "retry_purge" if source["status"] == "PURGE_FAILED" else "purge"
+        store.transition_source(con, source_id, user, event, error=None)
+        result = cancel_work(store, con, source_id, user)
         if not store.enqueue("purge_source", source_id, user, {"url": url}, con=con):
             raise ValueError("This source already has an active purge")
         job = con.execute(
             """SELECT id FROM jobs WHERE kind='purge_source' AND user_id=?
                AND target=? AND state='PENDING'""", (user, source_id)
         ).fetchone()
-        return {"message": "Source purge queued; shared music will be retained",
-                "job_id": job["id"]}
+        return {**result, "job_id": job["id"],
+                "message": f"Source purge queued: {result['cancelled_jobs']} queued jobs stopped, "
+                           f"{result['cancelling_jobs']} running jobs stopping, "
+                           f"{result['finishing_commits']} commits finishing safely. Shared music is retained."}
 
 
 def _inside_user(path: str, user: str) -> Path:
     resolved = Path(path).resolve()
-    if not resolved.is_relative_to((common.LIBRARY / user).resolve()):
+    root = (common.LIBRARY / user).resolve()
+    if resolved == root or not resolved.is_relative_to(root):
         raise ValueError("Refusing to remove a file outside the selected user's library")
     return resolved
 
@@ -125,6 +165,17 @@ def commit(store, source_id: str, user: str, url: str, operation_id: str) -> dic
         exclusive, shared = _plan(con, source_id, user)
         deleted = []
         for track_id in exclusive:
+            draining = con.execute(
+                """SELECT not_before FROM jobs WHERE kind='track' AND target=? AND user_id=?
+                   AND state='PENDING' AND json_extract(payload,'$.stop_after_commit')=1""",
+                (track_id, user),
+            ).fetchone()
+            if draining:
+                # Cleanup of an earlier committed publication must not lose its
+                # job or paths just because purge has higher ordinary priority.
+                import time
+                raise DeferredOperation("Waiting for committed track cleanup before source purge",
+                                        retry_at=max(time.time() + 2, draining["not_before"]))
             if con.execute(
                 """SELECT 1 FROM jobs WHERE kind='track' AND target=?
                    AND user_id=? AND state='RUNNING'""", (track_id, user)
@@ -149,6 +200,10 @@ def commit(store, source_id: str, user: str, url: str, operation_id: str) -> dic
             if Path(playlist).resolve().parent != folder:
                 raise ValueError("Refusing to unlink a playlist outside this user's playlist directory")
 
+        # Never remove an independent origin just because it has no membership.
+        attributed = {row[0] for row in con.execute(
+            "SELECT origin_id FROM source_origins WHERE source_id=?", (source_id,)
+        )}
         # This cascades only the chosen source's memberships and attribution.
         con.execute(
             "DELETE FROM sources WHERE id=? AND user_id=?", (source_id, user)
@@ -172,7 +227,7 @@ def commit(store, source_id: str, user: str, url: str, operation_id: str) -> dic
                 (track_id, user),
             ).fetchall()
             for origin in origins:
-                if origin["id"] == track["current_origin_id"]:
+                if origin["id"] not in attributed or origin["id"] == track["current_origin_id"]:
                     continue
                 con.execute(
                     "DELETE FROM track_origins WHERE id=? AND track_id=? AND user_id=?",
@@ -218,7 +273,9 @@ async def _finish(pipeline, job: dict, receipt: dict) -> None:
             # Only UUID-named staging directories under application state.
             track_stage = (stage_root / track_id).resolve()
             cleanup_stage = (stage_root / ("purge-" + track_id)).resolve()
-            if not track_stage.is_relative_to(stage_root) or not cleanup_stage.is_relative_to(stage_root):
+            if (not track_id or Path(track_id).name != track_id or track_id in {".", ".."}
+                    or track_stage == stage_root or cleanup_stage == stage_root
+                    or not track_stage.is_relative_to(stage_root) or not cleanup_stage.is_relative_to(stage_root)):
                 raise ValueError("Invalid staging directory for source purge")
             if track.get("beets_id") is not None or track.get("file_path"):
                 cleanup_stage.mkdir(parents=True, exist_ok=True)

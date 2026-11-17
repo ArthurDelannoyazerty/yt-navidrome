@@ -11,6 +11,7 @@ from pathlib import Path
 from artwork import Artwork, FRAMINGS
 from common import atomic_copy, atomic_json, sha256_file, utcnow
 from source_metadata import correction_revision
+from state_machines import SwapPhase, swap_phase, RECEIPT, receipt_state
 
 
 def revision(con, track):
@@ -58,7 +59,7 @@ async def process(pipeline, job):
     track = store.owned("tracks", job["target"], job["user_id"])
     directory = store.path.parent / "staging" / ("artwork-" + track["id"] + "-" + operation)
     completed = store.operation_receipt(operation)
-    if completed and completed["finalized_at"]:
+    if completed and receipt_state(completed) == "FINALIZED":
         # A crash after the receipt but before finish_job can leave QUEUED/RUNNING.
         previous = completed["result"]
         store.update("tracks", track["id"], operation_state=previous["previous_state"],
@@ -91,12 +92,13 @@ async def process(pipeline, job):
         atomic_json(manifest_path, manifest)
     pipeline.checkpoint(job, "applying")
     current = await asyncio.to_thread(sha256_file, path)
-    if current == manifest["before"] and current != manifest["after"]:
+    swap = swap_phase(current, manifest["before"], manifest["after"])
+    if swap == SwapPhase.STAGED:
         staged = directory / "image.opus"
         if not staged.is_file() or await asyncio.to_thread(sha256_file, staged) != manifest["after"]:
             raise ValueError("Staged artwork changed; refusing replacement")
         await asyncio.to_thread(atomic_copy, staged, path)
-    elif current not in {manifest["before"], manifest["after"]}:
+    elif swap == SwapPhase.CONFLICT:
         raise ValueError("Audio changed during artwork review; it was not overwritten")
     refreshed = await pipeline.bridge(job, track, directory, "refresh", path=str(path))
     if await asyncio.to_thread(sha256_file, path) != manifest["after"]:

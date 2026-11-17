@@ -1,18 +1,20 @@
 /* Per-track covers: automatic selection, previewed manual pins, and no album-wide edits. */
 (() => {
-  const ui = {track: null, user: null, context: null, selected: null, framing: "original", serial: 0, busy: false, timer: null, controller: null, polls: 0};
+  const mutation = new IngestorUI.AsyncState("artwork-mutation");
+  const ui = {track: null, user: null, context: null, selected: null, framing: "original", serial: 0, timer: null, controller: null, polls: 0};
   const message = (text, error = false) => {
     $("artworkStatus").textContent = text;
     $("artworkStatus").classList.toggle("error-text", error);
   };
   const active = serial => serial === ui.serial && ui.user === state.user && $("artworkDialog").open;
   function reset() {
+    mutation.reset();
     ui.serial += 1; clearTimeout(ui.timer); ui.controller?.abort();
-    ui.track = null; ui.context = null; ui.selected = null; ui.busy = false;
+    ui.track = null; ui.context = null; ui.selected = null;
     $("artworkUpload").value = ""; $("artworkDialog").close();
   }
   function buttons() {
-    const disabled = ui.busy || !ui.context?.can_edit || ui.context?.working;
+    const disabled = mutation.pending || !ui.context?.can_edit || ui.context?.working;
     $("artworkApply").disabled = disabled || !ui.selected;
     for (const id of ["artworkAuto", "artworkRefresh", "artworkUpload"]) $(id).disabled = disabled;
     $("artworkFraming").disabled = disabled || !ui.selected;
@@ -86,9 +88,9 @@
     catch (error) { if (active(serial) && error.name !== "AbortError") message(error.message, true); }
   }
   async function apply(selection, refresh = false) {
-    if (ui.busy || !ui.context?.can_edit) return;
+    if (mutation.pending || !ui.context?.can_edit) return;
     const serial = ui.serial, context = ui.context, user = ui.user;
-    ui.busy = true; buttons(); message(refresh ? "Finding covers from associated videos..." : "Queuing selected artwork...");
+    mutation.start(); buttons(); message(refresh ? "Finding covers from associated videos..." : "Queuing selected artwork...");
     try {
       const response = await fetch(`/api/tracks/${encodeURIComponent(ui.track.id)}/artwork`, {
         method: "POST", headers: {"Content-Type": "application/json"},
@@ -97,10 +99,10 @@
       const data = await response.json();
       if (!active(serial)) return;
       if (!response.ok) throw new Error(data.error || "Artwork was not queued");
-      ui.busy = false; ui.polls = 0; message(data.message); await load(serial, true);
+      mutation.finish(); ui.polls = 0; message(data.message); await load(serial, true);
       if (active(serial)) await refreshTracks(false);
-    } catch (error) { if (active(serial)) message(error.message, true); }
-    finally { if (active(serial)) { ui.busy = false; buttons(); } }
+    } catch (error) { if (active(serial)) { mutation.fail(); message(error.message, true); } }
+    finally { if (active(serial)) { mutation.finish(); buttons(); } }
   }
   $("artworkCurrent").addEventListener("error", () => { $("artworkCurrent").hidden = true; $("artworkCurrentEmpty").hidden = false; });
   $("artworkClose").addEventListener("click", reset);
@@ -115,9 +117,9 @@
   $("artworkAuto").addEventListener("click", () => apply("auto"));
   $("artworkUpload").addEventListener("change", async () => {
     const file = $("artworkUpload").files[0];
-    if (!file || ui.busy || !ui.context?.can_edit) return;
+    if (!file || mutation.pending || !ui.context?.can_edit) return;
     if (file.size > 8 * 1024 * 1024) { message("Use an image of at most 8 MiB.", true); return; }
-    const serial = ui.serial; ui.busy = true; buttons(); message("Uploading an image for preview...");
+    const serial = ui.serial; mutation.start(); buttons(); message("Uploading an image for preview...");
     try {
       const params = new URLSearchParams({user_id: ui.user, revision_token: ui.context.revision, filename: file.name.slice(0, 200)});
       const response = await fetch(`/api/tracks/${encodeURIComponent(ui.track.id)}/artwork/upload?${params}`, {
@@ -128,8 +130,8 @@
       if (!response.ok) throw new Error(data.error || "Upload failed");
       ui.selected = data.candidate_id; ui.framing = "original"; $("artworkFraming").value = "original";
       message(data.message); await load(serial, true);
-    } catch (error) { if (active(serial)) message(error.message, true); }
-    finally { if (active(serial)) { ui.busy = false; $("artworkUpload").value = ""; buttons(); } }
+    } catch (error) { if (active(serial)) { mutation.fail(); message(error.message, true); } }
+    finally { if (active(serial)) { mutation.finish(); $("artworkUpload").value = ""; buttons(); } }
   });
   $("fillMissingCovers").addEventListener("click", guard(async () => {
     if (!confirm(`Find artwork for idle playable tracks without embedded images in "${state.user}"? Existing covers and pins are kept. Audio is not downloaded again.`)) return;

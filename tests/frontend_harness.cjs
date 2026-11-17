@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
-const {RequestGate, resultsLabel} = require('../src/static/ui-state.js');
+const IngestorUI = require('../src/static/ui-state.js');
 function element(tag = 'div') {
   return {
     tagName: tag, value: '', textContent: '', dataset: {}, disabled: false,
@@ -9,7 +9,7 @@ function element(tag = 'div') {
     addEventListener(name, callback) { this.listeners[name] = callback; },
     append(...values) { this.children.push(...values); },
     replaceChildren(...values) { this.children = values; },
-    querySelector() { return null; }, contains() { return false; },
+    querySelector() { return null; }, querySelectorAll() { return []; }, contains() { return false; },
     attributes: {},
     matches() { return false; },
     setAttribute(name, value) { this.attributes[name] = String(value); },
@@ -34,7 +34,7 @@ function browser(spotify = false, metadata = false) {
   };
   const context = vm.createContext({
     document, console, Map, Set, Date, JSON, Number, String, Boolean, AbortController, URLSearchParams,
-    IngestorUI: {RequestGate, resultsLabel},
+    IngestorUI,
     localStorage: {setItem() {}, getItem() { return 'admin'; }},
     window: {getSelection: () => null, addEventListener() {}},
     confirm: () => true, setTimeout, clearTimeout, setInterval() {}, requestAnimationFrame: callback => callback(),
