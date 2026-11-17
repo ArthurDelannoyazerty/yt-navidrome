@@ -84,6 +84,71 @@ def add_audio_track(db, environment, recording=RECORDING_2, *, user="admin", leg
     return tid, path, before
 
 
+def test_local_only_catalogue_search_uses_per_user_musicbrainz_identity(db, environment):
+    """Exact local IDs, not display names or shared public cache entries."""
+    cat, _ = setup_catalogue(db)
+    add_audio_track(db, environment, RECORDING_2)
+    add_audio_track(db, environment, RECORDING_4, user="guest")
+    other_artist = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    work = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    with cat.db() as con:
+        # Same artist label, unrelated MusicBrainz identity.
+        cat.ingest(con, "artist", {"id": other_artist, "name": "Composer"})
+        cat.ingest(con, "recording", {
+            "id": RECORDING_2, "title": "My recording",
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "Composer"}}],
+            "relations": [{"target-type": "work", "type": "performance",
+                           "work": {"id": work, "title": "My composition"}}],
+        })
+        cat.ingest(con, "recording", {
+            "id": RECORDING_4, "title": "Other user's recording",
+            "artist-credit": [{"artist": {"id": other_artist, "name": "Composer"}}],
+        })
+
+    def ids(kind, name, user="admin", **kwargs):
+        return {item["id"] for item in cat.search(
+            kind, name, user_id=user, local_only=True, **kwargs)["items"]}
+
+    assert ids("artist", "Composer") == {ARTIST}
+    assert ids("recording", "recording") == {RECORDING_2}
+    assert ids("release", "Preview") == {RELEASE_A}
+    assert ids("release-group", "Soundtrack") == {GROUP}
+    assert ids("work", "composition") == {work}
+    assert ids("recording", "recording", user="guest") == {RECORDING_4}
+    assert ids("artist", "Composer", user="guest") == {ARTIST, other_artist}
+    assert {item["id"] for item in cat.search("artist", "Composer")["items"]} == {ARTIST, other_artist}
+
+    # Remote searches still cache all public hits, but only return locally
+    # linked artists when explicitly filtered.
+    cat.request = lambda path, params: {"artists": [
+        {"id": other_artist, "name": "Composer"},
+        {"id": ARTIST, "name": "Composer"},
+    ], "count": 2}
+    assert ids("artist", "Composer", remote=True) == {ARTIST}
+    # The cache query must filter *before* limiting results.
+    assert ids("artist", "Composer", limit=1) == {ARTIST}
+    with pytest.raises(ValueError, match="Unknown user"):
+        cat.search("artist", "Composer", user_id="not-a-user", local_only=True)
+
+
+def test_local_catalogue_filter_waits_for_relationship_index(db, environment):
+    cat = Catalogue(db)
+    cat.init()
+    add_audio_track(db, environment, RECORDING_1)
+    with cat.db() as con:
+        cat.ingest(con, "artist", {"id": ARTIST, "name": "Creo"})
+        cat.ingest(con, "recording", {"id": RECORDING_1, "title": "Song"})
+    assert cat.search("artist", "Creo", user_id="admin", local_only=True)["items"] == []
+    assert len(cat.search("artist", "Creo")["items"]) == 1
+    with cat.db() as con:
+        cat.ingest(con, "recording", {
+            "id": RECORDING_1, "title": "Song",
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "Creo"}}],
+        })
+    assert {x["id"] for x in cat.search("artist", "Creo", user_id="admin",
+                                        local_only=True)["items"]} == {ARTIST}
+
+
 def test_catalogue_entity_link_timestamps_and_discography_refresh(db):
     catalogue = Catalogue(db)
     catalogue.init()
