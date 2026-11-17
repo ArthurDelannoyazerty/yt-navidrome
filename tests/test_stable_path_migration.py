@@ -147,3 +147,29 @@ def test_new_image_refuses_to_mix_legacy_and_stable_path_schemes(db, environment
     with pytest.raises(RuntimeError, match="Legacy album-derived file paths"):
         with TestClient(create_app(db, start_workers=True)):
             pass
+
+
+def test_temporary_waiting_audio_is_exempt_from_stable_path_startup_guard(db, environment):
+    """Pending approval audio stays in its temporary directory, not the approved layout."""
+    from fastapi.testclient import TestClient
+    from main import create_app
+
+    track_id, original, digest, beets_db = fixture_legacy(db, environment)
+    waiting = environment[1] / "admin" / "Waiting for approval" / original.name
+    waiting.parent.mkdir(parents=True, exist_ok=True)
+    original.replace(waiting)
+    db.execute("UPDATE assets SET path=? WHERE track_id=? AND state='CURRENT'",
+               (str(waiting), track_id))
+    db.execute("""UPDATE tracks SET file_path=?, temporary_candidate_sha256=?,
+               operation_state='NEEDS_APPROVAL' WHERE id=?""", (str(waiting), digest, track_id))
+    with sqlite3.connect(beets_db) as con:
+        con.execute("UPDATE items SET path=? WHERE id=23", (os.fsencode(waiting),))
+
+    migration = Migration(*environment)
+    plan = migration.inspect()
+    assert plan["entries"] == []
+    assert plan["temporary_waiting_skipped"] == 1
+
+    # The approved-path startup check must agree with the offline migration.
+    with TestClient(create_app(db, start_workers=True)) as client:
+        assert client.get("/").status_code == 200
