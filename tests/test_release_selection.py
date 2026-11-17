@@ -180,7 +180,9 @@ assert result["release_id"] is None
 assert raw["musicbrainz_trackid"] == [recording]
 assert not raw.get("musicbrainz_albumid") and not raw.get("album")
 assert not raw.get("date")
-assert any("without verified release metadata" in w for w in result["warnings"])
+# Recording-only approval intentionally skips release lookup. A missing
+# album is not a warning unless the user explicitly selected an edition.
+assert not any("release" in w.lower() for w in result["warnings"])
 assert raw.get("r128_track_gain") and raw.get("replaygain_track_peak")
 assert raw["comment"] == raw["description"]
 print("Recording-only fallback with real beets passed")
