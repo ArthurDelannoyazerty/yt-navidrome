@@ -379,7 +379,9 @@ class Bridge:
         album = None
         if track.get("release_id"):
             album, merged = self.release_metadata(track["mbid"], track["release_id"])
-            if album is None or merged is None or str(merged.track_id).lower() != track["mbid"].lower():
+            # release_metadata() already verifies exact recording membership.
+            # Its merged metadata is a beets item-data dict, not a TrackInfo.
+            if album is None or merged is None:
                 raise ValueError("Confirmed release no longer contains this recording")
         native = self.canonical_names(track["mbid"], track.get("release_id"))
         display = {"title": info.title, "artist": info.artist}
