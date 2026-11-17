@@ -599,7 +599,7 @@ class Catalogue:
                         (identity,)).fetchone()
                     if cached_artist:
                         alias = preferred_english_name(json.loads(cached_artist["data"]), field="name")
-                        if alias:
+                        if alias and alias != (json.loads(cached_artist["data"]).get("name") or ""):
                             credited = alias
                 english_credit.append(credited + str(item.get("joinphrase") or ""))
             return {"release_id": release_id, "recording_id": recording_id,
