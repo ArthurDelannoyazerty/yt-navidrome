@@ -122,7 +122,10 @@ with patch("requests.sessions.Session.send", no_network):
         "mbid": fixture_track.track_id,
         "tags": fixture_track.item_data,
     }
-    result = b.finalize(track, path, selected, operation="test-operation")
+    # Album metadata now requires an explicitly approved edition; recording approval alone
+    # deliberately leaves release-specific dates and album tags unresolved.
+    result = b.finalize(track, path, selected, operation="test-operation",
+                        overrides={"release_id": fixture_album.album_id})
     final = Path(result["file_path"])
     assert final.is_relative_to(Path(os.environ["NAVIDROME_LIB_DIR"]) / user)
 
