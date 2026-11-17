@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from common import LIBRARY
+import common
 from localized_names import is_localized
 
 MAX_TRACKS = 5000
@@ -15,7 +15,7 @@ MAX_TRACKS = 5000
 
 def candidates(store, user_id, *, cap=MAX_TRACKS):
     store.require_user(user_id)
-    root = (LIBRARY / user_id).resolve()
+    root = (common.LIBRARY / user_id).resolve()
     rows = store.rows(
         """SELECT t.id,t.mbid,t.matched_title,t.file_path,t.metadata_edited,
                   t.health,t.operation_state,t.current_asset_id,a.state AS asset_state,
