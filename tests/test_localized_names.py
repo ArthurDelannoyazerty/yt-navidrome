@@ -68,16 +68,18 @@ def audio(tmp_path):
 
 def test_localization_preserves_identity_loudness_art_and_original_names(audio):
     native = {"title": "踊子プリムロゼのテーマ", "artist": "西木康智",
-              "album": "オクトパストラベラー"}
+              "album": "オクトパストラベラー", "albumartist": "西木康智"}
     result = apply_to_opus(audio,
                            {"title": "Primrose, the Dancer", "artist": "Yasunori Nishiki",
-                            "album": "Octopath Traveler"},
+                            "album": "Octopath Traveler", "albumartist": "Yasunori Nishiki"},
                            native, include_album=True)
     tags = OggOpus(str(audio))
     assert result["title"] == "Primrose, the Dancer"
     assert tags["originaltitle"] == ["踊子プリムロゼのテーマ"]
     assert tags["originalartist"] == ["西木康智"]
     assert tags["originalalbum"] == ["オクトパストラベラー"]
+    assert tags["albumartist"] == ["Yasunori Nishiki"]
+    assert tags["originalalbumartist"] == ["西木康智"]
     assert tags["musicbrainz_trackid"] == ["11111111-1111-4111-8111-111111111111"]
     assert tags["musicbrainz_albumid"] == ["22222222-2222-4222-8222-222222222222"]
     assert tags["metadata_block_picture"] == ["test-artwork-not-decoded"]
