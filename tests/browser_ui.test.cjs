@@ -196,6 +196,8 @@ async function fixtureServer(t, data) {
       else if (url.pathname === "/api/sources") result = data.sources || [];
       else if (url.pathname === "/api/catalogue/sources") result = [];
       else if (url.pathname === "/api/catalogue/progress") result = {counts:{}, active:[]};
+      else if (url.pathname === "/api/catalogue/language-preview") result = data.languagePreview || {
+        eligible:0, skipped:{already_localized:0,manual_or_busy:0,invalid_or_missing:0}, sample:[]};
       else if (url.pathname === "/api/catalogue/album-history") result = [];
       else if (url.pathname === "/api/catalogue/search") result = {items:data.catalogueSearch || [], remote:false};
       else if (url.pathname === "/api/catalogue/entity") result = data.catalogueEntity ||
@@ -637,5 +639,29 @@ test("real browser: Catalogue split layout, local scope, result slider and Selec
        right.right <= innerWidth+1, scroller:getComputedStyle(document.querySelector('#catalogueResults')).maxHeight};
   })()`);
   assert.deepEqual(mobile, {stacked:true, withinPage:true, scroller:"240px"});
+  assert.deepEqual(chrome.errors, []);
+});
+
+
+test("real browser: English-name preview stays read-only until explicitly applied", {timeout: 60000}, async t => {
+  const chrome = await browser(t); if (!chrome) return;
+  const data = fixtures();
+  data.languagePreview = {eligible:12,
+    skipped:{already_localized:2,manual_or_busy:3,invalid_or_missing:1},
+    sample:[{id:"11111111-1111-4111-8111-111111111111",current_name:"西木康智 - 踊子プリムロゼのテーマ"}]};
+  const origin = await fixtureServer(t, data);
+  await chrome.send("Page.navigate", {url: origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
+  await chrome.evaluate("document.querySelector('#catalogueLanguagePreview').click()");
+  await chrome.until("!document.querySelector('#catalogueLanguagePlan').hidden");
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageCounts').textContent"), /12 eligible tracks/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageSample').textContent"), /踊子プリムロゼのテーマ/);
+  assert.equal(data.writes.filter(x => x.path === "/api/catalogue/language-apply").length, 0,
+    "Review does not alter audio or enqueue language jobs");
+  assert.ok(data.reads.some(x => x.startsWith("/api/catalogue/language-preview?user_id=admin")));
+  assert.match(await chrome.evaluate("document.querySelector('[data-panel=help]').textContent"),
+    /ORIGINALTITLE/);
   assert.deepEqual(chrome.errors, []);
 });
