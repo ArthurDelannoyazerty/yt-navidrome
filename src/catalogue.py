@@ -121,7 +121,8 @@ class Catalogue:
         # Never downgrade detailed cached metadata to a sparse search snippet.
         combined = {**(json.loads(previous["data"]) if previous else {}), **data}
         content = _payload(combined)
-        name = _safe_name(combined.get("title") or combined.get("name"))
+        name = _safe_name(preferred_english_name(
+            combined, field="title" if combined.get("title") else "name"))
         changed = not previous or previous["data"] != content
         con.execute("""INSERT INTO entities(kind,id,name,data,fetched_at,checked_at,changed_at)
                        VALUES (?,?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET
@@ -285,7 +286,8 @@ class Catalogue:
             filtered = [item for item in items if _id(item.get("id"))
                         and (owned_ids is None or _id(item["id"]) in owned_ids)]
             return {"items": [{"kind": kind, "id": item["id"],
-                               "name": _safe_name(item.get("title") or item.get("name")),
+                               "name": _safe_name(preferred_english_name(
+                                   item, field="title" if item.get("title") else "name")),
                                "data": item, "cached": False}
                               for item in filtered[:limit]],
                     "total": raw.get("count", len(items)), "remote": True,
@@ -295,9 +297,12 @@ class Catalogue:
         with self.db() as con:
             # Filter BEFORE the result cap. A global top-40 followed by a local
             # filter would omit legitimate local artists with common names.
+            escaped = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             matches = con.execute("""SELECT kind,id,name,data,checked_at FROM entities
-                WHERE kind=? AND name LIKE ? ESCAPE '\\' COLLATE NOCASE
-                ORDER BY name""", (kind, "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"))
+                WHERE kind=? AND (name LIKE ? ESCAPE '\\' COLLATE NOCASE
+                OR COALESCE(json_extract(data,'$.title'),json_extract(data,'$.name'),'')
+                   LIKE ? ESCAPE '\\' COLLATE NOCASE)
+                ORDER BY name""", (kind, escaped, escaped))
             results = []
             for row in matches:
                 if owned_ids is not None and row["id"] not in owned_ids:
