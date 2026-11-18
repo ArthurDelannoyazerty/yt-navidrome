@@ -59,6 +59,14 @@ def undo_info(store, user_id, track_id, review_token=None, verify_bytes=False):
     latest = _latest(store, user_id, track_id)
     if not latest:
         return None
+    # If any subsequent track job ran (album, manual correction, repair, etc.),
+    # do not restore an older snapshot over those newer changes.
+    latest_track_job = store.one(
+        "SELECT id FROM jobs WHERE user_id=? AND kind='track' AND target=? ORDER BY id DESC LIMIT 1",
+        (user_id, track_id),
+    )
+    if not latest_track_job or latest_track_job["id"] != latest["id"]:
+        return None
     payload = json.loads(latest["payload"])
     if review_token and payload.get("review_token") != review_token:
         return None
