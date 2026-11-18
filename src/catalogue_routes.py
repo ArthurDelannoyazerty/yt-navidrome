@@ -74,6 +74,12 @@ class LanguageOneChangeInput(BaseModel):
     review_token: str = Field(min_length=32, max_length=32)
     confirmed: Literal[True]
 
+class LanguageReverseInput(BaseModel):
+    user_id: str
+    track_id: str = Field(min_length=32, max_length=64)
+    review_token: str = Field(min_length=32, max_length=32)
+    confirmed: Literal[True]
+
 
 async def cache_worker(catalogue, stopping):
     """One paginated task at a time; shared HTTP limiter handles 1.1s pacing."""
@@ -170,6 +176,14 @@ def install_catalogue_routes(app, store, pipeline):
         albums.require_migration_complete()
         store.require_user(data.user_id)
         return await asyncio.to_thread(queue_one_name_change, store, data.user_id,
+                                       data.track_id, data.review_token)
+
+    @app.post("/api/catalogue/language-reverse")
+    async def language_reverse(data: LanguageReverseInput):
+        from language_reverse import queue_reverse
+        albums.require_migration_complete()
+        store.require_user(data.user_id)
+        return await asyncio.to_thread(queue_reverse, store, data.user_id,
                                        data.track_id, data.review_token)
 
     @app.get("/api/catalogue/language-apply-progress")
