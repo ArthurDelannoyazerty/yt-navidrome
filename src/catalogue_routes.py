@@ -10,7 +10,8 @@ from fastapi import Query
 from album_management import AlbumManager
 from catalogue import Catalogue, ENTITY_KINDS
 from language_jobs import (preview as language_preview, queue as queue_languages,
-                           preview_progress, queue_progress, canary_status, verify_canary)
+                           preview_progress, queue_progress, canary_status, verify_canary,
+                           review_state, batch_status)
 
 
 class SyncRequest(BaseModel):
@@ -56,6 +57,8 @@ class LanguageApplyInput(BaseModel):
     limit: int = Field(default=3, ge=1, le=5000)
     confirmed: Literal[True]
     include_localized: bool = False
+    review_token: str | None = Field(default=None, min_length=32, max_length=32)
+    scope: Literal["names", "names_and_originals"] = "names_and_originals"
 
 
 class LanguageUserInput(BaseModel):
@@ -134,6 +137,14 @@ def install_catalogue_routes(app, store, pipeline):
         store.require_user(user_id)
         return preview_progress.get(user_id)
 
+    @app.get("/api/catalogue/language-review-state")
+    def language_review_state(user_id: str):
+        return review_state(store, user_id)
+
+    @app.get("/api/catalogue/language-batch-status")
+    def language_batch_status(user_id: str):
+        return batch_status(store, user_id)
+
     @app.get("/api/catalogue/language-apply-progress")
     def language_apply_progress(user_id: str):
         store.require_user(user_id)
@@ -154,7 +165,7 @@ def install_catalogue_routes(app, store, pipeline):
         albums.require_migration_complete()
         store.require_user(data.user_id)
         return await asyncio.to_thread(queue_languages, store, data.user_id, data.limit,
-                                       data.include_localized)
+                                       data.include_localized, data.review_token, data.scope)
 
     @app.get("/api/catalogue/graph")
     def graph(user_id: str, view: str = "downloaded", kinds: str = "artist,recording,release,release-group,work",
