@@ -159,6 +159,9 @@ async function fixtureServer(t, data) {
         result = {message: "Change queued", queued: 1, skipped: 0, results: []};
         const parts = url.pathname.split("/");
         const current = data.tracks.find(track => track.id === parts[3]);
+        if (url.pathname === "/api/catalogue/language-name-change") {
+          (data.languageJobStates ||= {})[payload.track_id] = "PENDING";
+        }
         if (url.pathname.endsWith("/artwork") && data.artwork) {
           data.artwork.preference = payload.selection === "auto"
             ? {mode: "auto", candidate_id: "cover-square", framing: "original"}
@@ -202,6 +205,17 @@ async function fixtureServer(t, data) {
       else if (url.pathname === "/api/catalogue/language-canary") result = data.languageCanary || {state:"not_started", verified:false, track_count:0};
       else if (url.pathname === "/api/catalogue/language-review-state") result = data.languageStoredReview || {state:"idle"};
       else if (url.pathname === "/api/catalogue/language-batch-status") result = data.languageBatch || {state:"idle",submitted:0,done:0,running:0,pending:0,failed:0};
+      else if (url.pathname === "/api/catalogue/language-name-changes") {
+        const all = data.languageNameChanges || [];
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const limit = Number(url.searchParams.get("limit") || 100);
+        const items = all.slice(offset, offset + limit).map(x =>
+          ({...x, job_state: data.languageJobStates?.[x.id] || null}));
+        result = {total: all.length, offset, items,
+          next_offset: offset + items.length < all.length ? offset + items.length : null};
+      }
+      else if (url.pathname === "/api/catalogue/language-name-change-status")
+        result = {states: data.languageJobStates || {}};
       else if (url.pathname === "/api/catalogue/language-apply-progress") result = {state:"complete",processed:12,eligible:12,queued:3};
       else if (url.pathname === "/api/catalogue/album-history") result = [];
       else if (url.pathname === "/api/catalogue/search") result = {items:data.catalogueSearch || [], remote:false};
@@ -663,6 +677,23 @@ test("real browser: Language review distinguishes changes and enables only a ver
       proposed_name:"Yasunori Nishiki - Primrose, the Dancer",
       canonical_name:"西木康智 - 踊子プリムロゼのテーマ",
       changes:["Title","Artist"],prediction:"Cache estimate"}]};
+  data.languageNameChanges = [
+    {id:"11111111-1111-4111-8111-111111111111",
+      current_name:"西木康智 - 踊子プリムロゼのテーマ",
+      proposed_name:"Yasunori Nishiki - Primrose, the Dancer",
+      before_label:"西木康智 - 踊子プリムロゼのテーマ",
+      after_label:"Yasunori Nishiki - Primrose, the Dancer", changed_field:"Title / artist"},
+    {id:"22222222-2222-4222-8222-222222222222",
+      current_name:"The Toxic Avenger - It Doesn't Matter",
+      proposed_name:"The Toxic Avenger - It Doesn’t Matter",
+      before_label:"The Toxic Avenger - It Doesn't Matter",
+      after_label:"The Toxic Avenger - It Doesn’t Matter", changed_field:"Title / artist"},
+    {id:"33333333-3333-4333-8333-333333333333",
+      current_name:"LORN - Drawn Out Like an Ache",
+      proposed_name:"Lorn - Drawn Out Like an Ache",
+      before_label:"LORN - Drawn Out Like an Ache",
+      after_label:"Lorn - Drawn Out Like an Ache", changed_field:"Title / artist"},
+  ];
   const origin = await fixtureServer(t, data);
   await chrome.send("Emulation.setDeviceMetricsOverride", {width:1280,height:900,deviceScaleFactor:1,mobile:false});
   await chrome.send("Page.navigate", {url: origin});
@@ -677,9 +708,21 @@ test("real browser: Language review distinguishes changes and enables only a ver
   assert.equal(await chrome.evaluate("document.querySelector('#languageCountScanned').textContent"),"18");
   assert.equal(await chrome.evaluate("document.querySelector('#languageCountOriginals').textContent"),"2");
   assert.match(await chrome.evaluate("document.querySelector('#languageReviewStatus').textContent"),/No audio or tags were modified/);
-  await chrome.evaluate("document.querySelector('#languageExamplesDetails').open=true");
-  assert.match(await chrome.evaluate("document.querySelector('#languageExamples').textContent"),/Primrose, the Dancer/);
-  assert.match(await chrome.evaluate("document.querySelector('#languageExamples').textContent"),/Canonical: 西木康智/);
+  await chrome.until("document.querySelectorAll('#languageNameChangesList .language-change-row').length===3");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesCount').textContent"),"(3)");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('#languageNameChangesList .language-change-row').length"),3);
+  assert.match(await chrome.evaluate("document.querySelector('#languageNameChangesList').textContent"),/Primrose, the Dancer/);
+  assert.match(await chrome.evaluate("document.querySelector('#languageNameChangesList').textContent"),/It Doesn’t Matter/);
+  assert.ok(await chrome.evaluate("document.querySelector('#languageNameChangesList').clientHeight>0"));
+  assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#languageNameChangesList')).overflowY"),"scroll");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),true);
+  await chrome.evaluate("document.querySelector('#languageNameChangesList .language-change-row button').click()");
+  await chrome.until("document.querySelector('#languageNameChangesList .language-change-row button').textContent==='Queued'");
+  const individual = data.writes.find(x=>x.path==="/api/catalogue/language-name-change");
+  assert.equal(individual.body.track_id,"11111111-1111-4111-8111-111111111111");
+  assert.equal(individual.body.review_token,"e".repeat(32));
+  assert.equal(individual.body.confirmed,true);
+  assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),true);
   assert.match(await chrome.evaluate("document.querySelector('#languageScopeSummary').textContent"),/3 candidates/);
   assert.equal(await chrome.evaluate("document.querySelector('#languageCanary').disabled"),false);
   assert.equal(await chrome.evaluate("document.querySelector('#languageBulk').disabled"),true);
