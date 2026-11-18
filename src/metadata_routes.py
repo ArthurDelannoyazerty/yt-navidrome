@@ -161,6 +161,15 @@ def install_metadata_routes(app, store):
         store.require_user(user_id)
         return await searcher.recording_names(recording_id)
 
+    @app.get("/api/musicbrainz/artist-names")
+    async def artist_names(user_id: str, artist_id: str = Query(min_length=36, max_length=36)):
+        from localized_names import preferred_english_name
+        store.require_user(user_id)
+        artist = await searcher.artist(artist_id)
+        english = preferred_english_name(artist, field="name")
+        return {"id": artist["id"], "name": artist["name"],
+                "preferred_name": english if english != artist["name"] else None}
+
     @app.get("/api/musicbrainz/releases")
     async def releases(user_id: str, recording_id: str = Query(..., min_length=36, max_length=36),
                        page: int = Query(1, ge=1, le=20)):
