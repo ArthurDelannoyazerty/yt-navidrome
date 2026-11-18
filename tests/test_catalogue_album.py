@@ -716,6 +716,7 @@ def test_language_ui_scoped_apply_uses_recent_review_and_requires_matching_canar
         batch = client.get("/api/catalogue/language-batch-status",
                            params={"user_id": "admin"}).json()
         assert batch["submitted"] == 1 and batch["pending"] == 1
+        assert batch["review_token"] == token, "Batch must refer to this exact review"
         assert client.post("/api/catalogue/language-apply", json={
             **data, "limit": 5000,
         }).status_code == 400, "Bulk cannot bypass the canary"
