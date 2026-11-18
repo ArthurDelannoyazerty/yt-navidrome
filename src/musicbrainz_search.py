@@ -137,6 +137,7 @@ class MusicBrainzSearch:
         self.store = store
         self.cache: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
         self.pending: dict[tuple, asyncio.Task] = {}
+        self.prefetch = None  # Set by create_app after catalogue initialization.
 
     def request(self, entity: str, query: str, page: int) -> dict:
         policy = HttpPolicy(self.store)
@@ -332,11 +333,16 @@ class MusicBrainzSearch:
             raise ValueError("Invalid MusicBrainz artist ID")
         return await self._cached(("artist_lookup", identity, 0), lambda: self.request_artist(identity))
 
-    async def search(self, entity="recording", title="", artist="", artist_id=None, page=1):
+    async def search(self, entity="recording", title="", artist="", artist_id=None, page=1,
+                     *, bypass_prefetch=False):
         if type(page) is not int or not 1 <= page <= 100:
             raise ValueError("Search page must be between 1 and 100")
         # Validate raw inputs before normalization so a long request cannot evade limits.
         query_for(entity, title.strip(), artist.strip(), artist_id)
+        if self.prefetch is not None and not bypass_prefetch:
+            cached = self.prefetch.cached_search(entity, title, artist, artist_id, page)
+            if cached is not None:
+                return cached
         title, artist = normalized_words(title), normalized_words(artist)
         variants = [("exact", title, artist)]
         cleaned = clean_search_text(title)
@@ -366,4 +372,6 @@ class MusicBrainzSearch:
                                 if strategy == "title_only" else
                                 "Video-only decorations were removed from the search, not from your metadata."
                                 if strategy == "cleaned" else "")
+        if self.prefetch is not None and not bypass_prefetch:
+            self.prefetch.remember_search(entity, title, artist, artist_id, page, result)
         return result

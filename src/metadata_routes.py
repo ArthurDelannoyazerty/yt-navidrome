@@ -1,6 +1,7 @@
 """Reviewed metadata correction endpoints; never trust browser-supplied tags."""
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -9,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Query
+from fastapi import BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -148,13 +149,45 @@ def install_metadata_routes(app, store):
                      title: str = Query("", max_length=200), artist: str = Query("", max_length=200),
                      artist_id: str | None = Query(None, max_length=36), page: int = Query(1, ge=1, le=100)):
         store.require_user(user_id)
+        prefetch = app.state.approval_prefetch
         try:
+            if prefetch.workers_enabled:
+                # Never send a foreground provider request merely to render a
+                # MusicBrainz table. Return a cached page immediately or let the
+                # one durable worker perform a rate-limited search.
+                cached = await asyncio.to_thread(
+                    prefetch.cached_search, entity, title, artist, artist_id, page)
+                if cached is not None:
+                    await asyncio.to_thread(prefetch.enqueue_result_names, cached, priority=2)
+                    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+                await asyncio.to_thread(
+                    prefetch.enqueue_search, entity, title, artist, artist_id, page, priority=0)
+                return JSONResponse(
+                    {"pending": True, "retry_after": 3,
+                     "message": "MusicBrainz search queued. Existing matches remain available."},
+                    status_code=202, headers={"Cache-Control": "no-store", "Retry-After": "3"})
             result = await searcher.search(entity, title, artist, artist_id, page)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except ApiDeferred as exc:
             delay = max(1, math.ceil((exc.retry_at or time.time() + 5) - time.time()))
             return JSONResponse({"error": str(exc), "retry_after": delay}, status_code=429,
                                 headers={"Retry-After": str(delay), "Cache-Control": "no-store"})
+
+    @app.get("/api/musicbrainz/approval-names")
+    def approval_names(user_id: str, recording_ids: str = Query("", max_length=8000),
+                       artist_ids: str = Query("", max_length=8000)):
+        store.require_user(user_id)
+        prefetch = app.state.approval_prefetch
+        return JSONResponse(prefetch.names_batch(
+            [x for x in recording_ids.split(",") if x],
+            [x for x in artist_ids.split(",") if x],
+        ), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/musicbrainz/approval-prefetch-status")
+    def approval_prefetch_status(user_id: str):
+        store.require_user(user_id)
+        return JSONResponse(app.state.approval_prefetch.status(),
+                            headers={"Cache-Control": "no-store"})
 
     @app.get("/api/musicbrainz/recording-names")
     async def recording_names(user_id: str, recording_id: str = Query(min_length=36, max_length=36)):
@@ -183,8 +216,14 @@ def install_metadata_routes(app, store):
                                 headers={"Retry-After": str(delay), "Cache-Control": "no-store"})
 
     @app.get("/api/tracks/{track_id}/metadata-context")
-    def context(track_id: str, user_id: str):
-        return JSONResponse(metadata_context(store, track_id, user_id), headers={"Cache-Control": "no-store"})
+    def context(track_id: str, user_id: str, background_tasks: BackgroundTasks):
+        data = metadata_context(store, track_id, user_id)
+        if app.state.approval_prefetch.workers_enabled:
+            # Scheduling extra metadata is cosmetic, never part of the user's
+            # blocking metadata context response or approval decision.
+            background_tasks.add_task(app.state.approval_prefetch.schedule_context,
+                                      data, priority=0)
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
     @app.post("/api/tracks/{track_id}/metadata-correction")
     def correct(track_id: str, data: CorrectionInput):
