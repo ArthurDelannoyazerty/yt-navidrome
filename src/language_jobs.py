@@ -114,50 +114,6 @@ def _credited_english_name(con, credits):
     return "".join(parts).strip()
 
 
-def _samples(store, ready):
-    """Best-effort cached display predictions; never guess a missing alias."""
-    from catalogue import Catalogue
-
-    result = []
-    try:
-        with Catalogue(store).db() as con:
-            for track in ready[:8]:
-                current = track["matched_title"] or track["id"]
-                recording = con.execute(
-                    "SELECT data FROM entities WHERE kind='recording' AND id=?",
-                    (track["mbid"],),
-                ).fetchone()
-                if not recording:
-                    result.append({"id": track["id"], "current_name": current,
-                                   "proposed_name": None, "canonical_name": None,
-                                   "album": None, "prediction": "Needs MusicBrainz lookup on apply"})
-                    continue
-                raw = json.loads(recording["data"])
-                title = preferred_english_name(raw)
-                artist = _credited_english_name(con, raw.get("artist-credit"))
-                proposed = f"{artist} - {title}" if artist else title
-                native_artist = artist_credit(raw)
-                native = f"{native_artist} - {raw.get('title', '')}" if native_artist else raw.get("title", "")
-                album = None
-                if track["release_id"]:
-                    cached_album = con.execute(
-                        "SELECT data FROM entities WHERE kind='release' AND id=?",
-                        (track["release_id"],),
-                    ).fetchone()
-                    if cached_album:
-                        album = preferred_english_name(json.loads(cached_album["data"]))
-                result.append({"id": track["id"], "current_name": current,
-                               "proposed_name": proposed or None, "canonical_name": native,
-                               "album": album, "prediction": "Cached estimate; verified on apply"})
-    except Exception:
-        # No cached catalogue is not an error: the apply step uses beets'
-        # authoritative MusicBrainz lookup before touching a staged copy.
-        result = [{"id": track["id"], "current_name": track["matched_title"] or track["id"],
-                   "proposed_name": None, "canonical_name": None, "album": None,
-                   "prediction": "Needs MusicBrainz lookup on apply"} for track in ready[:8]]
-    return result
-
-
 def _review_key(user_id):
     return "english-language-review:" + user_id
 
@@ -231,6 +187,7 @@ def preview(store, user_id, include_localized=False):
     ids = {key: [] for key in counts}
     evidence = {}
     examples = []
+    examples_by_kind = {key: 0 for key in counts}
     def on_progress(done, total, eligible, skipped):
         preview_progress.update(user_id, state="running", processed=done, total=total,
                                 eligible=eligible, skipped=skipped, changes=dict(counts))
@@ -248,10 +205,9 @@ def preview(store, user_id, include_localized=False):
                 ids[kind].append(track["id"])
                 evidence[track["id"]] = track["sha256"]
                 # Show substantive examples first, not eight unchanged titles.
-                if kind != "unchanged" and len(examples) < 24:
+                if examples_by_kind[kind] < (3 if kind != "unchanged" else 2):
                     examples.append(item)
-                elif len(examples) < 8:
-                    examples.append(item)
+                    examples_by_kind[kind] += 1
             ready, skipped = candidates(store, user_id,
                                         include_localized=include_localized,
                                         progress=on_progress, inspect=on_candidate)
@@ -294,6 +250,8 @@ def review_state(store, user_id):
     """Return last review summary without rescanning thousands of audio files."""
     store.require_user(user_id)
     saved = store.setting(_review_key(user_id), {}) or {}
+    if not saved:
+        return {"state": "idle"}
     if time.time() - saved.get("created", 0) > 4 * 3600:
         return {"state": "expired"}
     summary = saved.get("summary")
@@ -314,7 +272,9 @@ def batch_status(store, user_id):
         marks = ",".join("?" for _ in chunk)
         rows = store.rows(
             f"""SELECT target,state,id FROM jobs
-                WHERE user_id=? AND kind='track' AND target IN ({marks})
+                WHERE user_id=? AND kind='track'
+                  AND json_extract(payload,'$.mode')='language'
+                  AND target IN ({marks})
                 ORDER BY id DESC""", (user_id, *chunk))
         for row in rows:
             if row["target"] not in states:
