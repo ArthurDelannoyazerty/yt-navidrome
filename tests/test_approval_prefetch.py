@@ -38,10 +38,15 @@ def test_approval_reuses_catalogue_and_persists_verified_names_across_restarts(d
         assert data["recordings"][RECORDING]["title"] == "踊子プリムロゼのテーマ"
         assert data["recordings"][RECORDING]["preferred_title"] == "Primrose, the Dancer"
         assert data["recordings"][RECORDING]["preferred_artist"] == "Yasunori Nishiki"
-        assert data["pending_recordings"] == [RECORDING], "Catalogue snippets can be incomplete"
-        assert data["pending_artists"] == [ARTIST]
-
+        assert data["pending_recordings"] == [], "Full Catalogue aliases need no new provider fetch"
+        assert data["pending_artists"] == []
         prefetch = app.state.approval_prefetch
+        prefetch.workers_enabled = True
+        assert client.get("/api/musicbrainz/approval-names", params=params).json()["remaining"] == 0
+        with catalogue.db() as con:
+            assert not list(con.execute("SELECT * FROM approval_prefetch_jobs"))
+        prefetch.workers_enabled = False
+
         prefetch._store("recording", RECORDING, {
             "id": RECORDING, "title": "踊子プリムロゼのテーマ",
             "preferred_title": "Primrose, the Dancer",
