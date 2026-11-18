@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from audio_tags import inspect_tags
 from common import LIBRARY, ROOT, utcnow
 from pipeline import Pipeline, write_playlist
+from approval_prefetch import ApprovalPrefetch
 from metadata_routes import install_metadata_routes
 from catalogue_routes import install_catalogue_routes, cache_worker
 from review_routes import install_review_routes
@@ -95,6 +96,7 @@ def create_app(store=None, start_workers=True):
     pipeline = Pipeline(store)
     # Public catalogue has its own SQLite file; local decisions stay in ingestor.sqlite.
     catalogue, albums = None, None
+    prefetch = None
 
     @asynccontextmanager
     async def lifespan(app):
@@ -125,6 +127,7 @@ def create_app(store=None, start_workers=True):
             store.init()
             catalogue.init()
             albums.init()
+            prefetch.init()
             pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "migrated")
             handler = EventHandler(store)
             logging.getLogger().addHandler(handler)
@@ -151,7 +154,8 @@ def create_app(store=None, start_workers=True):
                         store.event("ERROR", f"Required binary not found: {binary}", target="startup")
                 tasks = [asyncio.create_task(pipeline.work(), name="worker"),
                          asyncio.create_task(pipeline.schedule(), name="scheduler"),
-                         asyncio.create_task(cache_worker(catalogue, pipeline.stopping), name="catalogue-worker")]
+                         asyncio.create_task(cache_worker(catalogue, pipeline.stopping), name="catalogue-worker"),
+                         asyncio.create_task(prefetch.work(pipeline.stopping), name="approval-prefetch-worker")]
 
                 def report_task_failure(task):
                     if not task.cancelled() and task.exception():
@@ -188,6 +192,9 @@ def create_app(store=None, start_workers=True):
     install_review_routes(app, store)
     install_artwork_routes(app, store)
     catalogue, albums = install_catalogue_routes(app, store, pipeline)
+    prefetch = ApprovalPrefetch(store, catalogue, app.state.musicbrainz_search)
+    app.state.approval_prefetch = prefetch
+    app.state.musicbrainz_search.prefetch = prefetch
     app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 
     @app.middleware("http")
