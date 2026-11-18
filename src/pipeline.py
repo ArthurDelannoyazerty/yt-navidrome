@@ -760,10 +760,30 @@ class Pipeline:
             if asset.get("sha256") and before != asset["sha256"]:
                 raise ValueError("Audio hash changed externally; review or redownload it before tag repair")
             staged = directory / "repaired.opus"
-            await asyncio.to_thread(shutil.copy2, path, staged)
-            await self.bridge(job, track, directory, mode, path=str(staged))
+            if mode == "language_reverse":
+                from language_reverse import key as undo_key
+                payload = json.loads(job["payload"])
+                snapshot = self.store.setting(undo_key(track["user_id"], track["id"]), {}) or {}
+                undo = STATE / "language-undo" / track["user_id"] / (
+                    track["id"] + "-" + payload["restore_sha"] + ".opus")
+                if (payload.get("expected_after") != before
+                        or payload.get("asset_id") != asset["id"]
+                        or payload.get("backup_path") != str(undo)
+                        or undo.is_symlink() or not undo.is_file()
+                        or await asyncio.to_thread(sha256_file, undo) != payload["restore_sha"]
+                        or track["mbid"] != payload.get("mbid")
+                        or track.get("release_id") != payload.get("release_id")):
+                    raise ValueError("Original snapshot or confirmed recording changed; refusing reverse")
+                if snapshot.get("state") == "applied" and (
+                    snapshot.get("after") != before or snapshot.get("before") != payload["restore_sha"]
+                ):
+                    raise ValueError("A newer language update replaced the requested undo snapshot")
+                await asyncio.to_thread(shutil.copy2, undo, staged)
+            else:
+                await asyncio.to_thread(shutil.copy2, path, staged)
+                await self.bridge(job, track, directory, mode, path=str(staged))
             language_report = None
-            if mode == "language":
+            if mode in {"language", "language_reverse"}:
                 from localized_names import language_change_report
                 language_report = await asyncio.to_thread(language_change_report, path, staged)
             manifest = {"asset_id": asset["id"], "path": str(path), "staged": str(staged),
@@ -798,14 +818,43 @@ class Pipeline:
         digest = await asyncio.to_thread(sha256_file, path)
         if digest != manifest["after"]:
             raise ValueError("Audio changed during beets synchronization")
+        payload = json.loads(job["payload"])
+        matched = (payload.get("previous_matched_title") or refreshed.get("matched_title")
+                   if mode == "language_reverse" else
+                   refreshed.get("matched_title") if mode == "language" else None)
         self.store.commit_repair(track["id"], asset["id"],
                                  {"sha256": digest, "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns},
                                  refreshed.get("beets_id"), operation, action=mode,
-                                 matched_title=refreshed.get("matched_title") if mode == "language" else None)
+                                 matched_title=matched)
+        if mode in {"language", "language_reverse"}:
+            from language_reverse import key as undo_key
+            setting = undo_key(track["user_id"], track["id"])
+            if mode == "language":
+                self.store.set_setting(setting, {
+                    "state": "applied", "before": manifest["before"],
+                    "after": manifest["after"], "backup_path": str(
+                        STATE / "language-undo" / track["user_id"] / (
+                            track["id"] + "-" + manifest["before"] + ".opus")),
+                    "previous_matched_title": track.get("matched_title"),
+                    "asset_id": asset["id"], "path": str(path),
+                    "mbid": track["mbid"], "release_id": track.get("release_id"),
+                })
+            else:
+                self.store.set_setting(setting, {
+                    "state": "reversed", "before": digest,
+                    "after": manifest["before"], "asset_id": asset["id"],
+                    "mbid": track["mbid"], "release_id": track.get("release_id"),
+                })
         shutil.rmtree(directory, ignore_errors=True)
-        self.report(job)("INFO", manifest.get("language_report", "English-first tags updated; MusicBrainz identity unchanged.") if mode == "language" else
-                         "Updated source links without downloading or re-encoding" if mode == "source_links" else
-                         "Repaired discovery and loudness tags without redownloading or changing identity")
+        self.report(job)(
+            "INFO",
+            ("Reversed English-name update. " + manifest.get("language_report", "") +
+             " Original Opus tags restored; no download or identity/path change.")
+            if mode == "language_reverse" else
+            manifest.get("language_report", "English-first tags updated; MusicBrainz identity unchanged.")
+            if mode == "language" else
+            "Updated source links without downloading or re-encoding" if mode == "source_links" else
+            "Repaired discovery and loudness tags without redownloading or changing identity")
 
     async def process_track(self, job):
         self.store.job_checkpoint(job["id"])
@@ -879,7 +928,7 @@ class Pipeline:
             finally:
                 if retained:
                     retained.unlink(missing_ok=True)
-        if mode in {"repair", "source_links", "language"}:
+        if mode in {"repair", "source_links", "language", "language_reverse"}:
             await self.repair_tags(job, track, directory, operation, mode)
             return
         if mode == "comment":
