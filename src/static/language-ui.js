@@ -174,7 +174,7 @@ window.LanguageUI = (() => {
       }
     }
   }
-  function changeAllNames() {
+  async function changeAllNames() {
     const c = stateUI.canary || {};
     if (stateUI.busy || !stateUI.review?.review_token || !c.verified ||
         c.scope !== "names" || Boolean(c.include_localized) !== recheck() ||
@@ -183,7 +183,10 @@ window.LanguageUI = (() => {
     // include original-tag-only repairs in the list's Change all action.
     $("languageScope").value = "names";
     renderActions();
-    void apply(5000);
+    const queued = await apply(5000);
+    if (queued && stateUI.review?.review_token)
+      text("languageNameChangesStatus", number(queued.queued) +
+        " reviewed visible-name change(s) queued. Watch the rows or Activity for results.");
   }
 
   function renderReview(data) {
@@ -393,6 +396,7 @@ window.LanguageUI = (() => {
       text("languageApplyStatus", number(result.queued) + " reviewed track job(s) submitted. " +
         "The worker now updates audio tags without changing MusicBrainz IDs or audio paths. " +
         "Follow completion above and see Activity for per-track details.");
+      return result;
     } catch (error) {
       if (active(user, serial)) text("languageApplyStatus", error.message, true);
     } finally {
