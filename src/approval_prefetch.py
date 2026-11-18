@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 from http_policy import ApiDeferred
@@ -109,6 +110,30 @@ class ApprovalPrefetch:
             return None
 
     @staticmethod
+    def _catalogue_complete(con, kind, identity):
+        """A fresh full Catalogue lookup with explicit alias fields is sufficient.
+
+        Sparse credited-artist/search snippets do not include aliases, so they
+        can be displayed provisionally but still require a full fetch.
+        """
+        if kind not in {"recording", "artist"}:
+            return False
+        row = con.execute(
+            "SELECT data,checked_at FROM entities WHERE kind=? AND id=?",
+            (kind, identity),
+        ).fetchone()
+        if not row:
+            return False
+        try:
+            data = json.loads(row["data"])
+            checked = datetime.fromisoformat(row["checked_at"].replace("Z", "+00:00"))
+            return ("aliases" in data and bool(data.get("title" if kind == "recording" else "name"))
+                    and (kind != "recording" or "artist-credit" in data)
+                    and (datetime.now(UTC) - checked).total_seconds() < NAME_TTL)
+        except (ValueError, TypeError, AttributeError):
+            return False
+
+    @staticmethod
     def _job(kind, key, payload, priority):
         return kind, key, _json(payload), int(priority)
 
@@ -120,7 +145,7 @@ class ApprovalPrefetch:
         with self.catalogue.db() as con:
             for index, (kind, key, payload, priority) in enumerate(rows):
                 cached, fresh = self._cached(con, kind, key)
-                if fresh:
+                if fresh or self._catalogue_complete(con, kind, key):
                     continue
                 previous = con.execute(
                     "SELECT priority FROM approval_prefetch_jobs WHERE kind=? AND cache_key=?",
@@ -207,16 +232,18 @@ class ApprovalPrefetch:
 
     def _artist(self, con, identity):
         exact, fresh = self._cached(con, "artist", identity)
+        full_catalogue = self._catalogue_complete(con, "artist", identity)
         data = exact if exact and not exact.get("unavailable") else self._catalogue_entity(con, "artist", identity)
         if not data or not data.get("name"):
-            return None, fresh if exact else False
+            return None, fresh if exact else full_catalogue
         native = str(data["name"])[:200]
         english = preferred_english_name(data, field="name")
         return {"id": identity, "name": native,
-                "preferred_name": english if english != native else None}, fresh
+                "preferred_name": english if english != native else None}, fresh or full_catalogue
 
     def _recording(self, con, identity):
         exact, fresh = self._cached(con, "recording", identity)
+        full_catalogue = self._catalogue_complete(con, "recording", identity)
         unavailable = bool(exact and exact.get("unavailable"))
         if unavailable:
             exact = None
@@ -225,7 +252,7 @@ class ApprovalPrefetch:
         if not item or not item.get("title"):
             # 404s are negatively cached: do not display an endless pending
             # spinner or requeue an ID MusicBrainz explicitly cannot resolve.
-            return None, fresh if unavailable else False, []
+            return None, fresh if unavailable else full_catalogue, []
         item = dict(item)
         credits = item.get("artist_credits") or []
         english = []
@@ -241,7 +268,8 @@ class ApprovalPrefetch:
             english.append((alias or piece.get("name") or "") + str(piece.get("joinphrase") or ""))
         item["preferred_artist"] = "".join(english)[:1000] if has_alias else None
         item.pop("artist_credits", None)  # Internal wiring, not additional public metadata.
-        return item, (fresh and not need_artists) or (unavailable and fresh), need_artists
+        return item, ((fresh or full_catalogue) and not need_artists)
+                       or (unavailable and fresh), need_artists
 
     def names_batch(self, recordings=(), artists=()):
         """One local DB read, no provider/network waiting on the UI thread."""
