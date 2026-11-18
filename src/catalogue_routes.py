@@ -10,7 +10,7 @@ from fastapi import Query
 from album_management import AlbumManager
 from catalogue import Catalogue, ENTITY_KINDS
 from language_jobs import (preview as language_preview, queue as queue_languages,
-                           preview_progress, canary_status, verify_canary)
+                           preview_progress, queue_progress, canary_status, verify_canary)
 
 
 class SyncRequest(BaseModel):
@@ -133,6 +133,11 @@ def install_catalogue_routes(app, store, pipeline):
     def language_progress(user_id: str):
         store.require_user(user_id)
         return preview_progress.get(user_id)
+
+    @app.get("/api/catalogue/language-apply-progress")
+    def language_apply_progress(user_id: str):
+        store.require_user(user_id)
+        return queue_progress.get(user_id)
 
     @app.get("/api/catalogue/language-canary")
     def language_canary(user_id: str):
