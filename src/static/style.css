@@ -482,3 +482,40 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .help-sidebar a { flex-shrink: 0; }
   .help-topic { padding: 16px; }
 }
+
+
+/* Compact, independently scrollable before/after list of visible name changes. */
+.language-name-changes { margin: 18px 0 12px; min-width: 0; }
+.language-changes-heading { display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; margin: 0 0 8px; }
+.language-changes-heading > div { min-width: 0; }
+.language-changes-heading h4 { margin: 0; }
+.language-changes-heading .hint { margin: 4px 0 0; }
+.language-changes-heading button { flex-shrink: 0; }
+.language-changes-scroll { height: 390px; overflow-y: scroll; overflow-x: hidden;
+  scrollbar-gutter: stable; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--sub); padding: 8px; overscroll-behavior: contain; }
+.language-change-row { display: grid; grid-template-columns: minmax(0,1fr) 24px minmax(0,1fr) auto;
+  align-items: center; gap: 12px; margin: 0 0 8px; padding: 12px;
+  border-radius: 7px; border: 1px solid var(--border); background: var(--panel); min-width: 0; }
+.language-change-row:last-child { margin-bottom: 0; }
+.language-change-column { min-width: 0; overflow-wrap: anywhere; }
+.language-change-column small { display: block; color: var(--muted);
+  font-size: 11px; margin-bottom: 5px; line-height: 1.4; }
+.language-change-column strong { font-size: 13px; font-weight: 600; line-height: 1.45; }
+.language-change-arrow { text-align: center; color: var(--muted); }
+.language-change-actions { display: grid; gap: 5px; justify-items: center; }
+.language-change-actions button { min-width: 88px; }
+.language-change-actions small { font-size: 11px; color: var(--muted); text-align: center; }
+.language-changes-more { text-align: center; padding: 10px; font-size: 12px; color: var(--muted); }
+@media (max-width: 700px) {
+  .language-changes-heading { align-items: flex-start; }
+  .language-change-row { grid-template-columns: minmax(0,1fr) 25px minmax(0,1fr); gap: 8px; padding: 10px; }
+  .language-change-actions { grid-column: 1/-1; display: flex; justify-content: flex-end; gap: 10px;
+    align-items: center; }
+  .language-changes-scroll { height: 380px; }
+}
+@media (max-width: 390px) {
+  .language-changes-heading { flex-direction: column; }
+  .language-changes-heading button { width: 100%; }
+}
