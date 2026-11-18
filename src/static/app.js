@@ -10,7 +10,7 @@ const activity = {
   fastPoll: new IngestorUI.AsyncState("fast-poll"),
   slowPoll: new IngestorUI.AsyncState("slow-poll"),
 };
-const navigation = IngestorUI.selectionMachine("navigation", ["music", "approval", "catalogue", "graph", "sources", "activity", "maintenance", "help"], "music");
+const navigation = IngestorUI.selectionMachine("navigation", ["music", "approval", "catalogue", "language", "graph", "sources", "activity", "maintenance", "help"], "music");
 const musicView = IngestorUI.selectionMachine("music-view", ["tracks", "ignored"], "tracks");
 const accountFlow = new IngestorUI.StateMachine("library-selection", "loading", {
   loading: {choose: "choosing", select: "selected", fail: "error", reload: "loading"},
@@ -239,6 +239,7 @@ function setTab(name, activateApproval = true) {
   }
   if (name === "approval" && activateApproval) guard(() => window.MetadataUI?.enter())();
   if (name === "catalogue") guard(() => window.CatalogueUI?.enter())();
+  if (name === "language") guard(() => window.LanguageUI?.enter())();
   if (name === "graph") guard(() => window.GraphUI?.enter())();
   if (name === "maintenance") guard(() => refreshMaintenance(false))();
   if (name === "activity" && state.followLogs) requestAnimationFrame(followLatestEvents);
@@ -311,6 +312,7 @@ function changeUser() {
   window.MetadataUI?.reset();
   window.ArtworkUI?.reset();
   window.CatalogueUI?.reset();
+  window.LanguageUI?.reset();
   window.GraphUI?.reset();
   requestGate.reset();
   state.user = $("user").value;
