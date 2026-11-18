@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import time
-from datetime import UTC, datetime
 from typing import Any
 
 from http_policy import ApiDeferred
@@ -25,7 +24,6 @@ from source_metadata import source_snapshot
 NAME_TTL = 30 * 86400
 SEARCH_TTL = 7 * 86400
 NEGATIVE_TTL = 7 * 86400
-MAX_JOB_ATTEMPTS = 30
 SWEEP_INTERVAL = 300
 MAX_BATCH_IDS = 200
 
@@ -120,7 +118,7 @@ class ApprovalPrefetch:
         now = time.time()
         inserted = 0
         with self.catalogue.db() as con:
-            for kind, key, payload, priority in rows:
+            for index, (kind, key, payload, priority) in enumerate(rows):
                 cached, fresh = self._cached(con, kind, key)
                 if fresh:
                     continue
@@ -133,7 +131,7 @@ class ApprovalPrefetch:
                        (kind,cache_key,payload,priority,requested_at) VALUES (?,?,?,?,?)
                        ON CONFLICT(kind,cache_key) DO UPDATE SET
                        priority=MIN(approval_prefetch_jobs.priority,excluded.priority)""",
-                    (kind, key, payload, priority, now),
+                    (kind, key, payload, priority, now + index * 0.0001),
                 )
                 inserted += not bool(previous)
         return inserted
