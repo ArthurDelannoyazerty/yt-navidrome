@@ -95,7 +95,9 @@ window.LanguageUI = (() => {
       (c.scope || "names_and_originals") === scope();
     const verified = c.verified && same;
     const remaining = Math.max(0, available - (same ? (c.review_tested || 0) : 0));
-    const completedBatch = stateUI.batch?.mode === "bulk" && stateUI.batch?.state === "done";
+    const submittedBatch = stateUI.batch?.mode === "bulk" &&
+      stateUI.batch?.review_token === stateUI.review?.review_token &&
+      stateUI.batch?.scope === scope();
     $("languageScopeSummary").textContent = stateUI.review
       ? number(available) + " candidates selected from the cached review" +
         (same && c.track_count ? " (" + number(remaining) + " not in the test)" : "") + ". " +
@@ -107,7 +109,7 @@ window.LanguageUI = (() => {
       available < 1 || (same && c.track_count && ["running", "ready"].includes(c.state));
     $("languageVerify").disabled = stateUI.busy || !same || c.state !== "ready" || Boolean(c.verified);
     $("languageBulk").disabled = stateUI.busy || !stateUI.review?.review_token ||
-      remaining < 1 || !verified || completedBatch;
+      remaining < 1 || !verified || submittedBatch;
     const label = !c.track_count ? "No test submitted yet." :
       !same ? "This selection differs from the last test. Run another 3-track test." :
       c.state === "running" ? number(c.pending) + " test job(s) still processing. Check Activity for details." :
