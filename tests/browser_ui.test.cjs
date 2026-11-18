@@ -660,7 +660,7 @@ test("real browser: English-name preview stays read-only until explicitly applie
   await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
   await chrome.evaluate("document.querySelector('#catalogueLanguagePreview').click()");
   await chrome.until("!document.querySelector('#catalogueLanguagePlan').hidden");
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageCounts').textContent"), /12 eligible tracks/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageCounts').textContent"), /12 eligible of/);
   assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageSample').textContent"), /Primrose, the Dancer/);
   assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageSample').textContent"), /Original: 西木康智/);
   assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageStatus').textContent"), /No audio or tags changed/);
