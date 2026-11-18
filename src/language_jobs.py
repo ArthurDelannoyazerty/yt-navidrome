@@ -8,10 +8,15 @@ from __future__ import annotations
 import json
 import threading
 import time
+from uuid import uuid4
+
+from mutagen.oggopus import OggOpus
+
 from pathlib import Path
 
 import common
-from localized_names import LANGUAGE_POLICY, artist_credit, is_localized, preferred_english_name
+from localized_names import (LANGUAGE_POLICY, POLICY_TAG, artist_credit,
+                             is_localized, preferred_english_name)
 
 MAX_TRACKS = 5000
 PROGRESS_STEP = 25
@@ -38,7 +43,7 @@ queue_progress = PreviewProgress()
 
 
 def candidates(store, user_id, *, cap=MAX_TRACKS, include_localized=False, progress=None,
-               stop_after=None):
+               stop_after=None, inspect=None):
     store.require_user(user_id)
     root = (common.LIBRARY / user_id).resolve()
     rows = store.rows(
@@ -64,10 +69,19 @@ def candidates(store, user_id, *, cap=MAX_TRACKS, include_localized=False, progr
                     or row["asset_state"] != "CURRENT" or not row["sha256"]
                     or not path.is_file()):
                 summary["invalid_or_missing"] += 1
-            elif is_localized(path) and not include_localized:
-                summary["already_localized"] += 1
             else:
-                ready.append(row)
+                try:
+                    tags = OggOpus(str(path))
+                    already_tagged = LANGUAGE_POLICY in (tags.get(POLICY_TAG) or [])
+                except Exception:
+                    summary["invalid_or_missing"] += 1
+                    continue
+                if already_tagged and not include_localized:
+                    summary["already_localized"] += 1
+                else:
+                    ready.append(row)
+                    if inspect:
+                        inspect(row, tags)
         if progress and (index == 1 or index % PROGRESS_STEP == 0 or index == len(rows)
                          or (stop_after and len(ready) >= stop_after)):
             progress(index, len(rows), len(ready), dict(summary))
@@ -144,39 +158,132 @@ def _samples(store, ready):
     return result
 
 
+def _review_key(user_id):
+    return "english-language-review:" + user_id
+
+
+def _tag(tags, name):
+    return str((tags.get(name) or [""])[0]).strip()
+
+
+def _classify(con, track, tags):
+    """Cache-based estimate from the current file tags, not an online claim."""
+    current_title = _tag(tags, "TITLE")
+    current_artist = _tag(tags, "ARTIST")
+    current_album = _tag(tags, "ALBUM")
+    current = " - ".join(x for x in (current_artist, current_title) if x)
+    base = {"id": track["id"], "current_name": current or track["matched_title"] or track["id"],
+            "proposed_name": None, "canonical_name": None, "album": None,
+            "prediction": "MusicBrainz cache estimate", "changes": []}
+    try:
+        row = con.execute("SELECT data FROM entities WHERE kind='recording' AND id=?",
+                          (track["mbid"],)).fetchone()
+        if not row:
+            return {**base, "kind": "unknown", "prediction": "Recording is not cached; index it in Catalogue first"}
+        recording = json.loads(row["data"])
+        if not recording.get("title") or not recording.get("artist-credit"):
+            return {**base, "kind": "unknown", "prediction": "Recording credits are not cached yet"}
+        native_title = str(recording["title"]).strip()
+        native_artist = artist_credit(recording)
+        preferred_title = preferred_english_name(recording)
+        preferred_artist = _credited_english_name(con, recording["artist-credit"]) or native_artist
+        proposed_album, native_album = None, None
+        if track["release_id"]:
+            row = con.execute("SELECT data FROM entities WHERE kind='release' AND id=?",
+                              (track["release_id"],)).fetchone()
+            if not row:
+                return {**base, "kind": "unknown", "prediction": "Confirmed album edition is not cached yet"}
+            release = json.loads(row["data"])
+            proposed_album = preferred_english_name(release)
+            native_album = str(release.get("title") or "").strip()
+        expected_display = {"TITLE": preferred_title, "ARTIST": preferred_artist}
+        if proposed_album:
+            expected_display["ALBUM"] = proposed_album
+        display_changes = [key.title() for key, expected in expected_display.items()
+                           if expected and _tag(tags, key) != expected]
+        expected_native = {"ORIGINALTITLE": native_title, "ORIGINALARTIST": native_artist}
+        if native_album:
+            expected_native["ORIGINALALBUM"] = native_album
+        original_changes = [key.title() for key, expected in expected_native.items()
+                            if expected and _tag(tags, key) != expected]
+        kind = ("display_changes" if display_changes else
+                "original_updates" if original_changes else "unchanged")
+        return {**base, "kind": kind,
+                "proposed_name": " - ".join(x for x in (preferred_artist, preferred_title) if x),
+                "canonical_name": " - ".join(x for x in (native_artist, native_title) if x),
+                "album": proposed_album,
+                "changes": display_changes + original_changes,
+                "prediction": "Cache estimate; exact MusicBrainz data checked when applying"}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return {**base, "kind": "unknown", "prediction": "Incomplete cached metadata; index in Catalogue"}
+
+
 def preview(store, user_id, include_localized=False):
+    from catalogue import Catalogue
+
     store.require_user(user_id)
     preview_progress.update(user_id, state="running", processed=0, total=0,
                             eligible=0, skipped={}, error=None)
     started = time.monotonic()
     store.event("INFO", "English-name review started (read-only; no audio or tags will change).",
                 user_id, "language-review")
-
+    counts = {"display_changes": 0, "original_updates": 0, "unchanged": 0, "unknown": 0}
+    ids = {key: [] for key in counts}
+    evidence = {}
+    examples = []
     def on_progress(done, total, eligible, skipped):
         preview_progress.update(user_id, state="running", processed=done, total=total,
-                                eligible=eligible, skipped=skipped)
+                                eligible=eligible, skipped=skipped, changes=dict(counts))
         if done and (done % 250 == 0 or done == total):
             store.event("INFO", f"English-name review: examined {done}/{total}; "
-                        f"{eligible} eligible, {sum(skipped.values())} excluded.",
+                        f"{eligible} safe candidates, {sum(skipped.values())} excluded.",
                         user_id, "language-review")
 
     try:
-        ready, skipped = candidates(store, user_id,
-                                    include_localized=include_localized, progress=on_progress)
-        result = {"eligible": len(ready), "skipped": skipped, "sample": _samples(store, ready),
-                  "include_localized": bool(include_localized), "scanned": len(ready) + sum(skipped.values()),
-                  "note": "Read-only review; no tags or audio changed. Cached name predictions may change when the MusicBrainz lookup runs during apply."}
+        with Catalogue(store).db() as con:
+            def on_candidate(track, tags):
+                item = _classify(con, track, tags)
+                kind = item["kind"]
+                counts[kind] += 1
+                ids[kind].append(track["id"])
+                evidence[track["id"]] = track["sha256"]
+                # Show substantive examples first, not eight unchanged titles.
+                if kind != "unchanged" and len(examples) < 24:
+                    examples.append(item)
+                elif len(examples) < 8:
+                    examples.append(item)
+            ready, skipped = candidates(store, user_id,
+                                        include_localized=include_localized,
+                                        progress=on_progress, inspect=on_candidate)
+        # Reorder examples by usefulness and keep the UI bounded.
+        priority = {"display_changes": 0, "original_updates": 1, "unknown": 2, "unchanged": 3}
+        examples.sort(key=lambda item: priority[item["kind"]])
+        result = {"eligible": len(ready), "skipped": skipped, "sample": examples[:8],
+                  "changes": counts, "include_localized": bool(include_localized),
+                  "scanned": len(ready) + sum(skipped.values()),
+                  "note": "Safe candidates are not necessarily changes. Predictions use cached metadata; the worker checks MusicBrainz again before writing."}
+        token = uuid4().hex
+        store.set_setting(_review_key(user_id), {
+            "token": token, "created": time.time(),
+            "include_localized": bool(include_localized),
+            "by_kind": ids, "asset_hashes": evidence,
+        })
+        result["review_token"] = token
     except Exception as exc:
         preview_progress.update(user_id, state="error", error=str(exc))
         store.event("ERROR", f"English-name review failed without changing audio: {exc}",
                     user_id, "language-review")
         raise
     elapsed = round(time.monotonic() - started, 1)
-    preview_progress.update(user_id, state="complete", elapsed_seconds=elapsed, **{
+    preview_progress.update(user_id, state="complete", elapsed_seconds=elapsed,
+                            changes=dict(counts), **{
         k: result[k] for k in ("eligible", "skipped", "scanned")})
     store.event("INFO", f"English-name review finished in {elapsed}s: "
-                f"{result['scanned']} checked, {result['eligible']} eligible, "
-                f"{sum(skipped.values())} excluded. No audio or tags were changed.",
+                f"{counts['display_changes']} possible display-name changes, "
+                f"{counts['original_updates']} original-tag repairs, "
+                f"{counts['unchanged']} no detectable changes, "
+                f"{counts['unknown']} require catalogue metadata. "
+                "No audio or tags changed.",
                 user_id, "language-review")
     return result
 
