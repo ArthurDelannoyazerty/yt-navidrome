@@ -597,3 +597,31 @@ def test_bulk_english_retag_requires_completed_verified_canary(db, environment):
         assert progress.json()["state"] == "complete"
         assert client.get("/api/catalogue/language-progress", params={"user_id": "missing"}).status_code == 400
 
+
+
+def test_indexed_recording_queues_exact_artist_alias_lookup(db):
+    cat = Catalogue(db)
+    cat.init()
+    cat.index_recordings([RECORDING_1])
+    cat.request = lambda endpoint, params: {
+        "id": RECORDING_1, "title": "Original recording",
+        "artist-credit": [{"artist": {"id": ARTIST, "name": "原作者"}}],
+        "releases": [],
+    }
+    first = cat.claim()
+    assert first["kind"] == "recording" and first["section"] == "lookup"
+    cat.process_page(first)
+    artist = db.one("SELECT id FROM users WHERE name='admin'")
+    assert artist is not None
+    with cat.db() as con:
+        scope = con.execute(
+            "SELECT state FROM scopes WHERE kind='artist' AND entity_id=? AND section='lookup'",
+            (ARTIST,),
+        ).fetchone()
+        assert scope is not None and scope["state"] == "PENDING"
+        row = con.execute(
+            "SELECT data FROM entities WHERE kind='artist' AND id=?", (ARTIST,)
+        ).fetchone()
+        assert json.loads(row["data"])["name"] == "原作者"
+
+
