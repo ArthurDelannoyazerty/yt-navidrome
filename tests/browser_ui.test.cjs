@@ -949,3 +949,54 @@ test("real browser: sparse MusicBrainz search adds English under Japanese only a
   assert.ok(data.reads.some(s=>s.includes("/api/musicbrainz/approval-names?")&&s.includes(aid)));
   assert.deepEqual(chrome.errors,[]);
 });
+
+
+test("real browser: all twenty search candidates hydrate with one local request and no provider fan-out", {timeout:60000}, async t => {
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures(), matches={};
+  const identity = i => "12345678-1234-4234-8234-" + String(i+1).padStart(12,"0");
+  data.searchResults=Array.from({length:20},(_,i)=>({
+    id:identity(i), title:"Original 日本語 "+i, artist:"光田康典",
+    length_ms:200000, artists:[],
+  }));
+  data.recordingNames={};
+  for(let i=0;i<20;i++) data.recordingNames[identity(i)]={
+    id:identity(i), title:"Original 日本語 "+i, preferred_title:"English Title "+i,
+    artist:"光田康典", preferred_artist:"Yasunori Mitsuda",
+  };
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelectorAll('#mbResults tbody tr .approval-search-recording-name .approval-english-alias').length===20");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('#mbResults tbody tr').length"),20);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('#mbResults tbody tr .approval-search-recording-artist .approval-english-alias').length"),20);
+  const requests=data.reads.filter(x=>x.startsWith("/api/musicbrainz/approval-names?"));
+  assert.ok(requests.length<=3,"No request per candidate");
+  assert.ok(requests.some(x=>x.includes(identity(19))),"The last candidate must be hydrated");
+  assert.equal(data.reads.filter(x=>x.startsWith("/api/musicbrainz/recording-names?")||
+                                     x.startsWith("/api/musicbrainz/artist-names?")).length,0);
+  assert.match(await chrome.evaluate("document.querySelector('#approvalPrefetchStatus').textContent"),/120 cached/);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: queued searches resolve asynchronously without blocking Beets matches", {timeout:60000}, async t => {
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures();
+  data.searchPending=true;
+  data.searchResults=[{id:"22222222-2222-4222-8222-222222222222",
+    title:"MusicBrainz title",artist:"Japanese Artist",length_ms:200000,releases:[]}];
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelector('#mbStatus').textContent.includes('background')");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('#metadataSuggestions > tr').length"),1);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions > tr button').disabled"),false);
+  data.searchPending=false;
+  await chrome.until("document.querySelectorAll('#mbResults tbody tr').length===1");
+  assert.deepEqual(chrome.errors,[]);
+});
