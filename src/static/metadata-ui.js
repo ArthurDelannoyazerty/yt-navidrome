@@ -287,8 +287,10 @@ window.MetadataUI = (() => {
       if (active()) $("approvalPrefetchStatus").textContent =
         "Could not read cache progress. Approval is still available.";
     }
-    if (active() && user === ui.user)
+    if (active() && user === ui.user) {
+      clearTimeout(ui.prefetchTimer);
       ui.prefetchTimer = setTimeout(refreshPrefetchStatus, 10000);
+    }
   }
   function cacheCleanupNotice(message, error = false) {
     $("approvalCacheNotice").textContent = message;
@@ -600,7 +602,6 @@ window.MetadataUI = (() => {
     invalidateSearch(); ui.contextController?.abort(); stopAudio(); ui.loadSerial += 1;
     ui.user = state.user; const user = ui.user, serial = ++ui.queueSerial;
     clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
-    void refreshPrefetchStatus();
     ui.scope = scope(); const requestedScope = ui.scope;
     flow.queue.start(); flow.detail.finish(); ui.context = null; ui.track = null;
     ui.tracks = []; ui.index = -1; $("approvalPickerList").replaceChildren();
@@ -624,6 +625,7 @@ window.MetadataUI = (() => {
       } else {
         feedback(); $("approvalEmpty").hidden = false;
         $("approvalEmpty").textContent = data.excluded ? "No reviewable music in this view." : "No music in this view.";
+        void refreshPrefetchStatus();
       }
     } catch (error) { if (valid()) { flow.queue.fail(); feedback(error.message || String(error), true); updateButtons(); } }
   }
