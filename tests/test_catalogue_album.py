@@ -884,7 +884,9 @@ def test_smart_filter_matches_list_canary_and_bulk_without_hidden_updates(db, en
     assets = {}
     meaningful_ids = set()
     for before, after, meaningful in samples:
-        track_id, path, sha = add_audio_track(db, environment, RECORDING_1)
+        # One confirmed recording identity per track: the production schema
+        # correctly forbids two rows sharing a user's MusicBrainz MBID.
+        track_id, path, sha = add_audio_track(db, environment, str(uuid.uuid4()))
         track_by_id[track_id] = path
         assets[track_id] = sha
         display_rows.append({"id": track_id, "before_label": before,
