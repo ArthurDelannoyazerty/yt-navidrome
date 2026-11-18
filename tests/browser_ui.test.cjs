@@ -242,7 +242,37 @@ async function fixtureServer(t, data) {
           .map(t => ({id:t.id, title:t.title, source_title:t.origins[0].title, channel:t.origins[0].channel}));
         result = {ids:tracks.map(t=>t.id),tracks,total:tracks.length,matching_total:tracks.length,excluded:0,truncated:false};
       }
-      else if (url.pathname === "/api/musicbrainz/search") result = {entity: "recording", items: data.searchResults || [], total: (data.searchResults || []).length, page: 1, limit: 20};
+      else if (url.pathname === "/api/musicbrainz/search") {
+        if (data.searchPending) {
+          response.statusCode = 202;
+          result = {pending:true,retry_after:1,message:"Search queued"};
+        } else {
+          result = {entity: url.searchParams.get("entity") || "recording",
+            items: data.searchResults || [], total: (data.searchResults || []).length,
+            page: 1, limit: 20};
+        }
+      }
+      else if (url.pathname === "/api/musicbrainz/approval-prefetch-status")
+        result = data.prefetchStatus || {background:true,waiting_tracks:624,cached:120,queued:1800};
+      else if (url.pathname === "/api/musicbrainz/approval-names") {
+        const recording_ids = (url.searchParams.get("recording_ids") || "").split(",").filter(Boolean);
+        const artist_ids = (url.searchParams.get("artist_ids") || "").split(",").filter(Boolean);
+        const recordings = {}, artists = {}, pending_recordings = [], pending_artists = [];
+        for (const id of recording_ids) {
+          if (data.pendingNames?.includes(id)) {pending_recordings.push(id);continue;}
+          recordings[id] = data.recordingNames?.[id] || {
+            id, title:"誓いの旋律", preferred_title:"Melody of Oaths",
+            artist:"末廣健一郎", preferred_artist:"Kenichiro Suehiro"
+          };
+        }
+        for (const id of artist_ids) {
+          if (data.pendingNames?.includes(id)) {pending_artists.push(id);continue;}
+          artists[id] = data.artistNames?.[id] || {id,name:"西木康智",preferred_name:"Yasunori Nishiki"};
+        }
+        result = {recordings,artists,pending_recordings,pending_artists,
+          cached:Object.keys(recordings).length+Object.keys(artists).length,
+          remaining:pending_recordings.length+pending_artists.length};
+      }
       else if (url.pathname === "/api/musicbrainz/recording-names") {
         const id = url.searchParams.get("recording_id");
         result = data.recordingNames?.[id] || {id, title: "誓いの旋律",
@@ -850,7 +880,9 @@ test("real browser: Approval shows native characters and English aliases in both
   assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-track .approval-english-alias').textContent"),"English: Primrose, the Dancer");
   assert.match(await chrome.evaluate("document.querySelector('#mbResults tbody td.approval-artist').textContent"),/西木康智/);
   assert.match(await chrome.evaluate("document.querySelector('#mbResults tbody td.approval-artist .approval-english-alias').textContent"),/Yasunori Nishiki/);
-  assert.ok(data.reads.some(x=>x.startsWith("/api/musicbrainz/recording-names?")));
+  assert.ok(data.reads.some(x=>x.startsWith("/api/musicbrainz/approval-names?")));
+  assert.equal(data.reads.some(x=>x.startsWith("/api/musicbrainz/recording-names?")), false,
+    "Approval must never launch per-row provider lookups");
   assert.deepEqual(chrome.errors,[]);
 });
 
@@ -908,12 +940,12 @@ test("real browser: sparse MusicBrainz search adds English under Japanese only a
   assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-name .approval-english-alias').textContent"),"English: Primrose, the Dancer");
   assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-artist strong').textContent"),"西木康智");
   assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-artist .approval-english-alias').textContent"),"English: Yasunori Nishiki");
-  assert.ok(data.reads.some(s=>s.includes("/api/musicbrainz/recording-names?")&&s.includes(rid)));
+  assert.ok(data.reads.some(s=>s.includes("/api/musicbrainz/approval-names?")&&s.includes(rid)));
   data.searchResults=[{id:aid,name:"西木康智",country:"JP",type:"Person",aliases:[]}];
   await chrome.evaluate("document.querySelector('#mbEntity').value='artist'; document.querySelector('#mbEntity').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelector('#mbResults .approval-search-artist-name .approval-english-alias')");
   assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-artist-name a').textContent"),"西木康智");
   assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-artist-name .approval-english-alias').textContent"),"English: Yasunori Nishiki");
-  assert.ok(data.reads.some(s=>s.includes("/api/musicbrainz/artist-names?")&&s.includes(aid)));
+  assert.ok(data.reads.some(s=>s.includes("/api/musicbrainz/approval-names?")&&s.includes(aid)));
   assert.deepEqual(chrome.errors,[]);
 });
