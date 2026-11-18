@@ -323,6 +323,9 @@ def test_cleanup_keeps_local_approved_and_pending_names_searches_and_artist_link
         prefetch.remember_search_owner(track["id"], "recording", "An old approved search", "")
         prefetch.enqueue_names([str(uuid.uuid4())], priority=20)
         prefetch.enqueue_search("recording", "Obsolete queued query", "", priority=20)
+        with catalogue.db() as con:
+            con.execute("UPDATE approval_prefetch_cache SET expires_at=0 "
+                        "WHERE kind='search' AND cache_key=?", (default_search,))
         prefetch.enqueue_search("recording", "Japanese Pending Track", "Composer", priority=20)
 
         preview = client.get("/api/musicbrainz/approval-prefetch-clean-preview",
