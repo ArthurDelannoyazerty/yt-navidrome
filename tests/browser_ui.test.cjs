@@ -157,6 +157,14 @@ async function fixtureServer(t, data) {
         const payload = body ? JSON.parse(body) : null;
         data.writes.push({path: url.pathname, method: request.method, body: payload});
         result = {message: "Change queued", queued: 1, skipped: 0, results: []};
+        if (url.pathname === "/api/musicbrainz/approval-prefetch-clean") {
+          result = {remove_entries:42,remove_queued:18,reclaim_bytes:81920,
+            keep_entries:78,keep_queued:1782};
+          data.prefetchStatus = {background:true,waiting_tracks:624,cached:78,
+            cache_entries:78,completed:78,queued:1782,total:1860,
+            deferred:77,due:1705,running:0,cache_bytes:1048576-81920,
+            catalogue_db_bytes:8388608,cooldown_seconds:0};
+        }
         const parts = url.pathname.split("/");
         const current = data.tracks.find(track => track.id === parts[3]);
         if (url.pathname === "/api/catalogue/language-name-change") {
@@ -253,7 +261,17 @@ async function fixtureServer(t, data) {
         }
       }
       else if (url.pathname === "/api/musicbrainz/approval-prefetch-status")
-        result = data.prefetchStatus || {background:true,waiting_tracks:624,cached:120,queued:1800};
+        result = data.prefetchStatus || {
+          background:true,waiting_tracks:624,cached:120,cache_entries:120,
+          completed:120,queued:1800,total:1920,deferred:77,due:1723,running:0,
+          cache_bytes:1048576,catalogue_db_bytes:8388608,cooldown_seconds:0,
+        };
+      else if (url.pathname === "/api/musicbrainz/approval-prefetch-clean-preview")
+        result = data.cleanPreview || {
+          remove_entries:42,remove_queued:18,reclaim_bytes:81920,
+          keep_entries:78,keep_queued:1782,
+          protected_recordings:450,protected_artists:123,protected_searches:624,
+        };
       else if (url.pathname === "/api/musicbrainz/approval-names") {
         const recording_ids = (url.searchParams.get("recording_ids") || "").split(",").filter(Boolean);
         const artist_ids = (url.searchParams.get("artist_ids") || "").split(",").filter(Boolean);
@@ -999,5 +1017,60 @@ test("real browser: queued searches resolve asynchronously without blocking Beet
   assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions > tr button').disabled"),false);
   data.searchPending=false;
   await chrome.until("document.querySelectorAll('#mbResults tbody tr').length===1");
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: Approval displays cache progress and confirms safe cleanup without affecting approval", {timeout:60000}, async t => {
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures(), origin=await fixtureServer(t,data);
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:1200,height:900,deviceScaleFactor:1,mobile:false});
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelector('#approvalCacheQueue').textContent.includes('1,800 / 1,920')");
+  assert.match(await chrome.evaluate("document.querySelector('#approvalCacheCompleted').textContent"),/120 \/ 1,920/);
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheDeferred').textContent"),"77");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheSize').textContent"),"1.0 MiB");
+  assert.match(await chrome.evaluate("document.querySelector('#approvalCacheDetail').textContent"),/8\.0 MiB/);
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheProgress').value"),120);
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheProgress').max"),1920);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions > tr button').disabled"),false);
+  await chrome.evaluate("document.querySelector('#approvalCacheClean').click()");
+  await chrome.until("!document.querySelector('#approvalCacheConfirm').hidden");
+  assert.match(await chrome.evaluate("document.querySelector('#approvalCacheImpact').textContent"),/42 unused cached items/);
+  assert.equal(data.writes.some(x=>x.path==="/api/musicbrainz/approval-prefetch-clean"),false);
+  await chrome.evaluate("document.querySelector('#approvalCacheCancel').click()");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheConfirm').hidden"),true);
+  await chrome.evaluate("document.querySelector('#approvalCacheClean').click()");
+  await chrome.until("!document.querySelector('#approvalCacheConfirm').hidden");
+  await chrome.evaluate("document.querySelector('#approvalCacheConfirmButton').click()");
+  await chrome.until("document.querySelector('#approvalCacheNotice').textContent.includes('Removed 42')");
+  assert.equal(data.writes.filter(x=>x.path==="/api/musicbrainz/approval-prefetch-clean").length,1);
+  assert.deepEqual(data.writes.find(x=>x.path==="/api/musicbrainz/approval-prefetch-clean").body,
+    {user_id:"admin",confirmed:true});
+  await chrome.until("document.querySelector('#approvalCacheQueue').textContent.includes('1,782 / 1,860')");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions > tr button').disabled"),false);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: prefetch metrics remain available with no waiting approvals and show provider cooldown", {timeout:60000}, async t => {
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures();
+  data.tracks=[];
+  data.prefetchStatus={background:true,waiting_tracks:0,cached:12,cache_entries:12,
+    completed:12,queued:30,total:42,deferred:10,due:20,running:0,
+    cache_bytes:2097152,catalogue_db_bytes:6291456,cooldown_seconds:52};
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelector('#approvalCacheQueue').textContent.includes('30 / 42')");
+  assert.match(await chrome.evaluate("document.querySelector('#approvalPrefetchStatus').textContent"),/paused for 52s/);
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheSize').textContent"),"2.0 MiB");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheClean').disabled"),false);
   assert.deepEqual(chrome.errors,[]);
 });
