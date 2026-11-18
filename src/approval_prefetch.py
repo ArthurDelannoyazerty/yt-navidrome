@@ -217,12 +217,15 @@ class ApprovalPrefetch:
 
     def _recording(self, con, identity):
         exact, fresh = self._cached(con, "recording", identity)
-        if exact and exact.get("unavailable"):
+        unavailable = bool(exact and exact.get("unavailable"))
+        if unavailable:
             exact = None
         item = (exact if exact else _recording_from_catalogue(
             self._catalogue_entity(con, "recording", identity), identity))
         if not item or not item.get("title"):
-            return None, fresh if exact else False, []
+            # 404s are negatively cached: do not display an endless pending
+            # spinner or requeue an ID MusicBrainz explicitly cannot resolve.
+            return None, fresh if unavailable else False, []
         item = dict(item)
         credits = item.get("artist_credits") or []
         english = []
@@ -238,7 +241,7 @@ class ApprovalPrefetch:
             english.append((alias or piece.get("name") or "") + str(piece.get("joinphrase") or ""))
         item["preferred_artist"] = "".join(english)[:1000] if has_alias else None
         item.pop("artist_credits", None)  # Internal wiring, not additional public metadata.
-        return item, fresh and not need_artists, need_artists
+        return item, (fresh and not need_artists) or (unavailable and fresh), need_artists
 
     def names_batch(self, recordings=(), artists=()):
         """One local DB read, no provider/network waiting on the UI thread."""
