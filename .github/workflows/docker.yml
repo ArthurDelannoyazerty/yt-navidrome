@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --check src/static/app.js && node --check src/static/ui-state.js && node --check src/static/spotify-ui.js && node --check src/static/metadata-ui.js && node --check src/static/help-ui.js && node --check src/static/catalogue-ui.js && node --check src/static/graph-ui.js
+      - run: node --check src/static/app.js && node --check src/static/ui-state.js && node --check src/static/spotify-ui.js && node --check src/static/metadata-ui.js && node --check src/static/help-ui.js && node --check src/static/catalogue-ui.js && node --check src/static/language-ui.js && node --check src/static/graph-ui.js
       - name: Run browser-state regressions
         shell: bash
         run: |
