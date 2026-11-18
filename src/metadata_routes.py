@@ -156,6 +156,11 @@ def install_metadata_routes(app, store):
             return JSONResponse({"error": str(exc), "retry_after": delay}, status_code=429,
                                 headers={"Retry-After": str(delay), "Cache-Control": "no-store"})
 
+    @app.get("/api/musicbrainz/recording-names")
+    async def recording_names(user_id: str, recording_id: str = Query(min_length=36, max_length=36)):
+        store.require_user(user_id)
+        return await searcher.recording_names(recording_id)
+
     @app.get("/api/musicbrainz/releases")
     async def releases(user_id: str, recording_id: str = Query(..., min_length=36, max_length=36),
                        page: int = Query(1, ge=1, le=20)):
