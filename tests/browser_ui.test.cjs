@@ -716,6 +716,7 @@ test("real browser: Language review distinguishes changes and enables only a ver
   assert.ok(await chrome.evaluate("document.querySelector('#languageNameChangesList').clientHeight>0"));
   assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#languageNameChangesList')).overflowY"),"scroll");
   assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),true);
+  await chrome.until("!document.querySelector('#languageNameChangesList .language-change-row button').disabled");
   await chrome.evaluate("document.querySelector('#languageNameChangesList .language-change-row button').click()");
   await chrome.until("document.querySelector('#languageNameChangesList .language-change-row button').textContent==='Queued'");
   const individual = data.writes.find(x=>x.path==="/api/catalogue/language-name-change");
