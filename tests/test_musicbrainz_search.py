@@ -306,3 +306,32 @@ def test_exact_recording_lookup_does_not_invent_english_alias(db, monkeypatch):
     assert data["title"] == "日本語の名前"
     assert data["preferred_title"] is None
     assert data["artist"] == "西木康智"
+
+
+def test_artist_names_endpoint_fetches_verified_english_pseudonym(db, monkeypatch):
+    requests_seen = []
+    def send(self, original, session, prepared, **kwargs):
+        requests_seen.append(prepared)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({
+            "id": ID, "name": "西木康智",
+            "aliases": [{"name": "Yasunori Nishiki", "locale": "en", "primary": True}],
+        }).encode("utf-8")
+        return response
+    monkeypatch.setattr(HttpPolicy, "send", send)
+    with TestClient(create_app(db, start_workers=False)) as client:
+        params = {"user_id": "admin", "artist_id": ID}
+        result = client.get("/api/musicbrainz/artist-names", params=params)
+        assert result.status_code == 200
+        assert result.json() == {
+            "id": ID, "name": "西木康智", "preferred_name": "Yasunori Nishiki",
+        }
+        assert client.get("/api/musicbrainz/artist-names", params=params).json() == result.json()
+        assert client.get("/api/musicbrainz/artist-names", params={
+            **params, "user_id": "nobody",
+        }).status_code == 400
+    assert len(requests_seen) == 1
+    assert "/artist/" + ID in requests_seen[0].url
+
+
