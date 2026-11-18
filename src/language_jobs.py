@@ -322,7 +322,7 @@ def name_changes(store, user_id, review_token, offset=0, limit=100, smart_only=T
         ids = [row["id"] for row in page]
         marks = ",".join("?" for _ in ids)
         jobs = store.rows(
-            f"""SELECT target,state FROM jobs WHERE user_id=? AND kind='track'
+            f"""SELECT target,state,payload FROM jobs WHERE user_id=? AND kind='track'
                 AND json_extract(payload,'$.mode') IN ('language','language_reverse')
                 AND json_extract(payload,'$.review_token')=?
                 AND target IN ({marks}) ORDER BY id DESC""",
@@ -353,7 +353,7 @@ def name_change_status(store, user_id, review_token):
             continue
         marks = ",".join("?" for _ in chunk)
         rows = store.rows(
-            f"""SELECT target,state FROM jobs WHERE user_id=? AND kind='track'
+            f"""SELECT target,state,payload FROM jobs WHERE user_id=? AND kind='track'
                 AND json_extract(payload,'$.mode') IN ('language','language_reverse')
                 AND json_extract(payload,'$.review_token')=?
                 AND target IN ({marks}) ORDER BY id DESC""",
