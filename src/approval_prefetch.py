@@ -80,6 +80,7 @@ class ApprovalPrefetch:
         self.workers_enabled = False
         self.last_seed_at = 0.0
         self.last_seed_count = 0
+        self.pause_until = 0.0
 
     def init(self):
         with self.catalogue.db() as con:
@@ -407,7 +408,8 @@ class ApprovalPrefetch:
 
     def defer(self, job, exc):
         attempt = int(job["attempts"]) + 1
-        if isinstance(exc, ApiDeferred):
+        provider_wait = isinstance(exc, ApiDeferred)
+        if provider_wait:
             when = max(time.time() + 2, float(exc.retry_at or time.time() + 30))
         else:
             when = time.time() + min(1800, 10 * 2 ** min(attempt, 7))
@@ -417,7 +419,20 @@ class ApprovalPrefetch:
                    retry_at=?,last_error=? WHERE kind=? AND cache_key=?""",
                 (attempt, when, str(exc)[:400], job["kind"], job["cache_key"]),
             )
-        if attempt in {1, 5, 15}:
+        if provider_wait:
+            # A provider cooldown is GLOBAL. Without this pause the worker
+            # would claim thousands of unrelated jobs while MusicBrainz is
+            # throttled, flooding Activity with identical deferrals.
+            previous = self.pause_until
+            self.pause_until = max(previous, when)
+            if previous < time.time() and self.pause_until > time.time() + 3:
+                self.store.event(
+                    "WARNING",
+                    f"Approval MusicBrainz prefetch paused for provider cooldown "
+                    f"({int(self.pause_until - time.time())} s). Queued jobs are retained.",
+                    target="approval-prefetch",
+                )
+        elif attempt in {1, 5, 15}:
             logging.warning(
                 "Approval MusicBrainz prefetch %s deferred (attempt %s): %s",
                 job["kind"], attempt, str(exc)[:180],
@@ -459,6 +474,10 @@ class ApprovalPrefetch:
                     except Exception as exc:
                         logging.warning("Approval prefetch library scan deferred: %s", exc)
                         self.last_seed_at = time.time()
+                remaining_pause = self.pause_until - time.time()
+                if remaining_pause > 0:
+                    await asyncio.sleep(min(10, remaining_pause))
+                    continue
                 job = await asyncio.to_thread(self.claim)
                 if not job:
                     await asyncio.sleep(1.5)
@@ -481,14 +500,54 @@ class ApprovalPrefetch:
             self.workers_enabled = False
 
     def status(self):
+        """Durable counts. The denominator grows when new search matches appear."""
+        now = time.time()
+        with self.store.db() as con:
+            waiting_tracks = con.execute(
+                "SELECT COUNT(*) FROM tracks WHERE operation_state='NEEDS_APPROVAL'"
+            ).fetchone()[0]
         with self.catalogue.db() as con:
             counts = {row["state"]: row["n"] for row in con.execute(
                 "SELECT state,COUNT(*) AS n FROM approval_prefetch_jobs GROUP BY state"
             )}
-            ready = con.execute(
-                "SELECT COUNT(*) FROM approval_prefetch_cache WHERE expires_at>?",
-                (time.time(),),
+            kinds = {row["kind"]: row["n"] for row in con.execute(
+                "SELECT kind,COUNT(*) AS n FROM approval_prefetch_cache GROUP BY kind"
+            )}
+            cache_stats = con.execute(
+                """SELECT COUNT(*) AS n,
+                          COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes,
+                          SUM(CASE WHEN expires_at>? THEN 1 ELSE 0 END) AS fresh
+                   FROM approval_prefetch_cache""", (now,)
+            ).fetchone()
+            completed = con.execute(
+                """SELECT COUNT(*) FROM approval_prefetch_cache AS c
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM approval_prefetch_jobs AS j
+                     WHERE j.kind=c.kind AND j.cache_key=c.cache_key)"""
             ).fetchone()[0]
-        return {"waiting_tracks": self.last_seed_count, "cached": ready,
-                "queued": counts.get("PENDING", 0) + counts.get("RUNNING", 0),
-                "background": self.workers_enabled}
+            delayed = con.execute(
+                "SELECT COUNT(*) FROM approval_prefetch_jobs WHERE state='PENDING' AND retry_at>?",
+                (now,)
+            ).fetchone()[0]
+            queued = counts.get("PENDING", 0) + counts.get("RUNNING", 0)
+            due = queued - delayed - counts.get("RUNNING", 0)
+            by_kind = {row["kind"]: row["n"] for row in con.execute(
+                "SELECT kind,COUNT(*) AS n FROM approval_prefetch_jobs GROUP BY kind"
+            )}
+            total = completed + queued
+            page_count = con.execute("PRAGMA page_count").fetchone()[0]
+            page_size = con.execute("PRAGMA page_size").fetchone()[0]
+        return {
+            "waiting_tracks": waiting_tracks,
+            "cached": cache_stats["fresh"] or 0,
+            "cache_entries": cache_stats["n"], "cache_by_kind": kinds,
+            "cache_bytes": cache_stats["bytes"],
+            "catalogue_db_bytes": page_count * page_size,
+            "completed": completed, "total": total,
+            "queued": queued, "queued_by_kind": by_kind,
+            "due": max(0, due), "deferred": delayed,
+            "running": counts.get("RUNNING", 0),
+            "cooldown_seconds": max(0, int(self.pause_until - now + 0.999)),
+            "background": self.workers_enabled,
+            "note": "Total counts distinct cached/queued tasks and grows as searches discover recordings.",
+        }
