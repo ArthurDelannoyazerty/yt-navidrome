@@ -130,12 +130,12 @@ window.MetadataUI = (() => {
     const link = node("a", text); link.href = `https://musicbrainz.org/${kind}/${encodeURIComponent(id)}`;
     link.target = "_blank"; link.rel = "noopener noreferrer"; return link;
   }
-  function bilingualName(container, kind, id, canonical, english, note = "") {
+  function bilingualName(container, kind, id, canonical, english, note = "", aliasLabel = "English") {
     container.replaceChildren();
     const original = canonical || english || "Unknown";
     container.append(id ? mbLink(kind, id, original) : node("strong", original));
     if (english && english !== canonical) {
-      container.append(node("small", "English: " + english, "approval-english-alias"));
+      container.append(node("small", aliasLabel + ": " + english, "approval-english-alias"));
     } else if (note) {
       container.append(node("small", note, "approval-name-note"));
     }
@@ -147,18 +147,21 @@ window.MetadataUI = (() => {
     if (!title || !artist) return;
     if (names) {
       bilingualName(title, "recording", item.mbid, names.title,
-                    names.preferred_title || (item.title !== names.title ? item.title : null));
+                    names.preferred_title ||
+                    (item.title !== names.title ? item.title : null), "",
+                    names.preferred_title ? "English" : "Beets");
       bilingualName(artist, "artist", null, names.artist || item.artist,
                     names.preferred_artist ||
-                    (item.artist !== names.artist ? item.artist : null));
+                    (item.artist !== names.artist ? item.artist : null), "",
+                    names.preferred_artist ? "English" : "Beets");
     } else if (!item.mbid) {
       bilingualName(title, "recording", null, item.title);
       bilingualName(artist, "artist", null, item.artist || "—");
     } else {
       bilingualName(title, "recording", item.mbid, item.title, null,
-                    error ? "MusicBrainz original unavailable" : "Loading original MusicBrainz spelling…");
+                    error ? "MusicBrainz original unavailable" : "Checking canonical MusicBrainz spelling in background…");
       bilingualName(artist, "artist", null, item.artist || "—", null,
-                    error ? "MusicBrainz artist credit unavailable" : "Loading original artist credit…");
+                    error ? "MusicBrainz artist credit unavailable" : "Checking canonical artist credit in background…");
     }
   }
   function fillSearchLabel(row, item, names) {
