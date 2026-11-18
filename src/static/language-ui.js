@@ -2,7 +2,8 @@
 "use strict";
 window.LanguageUI = (() => {
   const $ = id => document.getElementById(id);
-  const emptyChanges = () => ({token: null, items: [], nextOffset: 0, total: 0, loading: false});
+  const emptyChanges = () => ({token: null, items: [], nextOffset: 0,
+    total: 0, allTotal: 0, loaded: false, loading: false});
   const stateUI = {user: null, serial: 0, busy: false, review: null,
     canary: null, batch: null, statusTimer: null, requestTimer: null,
     changes: emptyChanges()};
@@ -10,6 +11,7 @@ window.LanguageUI = (() => {
     serial === stateUI.serial;
   const params = user => "user_id=" + encodeURIComponent(user);
   const recheck = () => $("languageRecheck").checked;
+  const smartOnly = () => $("languageSmartFilter").checked;
   const scope = () => $("languageScope").value;
   const number = value => (Number(value) || 0).toLocaleString();
   const text = (id, value, error = false) => {
@@ -31,7 +33,12 @@ window.LanguageUI = (() => {
   };
   function selectedCount() {
     const c = stateUI.review?.changes || {};
-    return (c.display_changes || 0) + (scope() === "names_and_originals" ? (c.original_updates || 0) : 0);
+    // Do not enable a names-only canary before the server has returned the
+    // authoritative filtered count. Hiding rows is not just a CSS operation.
+    const ready = stateUI.changes.loaded &&
+      stateUI.changes.token === stateUI.review?.review_token;
+    const visible = smartOnly() ? (ready ? stateUI.changes.total : 0) : (c.display_changes || 0);
+    return visible + (scope() === "names_and_originals" ? (c.original_updates || 0) : 0);
   }
   function resetMetrics() {
     for (const id of ["languageCountScanned", "languageCountNames", "languageCountOriginals",
@@ -99,11 +106,13 @@ window.LanguageUI = (() => {
     text("languageNameChangesStatus", "Loading name changes…");
     try {
       const query = new URLSearchParams({user_id: user, review_token: token,
-        offset: String(offset), limit: "80"});
+        offset: String(offset), limit: "80", smart_only: String(smartOnly())});
       const data = await api("/api/catalogue/language-name-changes?" + query);
       if (!active(user, serial) || stateUI.changes !== changes ||
           stateUI.review?.review_token !== token) return;
       changes.total = data.total;
+      changes.allTotal = data.all_total ?? data.total;
+      changes.loaded = true;
       changes.nextOffset = data.next_offset;
       if (!offset) $("languageNameChangesList").replaceChildren();
       for (const incoming of data.items || []) {
@@ -111,12 +120,16 @@ window.LanguageUI = (() => {
         changes.items.push(row);
         $("languageNameChangesList").append(createNameRow(row));
       }
-      $("languageNameChangesCount").textContent = "(" + number(data.total) + ")";
+      $("languageNameChangesCount").textContent = smartOnly()
+        ? "(" + number(data.total) + " of " + number(changes.allTotal) + ")"
+        : "(" + number(data.total) + ")";
       if (!changes.items.length) {
         $("languageNameChangesList").append(el("p", "No visible-name changes in this review.", "hint"));
       }
+      const hidden = changes.allTotal - changes.total;
       text("languageNameChangesStatus", "Showing " + number(changes.items.length) +
         " of " + number(changes.total) + " proposed visible-name changes." +
+        (smartOnly() && hidden > 0 ? " " + number(hidden) + " low-impact proposals hidden." : "") +
         (changes.nextOffset !== null ? " Scroll down for more." : ""));
       renderActions();
       // A large viewport can fit all of a short page without producing a
@@ -178,6 +191,7 @@ window.LanguageUI = (() => {
     const c = stateUI.canary || {};
     if (stateUI.busy || !stateUI.review?.review_token || !c.verified ||
         c.scope !== "names" || Boolean(c.include_localized) !== recheck() ||
+        Boolean(c.smart_only) !== smartOnly() ||
         $("languageChangeAll").disabled) return;
     // Reuse the already reviewed, canary-protected bulk operation. Never
     // include original-tag-only repairs in the list's Change all action.
@@ -226,11 +240,13 @@ window.LanguageUI = (() => {
     const available = selectedCount();
     const c = stateUI.canary || {};
     const same = Boolean(c.include_localized) === recheck() &&
+      Boolean(c.smart_only) === smartOnly() &&
       (c.scope || "names_and_originals") === scope();
     const verified = c.verified && same;
     const remaining = Math.max(0, available - (same ? (c.review_tested || 0) : 0));
     const submittedBatch = stateUI.batch?.mode === "bulk" &&
       stateUI.batch?.review_token === stateUI.review?.review_token &&
+      Boolean(stateUI.batch?.smart_only) === smartOnly() &&
       stateUI.batch?.scope === scope();
     $("languageScopeSummary").textContent = stateUI.review
       ? number(available) + " candidates selected from the cached review" +
@@ -245,16 +261,19 @@ window.LanguageUI = (() => {
     $("languageBulk").disabled = stateUI.busy || !stateUI.review?.review_token ||
       remaining < 1 || !verified || submittedBatch;
     const nameCanaryValid = Boolean(c.verified) && c.scope === "names" &&
-      Boolean(c.include_localized) === recheck();
+      Boolean(c.include_localized) === recheck() &&
+      Boolean(c.smart_only) === smartOnly();
     const namesDone = stateUI.batch?.mode === "bulk" &&
       stateUI.batch?.scope === "names" &&
+      Boolean(stateUI.batch?.smart_only) === smartOnly() &&
       stateUI.batch?.review_token === stateUI.review?.review_token;
     $("languageChangeAll").disabled = stateUI.busy || !stateUI.review?.review_token ||
       stateUI.changes.token !== stateUI.review.review_token ||
-      !stateUI.changes.total || !nameCanaryValid || namesDone;
+      !stateUI.changes.loaded || !stateUI.changes.total || !nameCanaryValid || namesDone;
     $("languageChangeAll").title = nameCanaryValid
-      ? "Queue the remaining reviewed visible-name changes"
-      : "First test up to three visible-name changes and confirm them in Navidrome below";
+      ? "Queue only the displayed selection of reviewed visible-name changes"
+      : "First verify a three-track test with the same smart-filter setting";
+    $("languageSmartFilter").disabled = stateUI.busy;
     for (const row of stateUI.changes.items) updateNameRow(row);
     const label = !c.track_count ? "No test submitted yet." :
       !same ? "This selection differs from the last test. Run another 3-track test." :
@@ -274,6 +293,7 @@ window.LanguageUI = (() => {
     clearInterval(stateUI.statusTimer); clearInterval(stateUI.requestTimer);
     stateUI.statusTimer = null; stateUI.requestTimer = null;
     $("languageRecheck").checked = false;
+    $("languageSmartFilter").checked = true;
     $("languageScope").value = "names";
     $("languageReviewBar").hidden = true;
     $("languageReview").disabled = false;
@@ -391,6 +411,7 @@ window.LanguageUI = (() => {
       const result = await api("/api/catalogue/language-apply", {
         user_id: user, limit, confirmed: true, include_localized: recheck(),
         review_token: stateUI.review.review_token, scope: scope(),
+        smart_only: smartOnly(),
       });
       if (!active(user, serial)) return;
       text("languageApplyStatus", number(result.queued) + " reviewed track job(s) submitted. " +
@@ -437,6 +458,14 @@ window.LanguageUI = (() => {
   $("languageCanary").addEventListener("click", () => apply(3));
   $("languageBulk").addEventListener("click", () => apply(5000));
   $("languageVerify").addEventListener("click", verify);
+  $("languageSmartFilter").addEventListener("change", () => {
+    resetNameList();
+    if (stateUI.review?.review_token) {
+      stateUI.changes.token = stateUI.review.review_token;
+      void loadNextNamePage();
+    }
+    renderActions();
+  });
   $("languageScope").addEventListener("change", renderActions);
   $("languageRecheck").addEventListener("change", () => {
     stateUI.review = null; resetMetrics();
