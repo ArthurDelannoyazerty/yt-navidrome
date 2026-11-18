@@ -259,15 +259,16 @@ async function fixtureServer(t, data) {
         const artist_ids = (url.searchParams.get("artist_ids") || "").split(",").filter(Boolean);
         const recordings = {}, artists = {}, pending_recordings = [], pending_artists = [];
         for (const id of recording_ids) {
-          if (data.pendingNames?.includes(id)) {pending_recordings.push(id);continue;}
-          recordings[id] = data.recordingNames?.[id] || {
-            id, title:"誓いの旋律", preferred_title:"Melody of Oaths",
-            artist:"末廣健一郎", preferred_artist:"Kenichiro Suehiro"
-          };
+          if (data.pendingNames?.includes(id) || !data.recordingNames?.[id]) {
+            pending_recordings.push(id); continue;
+          }
+          recordings[id] = data.recordingNames[id];
         }
         for (const id of artist_ids) {
-          if (data.pendingNames?.includes(id)) {pending_artists.push(id);continue;}
-          artists[id] = data.artistNames?.[id] || {id,name:"西木康智",preferred_name:"Yasunori Nishiki"};
+          if (data.pendingNames?.includes(id) || !data.artistNames?.[id]) {
+            pending_artists.push(id);continue;
+          }
+          artists[id] = data.artistNames[id];
         }
         result = {recordings,artists,pending_recordings,pending_artists,
           cached:Object.keys(recordings).length+Object.keys(artists).length,
