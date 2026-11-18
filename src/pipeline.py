@@ -762,8 +762,14 @@ class Pipeline:
             staged = directory / "repaired.opus"
             await asyncio.to_thread(shutil.copy2, path, staged)
             await self.bridge(job, track, directory, mode, path=str(staged))
+            language_report = None
+            if mode == "language":
+                from localized_names import language_change_report
+                language_report = await asyncio.to_thread(language_change_report, path, staged)
             manifest = {"asset_id": asset["id"], "path": str(path), "staged": str(staged),
                         "before": before, "after": await asyncio.to_thread(sha256_file, staged)}
+            if language_report is not None:
+                manifest["language_report"] = language_report
             atomic_json(manifest_file, manifest)
         actual = await asyncio.to_thread(sha256_file, path)
         self.checkpoint(job, "applying")
@@ -797,7 +803,7 @@ class Pipeline:
                                  refreshed.get("beets_id"), operation, action=mode,
                                  matched_title=refreshed.get("matched_title") if mode == "language" else None)
         shutil.rmtree(directory, ignore_errors=True)
-        self.report(job)("INFO", "Updated English display and original-language tags, without re-downloading or changing MusicBrainz identity" if mode == "language" else
+        self.report(job)("INFO", manifest.get("language_report", "English-first tags updated; MusicBrainz identity unchanged.") if mode == "language" else
                          "Updated source links without downloading or re-encoding" if mode == "source_links" else
                          "Repaired discovery and loudness tags without redownloading or changing identity")
 
