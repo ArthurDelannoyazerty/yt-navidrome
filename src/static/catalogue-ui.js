@@ -2,7 +2,7 @@
 "use strict";
 window.CatalogueUI = (() => {
   const byId = id => document.getElementById(id);
-  const ui = { user: null, detail: null, results: [], recommendations: [], preview: null, busy: false, serial: 0, languageToken: 0, languageBusy: false, languageCanary: null, languageResult: null };
+  const ui = { user: null, detail: null, results: [], recommendations: [], preview: null, busy: false, serial: 0 };
   const current = (user, serial) => user === state.user && serial === ui.serial;
   const element = (tag, text, cls) => {
     const e = document.createElement(tag);
@@ -27,13 +27,6 @@ window.CatalogueUI = (() => {
     for (const id of ["catalogueResults", "catalogueRecommendations", "cataloguePreview", "catalogueHistory"]) byId(id).replaceChildren();
     byId("catalogueResults").append(element("p", "Search to find cached MusicBrainz entries.", "hint"));
     byId("catalogueDetail").replaceChildren(element("p", "Select an entry on the left to browse its discography or tracklist.", "hint"));
-    byId("catalogueLanguagePlan").hidden = true;
-    byId("catalogueLanguageSample").replaceChildren();
-    byId("catalogueLanguageStatus").textContent = "";
-    ui.languageBusy = false; ui.languageToken++; ui.languageCanary = null; ui.languageResult = null;
-    byId("catalogueLanguageActivity").textContent = "";
-    byId("catalogueLanguageRecheck").checked = false;
-    byId("catalogueLanguageVerify").hidden = true;
     for (const id of ["catalogueStatus", "catalogueAlbumStatus", "catalogueProgress"]) byId(id).textContent = "";
     byId("catalogueSources").replaceChildren();
   }
@@ -272,140 +265,6 @@ window.CatalogueUI = (() => {
     const user = state.user, data = await api(`/api/catalogue/album-history?user_id=${encodeURIComponent(user)}`);
     if (user === state.user) displayHistory(data);
   }
-  const languageCurrent = (user, token) => user === state.user && token === ui.languageToken;
-  const recheck = () => byId("catalogueLanguageRecheck").checked;
-  const languageActivity = value => { byId("catalogueLanguageActivity").textContent = value; };
-  async function refreshCanary(user, token) {
-    const canary = await api("/api/catalogue/language-canary?user_id=" + encodeURIComponent(user));
-    if (!languageCurrent(user, token)) return;
-    ui.languageCanary = canary;
-    const sameMode = Boolean(canary.include_localized) === recheck();
-    byId("catalogueLanguageVerify").hidden = canary.state !== "ready" || canary.verified || !sameMode;
-    byId("catalogueLanguageBulk").disabled = !ui.languageResult?.eligible || !canary.verified ||
-      !sameMode || ui.languageBusy;
-    if (canary.state === "running") {
-      languageActivity("Canary processing: " + canary.pending + " remaining. Check Activity and review again after completion.");
-    } else if (canary.state === "failed") {
-      languageActivity("A canary job failed or its tags are missing. Check Activity before retrying.");
-    } else if (canary.verified && sameMode) {
-      languageActivity("Navidrome check acknowledged; remaining tracks can be queued.");
-    } else if (canary.state === "ready" && sameMode) {
-      languageActivity("Canary finished. After Navidrome scans, verify IDs, favorites, ratings and playlists, then acknowledge.");
-    }
-  }
-  async function previewEnglishNames() {
-    if (ui.languageBusy || !state.user) return;
-    const user = state.user, token = ++ui.languageToken, includeLocalized = recheck();
-    ui.languageBusy = true;
-    byId("catalogueLanguagePreview").disabled = true;
-    byId("catalogueLanguagePlan").hidden = true;
-    languageActivity("Review started. Reading local Opus tags; detailed events appear in Activity.");
-    message("Checking approved local audio without changing files...", false, "catalogueLanguageStatus");
-    let polling = true;
-    const progressTask = (async () => {
-      while (polling && languageCurrent(user, token)) {
-        try {
-          const progress = await api("/api/catalogue/language-progress?user_id=" + encodeURIComponent(user));
-          if (polling && languageCurrent(user, token) && progress.state === "running") {
-            languageActivity("Reviewing local tags: " + progress.processed + "/" + (progress.total || "…") +
-              " checked; " + progress.eligible + " eligible so far. See Activity for details.");
-          }
-        } catch (_) { /* Primary review request reports errors. */ }
-        if (polling) await new Promise(resolve => setTimeout(resolve, 1100));
-      }
-    })();
-    try {
-      const params = new URLSearchParams({user_id: user, include_localized: String(includeLocalized)});
-      const result = await api("/api/catalogue/language-preview?" + params);
-      if (!languageCurrent(user, token)) return;
-      ui.languageResult = result;
-      const omitted = result.skipped || {};
-      byId("catalogueLanguageCounts").textContent =
-        result.eligible + " eligible of " + (result.scanned ?? "scanned") + " tracks. Already tagged: " +
-        (omitted.already_localized || 0) + "; busy/manually edited: " +
-        (omitted.manual_or_busy || 0) + "; missing/unsafe: " + (omitted.invalid_or_missing || 0) + ".";
-      const examples = byId("catalogueLanguageSample");
-      examples.replaceChildren(...(result.sample || []).map(track => {
-        const item = element("div", null, "catalogue-language-example");
-        const proposed = element("strong", track.proposed_name || track.current_name);
-        const original = element("small", track.canonical_name && track.canonical_name !== track.proposed_name
-          ? "Original: " + track.canonical_name : "Current: " + track.current_name);
-        const note = element("small", track.prediction || "");
-        item.append(proposed, original, note);
-        if (track.album) item.append(element("small", "Album: " + track.album));
-        item.title = track.id;
-        return item;
-      }));
-      byId("catalogueLanguagePlan").hidden = false;
-      byId("catalogueLanguageCanary").disabled = !result.eligible;
-      message("Read-only review finished. No audio or tags changed. Suggested names use cached MusicBrainz data; final names are checked when applied.",
-        false, "catalogueLanguageStatus");
-      languageActivity("Review complete: " + (result.scanned ?? result.eligible) + " checked; " + result.eligible +
-        " eligible. See Activity for details.");
-      await refreshCanary(user, token);
-    } catch (error) {
-      if (languageCurrent(user, token)) {
-        message(error.message, true, "catalogueLanguageStatus");
-        languageActivity("Review failed. No tags were modified; inspect Activity for the error.");
-      }
-    } finally {
-      polling = false;
-      if (languageCurrent(user, token)) {
-        ui.languageBusy = false;
-        byId("catalogueLanguagePreview").disabled = false;
-      }
-      void progressTask;
-    }
-  }
-  async function applyEnglishNames(limit) {
-    if (ui.languageBusy || !ui.languageResult) return;
-    const user = state.user, token = ui.languageToken, canary = limit === 3;
-    if (!confirm(canary
-      ? "Backed up music, importer and Navidrome? Queue up to THREE English-name updates for checking before bulk?"
-      : "Navidrome song IDs, ratings, favorites and playlists checked after the canary? Backups available? Queue remaining eligible English-name updates?")) return;
-    ui.languageBusy = true;
-    byId("catalogueLanguageCanary").disabled = true;
-    byId("catalogueLanguageBulk").disabled = true;
-    message("Queuing English-name updates...", false, "catalogueLanguageStatus");
-    try {
-      const result = await api("/api/catalogue/language-apply",
-        {user_id: user, limit, confirmed: true, include_localized: recheck()});
-      if (!languageCurrent(user, token)) return;
-      message(result.queued + " track(s) queued. The worker updates display/original tags on stable files; no download or MusicBrainz ID changes. Watch Activity for completion/errors.",
-        false, "catalogueLanguageStatus");
-      languageActivity(result.queued + " English-name jobs queued. Review Activity; check Navidrome after scanning.");
-      await refreshCanary(user, token);
-    } catch (error) {
-      if (languageCurrent(user, token)) message(error.message, true, "catalogueLanguageStatus");
-    } finally {
-      ui.languageBusy = false;
-      if (languageCurrent(user, token)) {
-        byId("catalogueLanguagePreview").disabled = false;
-        await refreshCanary(user, token).catch(error =>
-          message(error.message, true, "catalogueLanguageStatus"));
-      }
-    }
-  }
-  async function verifyEnglishCanary() {
-    if (ui.languageBusy || !state.user) return;
-    const user = state.user, token = ui.languageToken;
-    if (!confirm("I checked the canary tracks in Navidrome after scanning: song IDs, favorites, ratings and playlists remain intact.")) return;
-    ui.languageBusy = true;
-    try {
-      await api("/api/catalogue/language-canary-verify", {user_id: user, confirmed: true});
-      if (!languageCurrent(user, token)) return;
-      message("Canary verified. Remaining eligible tracks can now be updated without changing MusicBrainz IDs or file paths.",
-        false, "catalogueLanguageStatus");
-      await refreshCanary(user, token);
-    } catch (error) {
-      if (languageCurrent(user, token)) message(error.message, true, "catalogueLanguageStatus");
-    } finally {
-      ui.languageBusy = false;
-      if (languageCurrent(user, token)) await refreshCanary(user, token).catch(error =>
-        message(error.message, true, "catalogueLanguageStatus"));
-    }
-  }
-
   function setResultsHeight() {
     const slider = byId("catalogueResultsHeight");
     const value = Math.min(720, Math.max(200, Number(slider.value) || 360));
@@ -425,15 +284,6 @@ window.CatalogueUI = (() => {
   byId("catalogueRecommend").addEventListener("click", () => recommend().catch(error => message(error.message, true, "catalogueAlbumStatus")));
   byId("catalogueHistoryRefresh").addEventListener("click", () => loadHistory().catch(error => message(error.message, true, "catalogueAlbumStatus")));
   byId("catalogueRefreshProgress").addEventListener("click", () => refreshProgress().catch(error => message(error.message, true)));
-  byId("catalogueLanguagePreview").addEventListener("click", () =>
-    previewEnglishNames().catch(error => message(error.message, true, "catalogueLanguageStatus")));
-  byId("catalogueLanguageCanary").addEventListener("click", () => applyEnglishNames(3));
-  byId("catalogueLanguageBulk").addEventListener("click", () => applyEnglishNames(5000));
-  byId("catalogueLanguageVerify").addEventListener("click", verifyEnglishCanary);
-  byId("catalogueLanguageRecheck").addEventListener("change", () => {
-    ui.languageResult = null; byId("catalogueLanguagePlan").hidden = true;
-    message("Review again to include or exclude already tagged tracks.", false, "catalogueLanguageStatus");
-  });
   byId("catalogueIndexLibrary").addEventListener("click", async () => {
     if (!confirm("Queue local recordings for rate-limited background MusicBrainz indexing? A large library may take hours; audio is not modified.")) return;
     try {
