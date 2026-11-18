@@ -250,6 +250,50 @@ class MusicBrainzSearch:
             self.pending[key] = task
         return copy.deepcopy(await asyncio.shield(self.pending[key]))
 
+    def request_recording_names(self, recording_id):
+        """Exact MusicBrainz original/English names for a Beets candidate.
+
+        Unlike free-text search, these names belong to one immutable recording
+        MBID and cannot accidentally change an approval's selected identity.
+        """
+        policy = HttpPolicy(self.store)
+        with requests.Session() as session:
+            request = requests.Request(
+                "GET", API_ROOT + "recording/" + recording_id,
+                params={"fmt": "json", "inc": "aliases+artist-credits"},
+                headers={"User-Agent": os.getenv("HTTP_USER_AGENT") or USER_AGENT,
+                         "Accept": "application/json"},
+            )
+            prepared = session.prepare_request(request)
+            response = policy.send(requests.sessions.Session.send, session, prepared,
+                                   timeout=(5, 15), allow_redirects=False)
+            try:
+                if response.status_code == 404:
+                    raise ValueError("Recording was not found on MusicBrainz")
+                if response.status_code != 200:
+                    raise ApiDeferred(
+                        f"MusicBrainz recording lookup returned HTTP {response.status_code}",
+                        retry_at=time.time() + 60,
+                    )
+                value = response.json()
+                if (valid_id(value.get("id")) != recording_id or not value.get("title")):
+                    raise ValueError("MusicBrainz returned an invalid recording identity")
+                native = str(value["title"])[:1000]
+                english = preferred_english_name(value)
+                return {"id": recording_id, "title": native,
+                        "preferred_title": english if english != native else None,
+                        "artist": artist_credit(value.get("artist-credit"))}
+            finally:
+                response.close()
+
+    async def recording_names(self, recording_id):
+        identity = valid_id(recording_id)
+        if not identity:
+            raise ValueError("Invalid MusicBrainz recording ID")
+        return await self._cached(
+            ("recording_names", identity, 0),
+            lambda: self.request_recording_names(identity))
+
     async def artist(self, artist_id):
         identity = valid_id(artist_id)
         if not identity:
