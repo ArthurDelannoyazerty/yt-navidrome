@@ -243,3 +243,12 @@ def test_search_never_guesses_english_names_when_alias_is_missing():
     assert item["preferred_title"] == "原題"
     assert item["preferred_artist"] == "アーティスト"
 
+
+def test_search_preserves_recording_credited_name_without_english_artist_alias():
+    item = normalize({"count": 1, "recordings": [{
+        "id": RID, "title": "Song",
+        "artist-credit": [{"name": "Special Guest Credit",
+                           "artist": {"id": ID, "name": "Official Artist Name"}}],
+    }]}, "recording", 1)["items"][0]
+    assert item["preferred_artist"] == "Special Guest Credit"
+    assert item["artist"] == "Special Guest Credit"
