@@ -740,3 +740,50 @@ test("real browser: Language review distinguishes changes and enables only a ver
   assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
   assert.deepEqual(chrome.errors,[]);
 });
+
+
+test("real browser: full Language list scrolls and Change all queues only reviewed names", {timeout:60000}, async t => {
+  const chrome = await browser(t); if (!chrome) return;
+  const data = fixtures();
+  data.languagePreview = {eligible:102, scanned:105, review_token:"f".repeat(32),
+    changes:{display_changes:86,original_updates:16,unchanged:0,unknown:0},
+    skipped:{already_localized:3,manual_or_busy:0,invalid_or_missing:0}, sample:[]};
+  data.languageNameChanges = Array.from({length:86},(_,i)=>({
+    id:"name-" + String(i).padStart(6,"0"),
+    current_name:"Artist " + i + " - Old title",
+    proposed_name:"Artist " + i + " - English title",
+    before_label:"Artist " + i + " - Old title",
+    after_label:"Artist " + i + " - English title",
+    changed_field:"Title / artist",
+  }));
+  data.languageCanary = {state:"ready",verified:true,scope:"names",include_localized:false,
+    track_count:3,review_tested:3,pending:0,failed:0};
+  const origin = await fixtureServer(t, data);
+  await chrome.send("Emulation.setDeviceMetricsOverride",
+    {width:1200,height:900,deviceScaleFactor:1,mobile:false});
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=language]').click()");
+  await chrome.until("!document.querySelector('#languageReview').disabled");
+  await chrome.evaluate("document.querySelector('#languageReview').click()");
+  await chrome.until("document.querySelectorAll('#languageNameChangesList .language-change-row').length===80");
+  const scroller=await chrome.evaluate("(() => { const el=document.querySelector('#languageNameChangesList'); return {overflowY:getComputedStyle(el).overflowY,height:el.clientHeight,scrollHeight:el.scrollHeight,count:el.querySelectorAll('.language-change-row').length}; })()");
+  assert.equal(scroller.overflowY,"scroll");
+  assert.ok(scroller.height>=350 && scroller.height<=410);
+  assert.ok(scroller.scrollHeight>scroller.height);
+  assert.equal(scroller.count,80,"First page stays bounded");
+  await chrome.evaluate("(() => { const el=document.querySelector('#languageNameChangesList'); el.scrollTop=el.scrollHeight; el.dispatchEvent(new Event('scroll')); })()");
+  await chrome.until("document.querySelectorAll('#languageNameChangesList .language-change-row').length===86");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesCount').textContent"),"(86)");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),false,
+    "A verified visible-names canary enables Change all");
+  await chrome.evaluate("document.querySelector('#languageChangeAll').click()");
+  await chrome.until("document.querySelector('#languageNameChangesStatus').textContent.includes('queued')");
+  const bulk=data.writes.find(x=>x.path==="/api/catalogue/language-apply");
+  assert.equal(bulk.body.limit,5000);
+  assert.equal(bulk.body.scope,"names","Original-tag-only updates must not join Change all");
+  assert.equal(bulk.body.review_token,"f".repeat(32));
+  assert.equal(bulk.body.confirmed,true);
+  assert.deepEqual(chrome.errors,[]);
+});
