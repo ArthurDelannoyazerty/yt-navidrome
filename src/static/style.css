@@ -446,3 +446,39 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .language-action { grid-template-columns: 26px minmax(0,1fr); }
   .language-action button { grid-column: 1/-1; width: 100%; }
 }
+
+
+/* Help navigation follows the real tab order; topics stay readable on phones. */
+.help-layout { display: grid; grid-template-columns: 192px minmax(0,1fr);
+  align-items: start; gap: 22px; margin: 18px 0; }
+.help-sidebar { position: sticky; top: 16px; display: grid; gap: 2px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+  background: var(--panel); max-height: calc(100vh - 32px); overflow: auto; }
+.help-sidebar > strong { font-size: 12px; color: var(--muted);
+  padding: 6px 10px; text-transform: uppercase; letter-spacing: .04em; }
+.help-sidebar a { display: block; padding: 8px 10px; border-radius: 5px;
+  font-size: 13px; text-decoration: none; color: inherit; }
+.help-sidebar a:hover, .help-sidebar a:focus-visible { background: var(--secondary); }
+.help-sidebar a[aria-current="location"] { color: var(--accent); background: var(--good); font-weight: 600; }
+.help-topics { min-width: 0; display: grid; gap: 14px; }
+.help-topic { scroll-margin-top: 20px; border: 1px solid var(--border);
+  padding: 22px; background: var(--panel); border-radius: 10px; min-width: 0; }
+.help-topic h3 { margin: 0 0 12px; font-size: 21px; }
+.help-topic h4 { margin-bottom: 8px; }
+.help-topic p, .help-topic li { overflow-wrap: anywhere; }
+.help-topic p { max-width: 80ch; }
+.help-topic li { margin: 8px 0; }
+.help-topic .quick-start { gap: 12px; margin: 16px 0 20px; }
+.help-topic .quick-start li { padding: 12px; background: var(--sub);
+  border: 1px solid var(--border); border-radius: 6px; }
+.help-topic .quick-start p { font-size: 12px; }
+.help-topic .help-detail { margin: 10px 0; }
+.help-topic .workflow-diagram { padding: 12px; }
+@media (max-width: 840px) {
+  .help-layout { grid-template-columns: minmax(0,1fr); gap: 12px; }
+  .help-sidebar { position: static; display: flex; flex-wrap: nowrap; overflow-x: auto;
+    max-height: none; scrollbar-width: thin; white-space: nowrap; }
+  .help-sidebar > strong { display: none; }
+  .help-sidebar a { flex-shrink: 0; }
+  .help-topic { padding: 16px; }
+}
