@@ -144,6 +144,7 @@ def _classify(con, track, tags):
         preferred_title = preferred_english_name(recording)
         preferred_artist = _credited_english_name(con, recording["artist-credit"]) or native_artist
         proposed_album, native_album = None, None
+        proposed_albumartist, native_albumartist = None, None
         if track["release_id"]:
             row = con.execute("SELECT data FROM entities WHERE kind='release' AND id=?",
                               (track["release_id"],)).fetchone()
@@ -152,14 +153,21 @@ def _classify(con, track, tags):
             release = json.loads(row["data"])
             proposed_album = preferred_english_name(release)
             native_album = str(release.get("title") or "").strip()
+            if release.get("artist-credit"):
+                native_albumartist = artist_credit(release)
+                proposed_albumartist = _credited_english_name(con, release["artist-credit"]) or native_albumartist
         expected_display = {"TITLE": preferred_title, "ARTIST": preferred_artist}
         if proposed_album:
             expected_display["ALBUM"] = proposed_album
+        if proposed_albumartist:
+            expected_display["ALBUMARTIST"] = proposed_albumartist
         display_changes = [key.title() for key, expected in expected_display.items()
                            if expected and _tag(tags, key) != expected]
         expected_native = {"ORIGINALTITLE": native_title, "ORIGINALARTIST": native_artist}
         if native_album:
             expected_native["ORIGINALALBUM"] = native_album
+        if native_albumartist:
+            expected_native["ORIGINALALBUMARTIST"] = native_albumartist
         original_changes = [key.title() for key, expected in expected_native.items()
                             if expected and _tag(tags, key) != expected]
         kind = ("display_changes" if display_changes else
