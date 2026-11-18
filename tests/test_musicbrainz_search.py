@@ -260,11 +260,16 @@ def test_exact_recording_lookup_returns_canonical_characters_and_english_alias(d
         requests_seen.append(prepared)
         response = requests.Response()
         response.status_code = 200
-        response._content = json.dumps({
-            "id": RID, "title": "踊子プリムロゼのテーマ",
-            "aliases": [{"name": "Primrose, the Dancer", "locale": "en", "primary": True}],
-            "artist-credit": [{"name": "西木康智", "artist": {"id": ID, "name": "西木康智"}}],
-        }).encode("utf-8")
+        if "/artist/" in prepared.url:
+            payload = {"id": ID, "name": "西木康智",
+                       "aliases": [{"name": "Yasunori Nishiki", "locale": "en", "primary": True}]}
+        else:
+            payload = {
+                "id": RID, "title": "踊子プリムロゼのテーマ",
+                "aliases": [{"name": "Primrose, the Dancer", "locale": "en", "primary": True}],
+                "artist-credit": [{"name": "西木康智", "artist": {"id": ID, "name": "西木康智"}}],
+            }
+        response._content = json.dumps(payload).encode("utf-8")
         return response
     monkeypatch.setattr(HttpPolicy, "send", send)
     app = create_app(db, start_workers=False)
@@ -278,10 +283,11 @@ def test_exact_recording_lookup_returns_canonical_characters_and_english_alias(d
         assert data["title"] == "踊子プリムロゼのテーマ"
         assert data["preferred_title"] == "Primrose, the Dancer"
         assert data["artist"] == "西木康智"
+        assert data["preferred_artist"] == "Yasunori Nishiki"
         assert client.get(endpoint, params=params).json() == data
         assert client.get(endpoint, params={**params, "user_id": "unknown"}).status_code == 400
         assert client.get(endpoint, params={**params, "recording_id": "invalid"}).status_code == 422
-    assert len(requests_seen) == 1, "Exact lookups should be cached"
+    assert len(requests_seen) == 2, "Recording and its credited artist should be cached"
     assert requests_seen[0].url.startswith("https://musicbrainz.org/ws/2/recording/" + RID)
     assert "artist-credits" in requests_seen[0].url and "aliases" in requests_seen[0].url
 
