@@ -751,3 +751,109 @@ def test_language_ui_scoped_apply_uses_recent_review_and_requires_matching_canar
         assert remainder.json()["queued"] == 0, "Already-tested track excluded from remainder"
         assert db.one("SELECT operation_state FROM tracks WHERE id=?", (native_id,))["operation_state"] == "IDLE"
         assert db.one("SELECT operation_state FROM tracks WHERE id=?", (unknown_id,))["operation_state"] == "IDLE"
+
+
+def test_language_name_changes_list_only_visible_diffs_and_paginates(db, environment):
+    from language_jobs import preview, name_changes
+    from mutagen.oggopus import OggOpus
+    cat, _ = setup_catalogue(db)
+    first, _, _ = add_audio_track(db, environment, RECORDING_1)
+    second, _, _ = add_audio_track(db, environment, RECORDING_2)
+    original_only, path, _ = add_audio_track(db, environment, RECORDING_4)
+    with cat.db() as con:
+        for mbid, title in ((RECORDING_1, "First Song"),
+                             (RECORDING_2, "Second Song"),
+                             (RECORDING_4, "Track")):
+            cat.ingest(con, "recording", {
+                "id": mbid, "title": title,
+                "artist-credit": [{"name": "Artist",
+                                   "artist": {"id": ARTIST, "name": "Artist"}}],
+            })
+    # Make the third track visibly correct but without ORIGINAL* tags.
+    audio = OggOpus(path)
+    audio["album"] = ["Preview"]
+    audio["albumartist"] = ["Composer"]
+    audio.save()
+    db.execute("UPDATE assets SET sha256=? WHERE track_id=?",
+               (sha256_file(path), original_only))
+    review = preview(db, "admin")
+    assert review["changes"]["display_changes"] == 2
+    assert review["changes"]["original_updates"] == 1
+    token = review["review_token"]
+    first_page = name_changes(db, "admin", token, offset=0, limit=1)
+    second_page = name_changes(db, "admin", token, offset=1, limit=1)
+    assert first_page["total"] == second_page["total"] == 2
+    assert first_page["next_offset"] == 1 and second_page["next_offset"] is None
+    assert {first_page["items"][0]["id"], second_page["items"][0]["id"]} == {first, second}
+    for item in first_page["items"] + second_page["items"]:
+        assert item["before_label"] == "Artist - Track"
+        assert item["after_label"].startswith("Artist - ")
+        assert item["changed_field"] == "Title / artist"
+        assert item["job_state"] is None
+    assert original_only not in {x["id"] for x in first_page["items"] + second_page["items"]}
+    with pytest.raises(ValueError, match="expired or changed"):
+        name_changes(db, "admin", "0" * 32)
+    with pytest.raises(ValueError, match="Invalid"):
+        name_changes(db, "admin", token, limit=101)
+
+
+def test_language_name_change_queues_exact_reviewed_track_without_resetting_canary(db, environment):
+    from language_jobs import preview, canary_status, name_change_status
+    cat, _ = setup_catalogue(db)
+    target, _, _ = add_audio_track(db, environment, RECORDING_1)
+    other, _, _ = add_audio_track(db, environment, RECORDING_2)
+    with cat.db() as con:
+        cat.ingest(con, "recording", {"id": RECORDING_1, "title": "English Song",
+            "artist-credit": [{"name": "Artist", "artist": {"id": ARTIST, "name": "Artist"}}]})
+    review = preview(db, "admin")
+    token = review["review_token"]
+    with TestClient(create_app(db, start_workers=False)) as client:
+        request = {"user_id": "admin", "track_id": target,
+                   "review_token": token, "confirmed": True}
+        assert client.post("/api/catalogue/language-name-change", json={
+            **request, "review_token": "0" * 32,
+        }).status_code == 400
+        assert client.post("/api/catalogue/language-name-change", json={
+            **request, "track_id": other,
+        }).status_code == 400, "Track must be among reviewed visible-name changes"
+        response = client.post("/api/catalogue/language-name-change", json=request)
+        assert response.status_code == 200, response.text
+        assert response.json()["track_id"] == target
+        assert response.json()["queued"] == 1
+        jobs = db.rows("SELECT target,payload,state FROM jobs WHERE kind='track'")
+        assert len(jobs) == 1 and jobs[0]["target"] == target
+        assert json.loads(jobs[0]["payload"])["review_token"] == token
+        assert jobs[0]["state"] == "PENDING"
+        assert canary_status(db, "admin")["state"] == "not_started"
+        status = client.get("/api/catalogue/language-name-change-status", params={
+            "user_id": "admin", "review_token": token,
+        })
+        assert status.status_code == 200
+        assert status.json()["states"] == {target: "PENDING"}
+        page = client.get("/api/catalogue/language-name-changes", params={
+            "user_id": "admin", "review_token": token,
+        })
+        assert page.status_code == 200
+        assert page.json()["items"][0]["job_state"] == "PENDING"
+        assert client.post("/api/catalogue/language-name-change", json=request).status_code == 400
+        assert client.get("/api/catalogue/language-name-changes", params={
+            "user_id": "guest", "review_token": token,
+        }).status_code == 400, "Reviews cannot cross library users"
+
+
+def test_language_single_change_rejects_changed_assets_and_manual_tags(db, environment):
+    from language_jobs import preview, queue_one_name_change
+    cat, _ = setup_catalogue(db)
+    track, _, _ = add_audio_track(db, environment, RECORDING_1)
+    with cat.db() as con:
+        cat.ingest(con, "recording", {"id": RECORDING_1, "title": "English Song",
+            "artist-credit": [{"name": "Artist", "artist": {"id": ARTIST, "name": "Artist"}}]})
+    token = preview(db, "admin")["review_token"]
+    db.execute("UPDATE tracks SET metadata_edited=1 WHERE id=?", (track,))
+    with pytest.raises(ValueError, match="no longer safe"):
+        queue_one_name_change(db, "admin", track, token)
+    db.execute("UPDATE tracks SET metadata_edited=0 WHERE id=?", (track,))
+    db.execute("UPDATE assets SET sha256='external-change' WHERE track_id=?", (track,))
+    with pytest.raises(ValueError, match="asset changed"):
+        queue_one_name_change(db, "admin", track, token)
+    assert db.rows("SELECT id FROM jobs WHERE kind='track'") == []
