@@ -14,7 +14,7 @@ window.MetadataUI = (() => {
     retryUntil: 0, pickerPage: 1, submitted: new Set(), manualOriginal: {},
     actions: {base: [], search: []}, audioKey: null, audioSerial: 0,
     releaseCache: new Map(), searchItems: [], searchEntity: "recording",
-    beetsNameCache: new Map()};
+    beetsNameCache: new Map(), artistNameCache: new Map()};
   const manualFields = {artist: "metadataManualArtist", title: "metadataManualTitle", album: "metadataManualAlbum",
     mbid: "metadataManualMbid", release_id: "metadataManualRelease"};
   const list = value => Array.isArray(value) ? value.join("; ") : value || "";
@@ -512,7 +512,10 @@ window.MetadataUI = (() => {
     for (const item of items) {
       const row = node("tr"), info = node("td", null, entity === "artist" ? "approval-artist" : "approval-track"), action = node("td", null, "approval-action");
       if (entity === "artist") {
-        bilingualName(info, "artist", item.id, item.name, item.preferred_name);
+        row.dataset.mbid = item.id;
+        const artistLabel = node("div", null, "approval-search-artist-name");
+        info.append(artistLabel);
+        bilingualName(artistLabel, "artist", item.id, item.name, item.preferred_name);
         if (aliasNames(item)) info.append(node("small", "Other names: " + aliasNames(item), "approval-other-aliases"));
         action.append(control("Tracks", () => {
           $("mbArtist").value = item.name; $("mbTitle").value = ""; $("mbEntity").value = "recording";
@@ -521,7 +524,10 @@ window.MetadataUI = (() => {
         const remember = rememberButton(item, "search"); if (remember) info.append(remember);
         row.append(action, info, node("td", [item.type, item.country, item.disambiguation].filter(Boolean).join(" \u00b7 "), "approval-artist-details"));
       } else {
-        bilingualName(info, "recording", item.id, item.title, item.preferred_title);
+        row.dataset.mbid = item.id;
+        const titleLabel = node("div", null, "approval-search-recording-name");
+        info.append(titleLabel);
+        bilingualName(titleLabel, "recording", item.id, item.title, item.preferred_title);
         if (item.disambiguation) info.append(node("small", item.disambiguation));
         const details = node("details"); details.append(node("summary", "Details"));
         if (item.score != null) details.append(node("p", `Search relevance: ${item.score}`));
@@ -537,7 +543,9 @@ window.MetadataUI = (() => {
         album.append(editionPicker(item.id, releases, "search", release_id =>
           submit("select_recording", {mbid: item.id, release_id})));
         const artistCell = node("td", null, "approval-artist");
-        bilingualName(artistCell, "artist", null, item.artist || "—", item.preferred_artist);
+        const artistLabel = node("div", null, "approval-search-recording-artist");
+        artistCell.append(artistLabel);
+        bilingualName(artistLabel, "artist", null, item.artist || "—", item.preferred_artist);
         row.append(action, info, artistCell, album,
           node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null), "approval-duration"));
         body.append(row);
@@ -547,6 +555,51 @@ window.MetadataUI = (() => {
     }
     table.append(head, body); container.append(table); return container;
   }
+  async function enrichSearchNames(context, serial, entries, entity) {
+    const user = ui.user;
+    // MusicBrainz search snippets often omit alias lists. Fill exact native
+    // and English names by ID, without changing the candidate, order or score.
+    for (const item of entries.slice(0, 12)) {
+      if (!active() || context !== ui.context || serial !== ui.searchSerial || user !== ui.user) return;
+      if (entity === "recording" &&
+          item.preferred_title && item.preferred_title !== item.title &&
+          item.preferred_artist && item.preferred_artist !== item.artist) continue;
+      if (entity === "artist" && item.preferred_name && item.preferred_name !== item.name) continue;
+      const cache = entity === "artist" ? ui.artistNameCache : ui.beetsNameCache;
+      let names = cache.get(item.id);
+      if (!names) {
+        try {
+          const url = entity === "artist" ? "/api/musicbrainz/artist-names?" :
+            "/api/musicbrainz/recording-names?";
+          const params = new URLSearchParams({
+            user_id: user,
+            [entity === "artist" ? "artist_id" : "recording_id"]: item.id,
+          });
+          const response = await fetch(url + params, {cache: "no-store"});
+          const data = await response.json();
+          if (!response.ok || data.error || data.id !== item.id) throw new Error("Name lookup unavailable");
+          names = data; cache.set(item.id, data);
+        } catch (_) { continue; }
+      }
+      if (!active() || context !== ui.context || serial !== ui.searchSerial || user !== ui.user) return;
+      const row = [...$("mbResults").querySelectorAll("tbody tr")]
+        .find(tr => tr.dataset.mbid === item.id);
+      if (!row) continue;
+      if (entity === "artist") {
+        const label = row.querySelector(".approval-search-artist-name");
+        if (label) bilingualName(label, "artist", item.id, names.name || item.name,
+                                  names.preferred_name || item.preferred_name);
+      } else {
+        const track = row.querySelector(".approval-search-recording-name");
+        const artist = row.querySelector(".approval-search-recording-artist");
+        if (track) bilingualName(track, "recording", item.id, names.title || item.title,
+                                  names.preferred_title || item.preferred_title);
+        if (artist) bilingualName(artist, "artist", null, names.artist || item.artist,
+                                   names.preferred_artist || item.preferred_artist);
+      }
+    }
+  }
+
   async function search() {
     if (!active() || !ui.context || !canSearch() || flow.mutation.pending || flow.detail.pending) return;
     if (Date.now() < ui.retryUntil) {
@@ -581,7 +634,10 @@ window.MetadataUI = (() => {
       $("mbPage").textContent = `${data.page} / ${ui.maxPage}`;
       $("mbPrev").disabled = data.page <= 1; $("mbNext").disabled = data.page >= ui.maxPage;
       ui.searchItems = data.items; ui.searchEntity = entity;
-      if (data.items.length) $("mbResults").append(resultTable(data.items, entity));
+      if (data.items.length) {
+        $("mbResults").append(resultTable(data.items, entity));
+        void enrichSearchNames(context, serial, data.items, entity);
+      }
       status(data.query_note || (data.items.length ? "" : "No results."), data.query_strategy === "title_only");
       updateButtons();
     } catch (error) { if (valid() && error.name !== "AbortError") { flow.search.fail(); status(error.message || String(error), true); } }
