@@ -115,7 +115,8 @@ def normalize(data: dict, entity: str, page: int) -> dict:
                                      "status": release.get("status")})
             credited = artist_details(value.get("artist-credit"))
             english_artist = "".join(
-                (artist.get("preferred_name") or artist.get("credited_name") or artist["name"]) +
+                (artist["preferred_name"] if artist.get("preferred_name") != artist.get("name")
+                 else artist.get("credited_name") or artist["name"]) +
                 str(raw.get("joinphrase") or "")
                 for artist, raw in zip(credited, [v for v in value.get("artist-credit") or [] if isinstance(v, dict)])
             )[:1000]
