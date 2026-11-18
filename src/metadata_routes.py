@@ -44,6 +44,10 @@ class CandidateRejectionInput(BaseModel):
     mbid: str = Field(min_length=36, max_length=36)
     reject: bool = True
 
+class PrefetchCleanupInput(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    confirmed: Literal[True]
+
 
 def review_origin(track, origins):
     pending = json.loads(track["pending_operation"] or "{}")
@@ -147,10 +151,16 @@ def install_metadata_routes(app, store):
     @app.get("/api/musicbrainz/search")
     async def search(user_id: str, entity: Literal["recording", "artist"] = "recording",
                      title: str = Query("", max_length=200), artist: str = Query("", max_length=200),
-                     artist_id: str | None = Query(None, max_length=36), page: int = Query(1, ge=1, le=100)):
+                     artist_id: str | None = Query(None, max_length=36), page: int = Query(1, ge=1, le=100),
+                     track_id: str | None = Query(None, max_length=64)):
         store.require_user(user_id)
         prefetch = app.state.approval_prefetch
         try:
+            if track_id:
+                track = store.owned("tracks", track_id, user_id)
+                if track["operation_state"] == "NEEDS_APPROVAL":
+                    await asyncio.to_thread(prefetch.remember_search_owner,
+                                            track_id, entity, title, artist, artist_id, page)
             if prefetch.workers_enabled:
                 # Never send a foreground provider request merely to render a
                 # MusicBrainz table. Return a cached page immediately or let the
@@ -187,6 +197,18 @@ def install_metadata_routes(app, store):
     def approval_prefetch_status(user_id: str):
         store.require_user(user_id)
         return JSONResponse(app.state.approval_prefetch.status(),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/musicbrainz/approval-prefetch-clean-preview")
+    def approval_prefetch_clean_preview(user_id: str):
+        store.require_user(user_id)
+        return JSONResponse(app.state.approval_prefetch.cleanup_preview(),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/musicbrainz/approval-prefetch-clean")
+    def approval_prefetch_clean(data: PrefetchCleanupInput):
+        store.require_user(data.user_id)
+        return JSONResponse(app.state.approval_prefetch.cleanup_unused(),
                             headers={"Cache-Control": "no-store"})
 
     @app.get("/api/musicbrainz/recording-names")
