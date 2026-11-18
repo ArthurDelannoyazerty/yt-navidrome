@@ -293,6 +293,7 @@ def batch_status(store, user_id):
     pending = len(ids) - done - failed - running
     return {"state": "failed" if failed else "running" if pending or running else "done",
             "mode": saved.get("mode"), "scope": saved.get("scope"),
+            "review_token": saved.get("review_token"),
             "submitted": len(ids), "done": done, "running": running,
             "pending": pending, "failed": failed}
 
@@ -436,7 +437,8 @@ def queue(store, user_id, limit, include_localized=False, review_token=None,
         if queued_ids:
             store.set_setting("english-language-batch:" + user_id,
                               {"ids": queued_ids, "mode": mode,
-                               "scope": scope, "created": time.time()})
+                               "scope": scope, "review_token": review_token,
+                               "created": time.time()})
         if is_canary and queued_ids:
             store.set_setting(_canary_key(user_id),
                               {"policy": LANGUAGE_POLICY, "track_ids": queued_ids,
