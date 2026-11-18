@@ -12,7 +12,7 @@ from catalogue import Catalogue, ENTITY_KINDS
 from language_jobs import (preview as language_preview, queue as queue_languages,
                            preview_progress, queue_progress, canary_status, verify_canary,
                            review_state, batch_status, name_changes,
-                           queue_one_name_change)
+                           queue_one_name_change, name_change_status)
 
 
 class SyncRequest(BaseModel):
@@ -158,6 +158,10 @@ def install_catalogue_routes(app, store, pipeline):
                               offset: int = Query(0, ge=0, le=5000),
                               limit: int = Query(100, ge=1, le=100)):
         return name_changes(store, user_id, review_token, offset, limit)
+
+    @app.get("/api/catalogue/language-name-change-status")
+    def language_name_change_status(user_id: str, review_token: str = Query(min_length=32, max_length=32)):
+        return name_change_status(store, user_id, review_token)
 
     @app.post("/api/catalogue/language-name-change")
     async def language_name_change(data: LanguageOneChangeInput):
