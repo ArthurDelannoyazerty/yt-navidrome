@@ -857,3 +857,96 @@ def test_language_single_change_rejects_changed_assets_and_manual_tags(db, envir
     with pytest.raises(ValueError, match="asset changed"):
         queue_one_name_change(db, "admin", track, token)
     assert db.rows("SELECT id FROM jobs WHERE kind='track'") == []
+
+
+
+def test_smart_filter_matches_list_canary_and_bulk_without_hidden_updates(db, environment):
+    """A checked filter must constrain actual writes, not merely hide DOM rows."""
+    import time
+    from mutagen.oggopus import OggOpus
+    from language_jobs import canary_status, batch_status
+
+    setup_catalogue(db)
+    samples = [
+        ("The Toxic Avenger - It Doesn't Matter",
+         "The Toxic Avenger - It Doesn’t Matter", False),
+        ("LORN - Drawn Out Like an Ache",
+         "Lorn - Drawn Out Like an Ache", False),
+        ("Gareth Coker - Seperated by the Storm",
+         "Gareth Coker - Separated by the Storm", True),
+        ("Toby Fox - サーカス", "Toby Fox - The Circus", True),
+        ("KEYGEN CHURCH - Duhicebdo ed varicecag parvabiguf",
+         "KEYGEN CHURCH - Dubitando ad veritatem pervenimus", True),
+        ("Daft Punk - Within", "Daft Punk feat. Chilly Gonzales - Within", True),
+    ]
+    track_by_id = {}
+    display_rows = []
+    assets = {}
+    meaningful_ids = set()
+    for before, after, meaningful in samples:
+        # One confirmed recording identity per track: the production schema
+        # correctly forbids two rows sharing a user's MusicBrainz MBID.
+        track_id, path, sha = add_audio_track(db, environment, str(uuid.uuid4()))
+        track_by_id[track_id] = path
+        assets[track_id] = sha
+        display_rows.append({"id": track_id, "before_label": before,
+                             "after_label": after, "changed_field": "Title / artist"})
+        if meaningful:
+            meaningful_ids.add(track_id)
+    token = "f" * 32
+    db.set_setting("english-language-review:admin", {
+        "token": token, "created": time.time(), "include_localized": False,
+        "by_kind": {"display_changes": list(track_by_id), "original_updates": []},
+        "asset_hashes": assets, "display_rows": display_rows,
+        "summary": {"review_token": token, "changes": {"display_changes": 6}},
+    })
+    with TestClient(create_app(db, start_workers=False)) as client:
+        args = {"user_id": "admin", "review_token": token}
+        smart = client.get("/api/catalogue/language-name-changes",
+                           params={**args, "smart_only": "true"}).json()
+        all_changes = client.get("/api/catalogue/language-name-changes",
+                                 params={**args, "smart_only": "false"}).json()
+        assert smart["total"] == 4
+        assert smart["all_total"] == 6 and smart["filtered_out"] == 2
+        assert all_changes["total"] == 6 and all_changes["filtered_out"] == 0
+        assert {row["id"] for row in smart["items"]} == meaningful_ids
+
+        request = {**args, "scope": "names", "confirmed": True,
+                   "smart_only": True, "include_localized": False}
+        canary = client.post("/api/catalogue/language-apply", json={
+            **request, "limit": 3,
+        })
+        assert canary.status_code == 200, canary.text
+        assert canary.json()["queued"] == 3
+        status = canary_status(db, "admin")
+        assert status["smart_only"] is True
+        assert set(status["track_ids"]) <= meaningful_ids
+
+        for track_id in status["track_ids"]:
+            tags = OggOpus(track_by_id[track_id])
+            tags["INGESTOR_LANGUAGE_POLICY"] = ["english-first-v1"]
+            tags.save()
+            db.execute("UPDATE tracks SET operation_state='IDLE' WHERE id=?",
+                       (track_id,))
+        assert client.post("/api/catalogue/language-canary-verify", json={
+            "user_id": "admin", "confirmed": True,
+        }).status_code == 200
+
+        unsafe = client.post("/api/catalogue/language-apply", json={
+            **request, "limit": 5000, "smart_only": False,
+        })
+        assert unsafe.status_code == 400
+        assert "canary" in unsafe.text.lower() or "verify" in unsafe.text.lower()
+
+        bulk = client.post("/api/catalogue/language-apply", json={
+            **request, "limit": 5000,
+        })
+        assert bulk.status_code == 200, bulk.text
+        assert bulk.json()["queued"] == 1
+        assert batch_status(db, "admin")["smart_only"] is True
+        actual = {job["target"] for job in db.rows(
+            "SELECT target FROM jobs WHERE kind='track' AND payload LIKE '%language%'")}
+        assert actual == meaningful_ids, "The two hidden suggestions must never be queued"
+        assert client.post("/api/catalogue/language-apply", json={
+            **request, "limit": 5000,
+        }).json()["queued"] == 0, "Do not queue successful jobs twice"

@@ -207,12 +207,15 @@ async function fixtureServer(t, data) {
       else if (url.pathname === "/api/catalogue/language-batch-status") result = data.languageBatch || {state:"idle",submitted:0,done:0,running:0,pending:0,failed:0};
       else if (url.pathname === "/api/catalogue/language-name-changes") {
         const all = data.languageNameChanges || [];
+        const smart = url.searchParams.get("smart_only") !== "false";
+        const shown = smart ? all.filter(x => x.useful !== false) : all;
         const offset = Number(url.searchParams.get("offset") || 0);
         const limit = Number(url.searchParams.get("limit") || 100);
-        const items = all.slice(offset, offset + limit).map(x =>
+        const items = shown.slice(offset, offset + limit).map(x =>
           ({...x, job_state: data.languageJobStates?.[x.id] || null}));
-        result = {total: all.length, offset, items,
-          next_offset: offset + items.length < all.length ? offset + items.length : null};
+        result = {total: shown.length, all_total: all.length,
+          filtered_out: all.length - shown.length, offset, smart_only: smart, items,
+          next_offset: offset + items.length < shown.length ? offset + items.length : null};
       }
       else if (url.pathname === "/api/catalogue/language-name-change-status")
         result = {states: data.languageJobStates || {}};
@@ -685,12 +688,12 @@ test("real browser: Language review distinguishes changes and enables only a ver
       after_label:"Yasunori Nishiki - Primrose, the Dancer", changed_field:"Title / artist"},
     {id:"22222222-2222-4222-8222-222222222222",
       current_name:"The Toxic Avenger - It Doesn't Matter",
-      proposed_name:"The Toxic Avenger - It Doesn’t Matter",
+      proposed_name:"The Toxic Avenger - It Doesn’t Matter", useful:false,
       before_label:"The Toxic Avenger - It Doesn't Matter",
       after_label:"The Toxic Avenger - It Doesn’t Matter", changed_field:"Title / artist"},
     {id:"33333333-3333-4333-8333-333333333333",
       current_name:"LORN - Drawn Out Like an Ache",
-      proposed_name:"Lorn - Drawn Out Like an Ache",
+      proposed_name:"Lorn - Drawn Out Like an Ache", useful:false,
       before_label:"LORN - Drawn Out Like an Ache",
       after_label:"Lorn - Drawn Out Like an Ache", changed_field:"Title / artist"},
   ];
@@ -708,11 +711,12 @@ test("real browser: Language review distinguishes changes and enables only a ver
   assert.equal(await chrome.evaluate("document.querySelector('#languageCountScanned').textContent"),"18");
   assert.equal(await chrome.evaluate("document.querySelector('#languageCountOriginals').textContent"),"2");
   assert.match(await chrome.evaluate("document.querySelector('#languageReviewStatus').textContent"),/No audio or tags were modified/);
-  await chrome.until("document.querySelectorAll('#languageNameChangesList .language-change-row').length===3");
-  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesCount').textContent"),"(3)");
-  assert.equal(await chrome.evaluate("document.querySelectorAll('#languageNameChangesList .language-change-row').length"),3);
+  await chrome.until("document.querySelectorAll('#languageNameChangesList .language-change-row').length===1");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageSmartFilter').checked"),true,
+    "The one smart filter is checked by default");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesCount').textContent"),"(1 of 3)");
   assert.match(await chrome.evaluate("document.querySelector('#languageNameChangesList').textContent"),/Primrose, the Dancer/);
-  assert.match(await chrome.evaluate("document.querySelector('#languageNameChangesList').textContent"),/It Doesn’t Matter/);
+  assert.doesNotMatch(await chrome.evaluate("document.querySelector('#languageNameChangesList').textContent"),/It Doesn’t Matter/);
   assert.ok(await chrome.evaluate("document.querySelector('#languageNameChangesList').clientHeight>0"));
   assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#languageNameChangesList')).overflowY"),"scroll");
   assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),true);
@@ -724,7 +728,15 @@ test("real browser: Language review distinguishes changes and enables only a ver
   assert.equal(individual.body.review_token,"e".repeat(32));
   assert.equal(individual.body.confirmed,true);
   assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),true);
+  assert.match(await chrome.evaluate("document.querySelector('#languageScopeSummary').textContent"),/1 candidates/);
+  const previousScans = data.reads.filter(x=>x.startsWith("/api/catalogue/language-preview?")).length;
+  await chrome.evaluate("document.querySelector('#languageSmartFilter').click()");
+  await chrome.until("document.querySelectorAll('#languageNameChangesList .language-change-row').length===3");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesCount').textContent"),"(3)");
+  assert.match(await chrome.evaluate("document.querySelector('#languageNameChangesList').textContent"),/It Doesn’t Matter/);
   assert.match(await chrome.evaluate("document.querySelector('#languageScopeSummary').textContent"),/3 candidates/);
+  assert.equal(data.reads.filter(x=>x.startsWith("/api/catalogue/language-preview?")).length,previousScans,
+    "Changing only the smart filter must not trigger a slow rescan");
   assert.equal(await chrome.evaluate("document.querySelector('#languageCanary').disabled"),false);
   assert.equal(await chrome.evaluate("document.querySelector('#languageBulk').disabled"),true);
   assert.equal(data.writes.filter(x=>x.path==="/api/catalogue/language-apply").length,0);
@@ -758,7 +770,7 @@ test("real browser: full Language list scrolls and Change all queues only review
     changed_field:"Title / artist",
   }));
   data.languageCanary = {state:"ready",verified:true,scope:"names",include_localized:false,
-    track_count:3,review_tested:3,pending:0,failed:0};
+    smart_only:true,track_count:3,review_tested:3,pending:0,failed:0};
   const origin = await fixtureServer(t, data);
   await chrome.send("Emulation.setDeviceMetricsOverride",
     {width:1200,height:900,deviceScaleFactor:1,mobile:false});
@@ -776,14 +788,20 @@ test("real browser: full Language list scrolls and Change all queues only review
   assert.equal(scroller.count,80,"First page stays bounded");
   await chrome.evaluate("(() => { const el=document.querySelector('#languageNameChangesList'); el.scrollTop=el.scrollHeight; el.dispatchEvent(new Event('scroll')); })()");
   await chrome.until("document.querySelectorAll('#languageNameChangesList .language-change-row').length===86");
-  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesCount').textContent"),"(86)");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesCount').textContent"),"(86 of 86)");
   assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),false,
     "A verified visible-names canary enables Change all");
+  await chrome.evaluate("document.querySelector('#languageSmartFilter').click()");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),true,
+    "Switching smart filter cannot reuse the verified smart-only canary");
+  await chrome.evaluate("document.querySelector('#languageSmartFilter').click()");
+  await chrome.until("!document.querySelector('#languageChangeAll').disabled");
   await chrome.evaluate("document.querySelector('#languageChangeAll').click()");
   await chrome.until("document.querySelector('#languageNameChangesStatus').textContent.includes('queued')");
   const bulk=data.writes.find(x=>x.path==="/api/catalogue/language-apply");
   assert.equal(bulk.body.limit,5000);
   assert.equal(bulk.body.scope,"names","Original-tag-only updates must not join Change all");
+  assert.equal(bulk.body.smart_only,true,"Change all must enforce the checked filter server-side");
   assert.equal(bulk.body.review_token,"f".repeat(32));
   assert.equal(bulk.body.confirmed,true);
   assert.deepEqual(chrome.errors,[]);

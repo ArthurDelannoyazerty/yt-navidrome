@@ -15,6 +15,7 @@ from mutagen.oggopus import OggOpus
 from pathlib import Path
 
 import common
+from language_filter import meaningful_name_change
 from localized_names import (LANGUAGE_POLICY, POLICY_TAG, artist_credit,
                              is_localized, preferred_english_name)
 
@@ -237,7 +238,8 @@ def preview(store, user_id, include_localized=False):
                     display_rows.append({
                         key: item.get(key) for key in
                         ("id", "current_name", "proposed_name",
-                         "before_label", "after_label", "changed_field", "changes")
+                         "before_label", "after_label", "changed_field",
+                         "display_diffs", "changes")
                     })
                 # Show substantive examples first, not eight unchanged titles.
                 if examples_by_kind[kind] < (3 if kind != "unchanged" else 2):
@@ -307,13 +309,15 @@ def _checked_name_review(store, user_id, review_token):
     return review
 
 
-def name_changes(store, user_id, review_token, offset=0, limit=100):
+def name_changes(store, user_id, review_token, offset=0, limit=100, smart_only=True):
     """Return only visible-name changes, with server-side pagination and job state."""
     if not 0 <= offset <= MAX_TRACKS or not 1 <= limit <= 100:
         raise ValueError("Invalid name-change list page")
     review = _checked_name_review(store, user_id, review_token)
     all_rows = review["display_rows"]
-    page = [dict(row) for row in all_rows[offset:offset + limit]]
+    visible = ([row for row in all_rows if meaningful_name_change(row)]
+               if smart_only else all_rows)
+    page = [dict(row) for row in visible[offset:offset + limit]]
     if page:
         ids = [row["id"] for row in page]
         marks = ",".join("?" for _ in ids)
@@ -329,8 +333,10 @@ def name_changes(store, user_id, review_token, offset=0, limit=100):
             latest.setdefault(job["target"], job["state"])
         for row in page:
             row["job_state"] = latest.get(row["id"])
-    return {"total": len(all_rows), "offset": offset, "items": page,
-            "next_offset": offset + len(page) if offset + len(page) < len(all_rows) else None}
+    return {"total": len(visible), "all_total": len(all_rows),
+            "filtered_out": len(all_rows) - len(visible), "smart_only": bool(smart_only),
+            "offset": offset, "items": page,
+            "next_offset": offset + len(page) if offset + len(page) < len(visible) else None}
 
 
 def name_change_status(store, user_id, review_token):
@@ -414,6 +420,7 @@ def batch_status(store, user_id):
     return {"state": "failed" if failed else "running" if pending or running else "done",
             "mode": saved.get("mode"), "scope": saved.get("scope"),
             "review_token": saved.get("review_token"),
+            "smart_only": bool(saved.get("smart_only")),
             "submitted": len(ids), "done": done, "running": running,
             "pending": pending, "failed": failed}
 
@@ -446,6 +453,12 @@ def canary_status(store, user_id):
     reviewed = review.get("by_kind", {})
     eligible_types = ("display_changes",) if scope == "names" else ("display_changes", "original_updates")
     in_current_review = set(track_id for kind in eligible_types for track_id in reviewed.get(kind, []))
+    if saved.get("smart_only"):
+        display_ids = set(reviewed.get("display_changes", []))
+        useful_ids = {row["id"] for row in review.get("display_rows", [])
+                      if meaningful_name_change(row)}
+        in_current_review = {track_id for track_id in in_current_review
+                             if track_id not in display_ids or track_id in useful_ids}
     already_in_review = sum(track_id in in_current_review for track_id in ids)
     return {"state": "failed" if failed else "running" if pending else "ready",
             "verified": ready and bool(saved.get("verified")),
@@ -453,6 +466,7 @@ def canary_status(store, user_id):
             "pending": pending, "failed": failed,
             "include_localized": bool(saved.get("include_localized")),
             "scope": saved.get("scope", "names_and_originals"),
+            "smart_only": bool(saved.get("smart_only")),
             "track_ids": ids}
 
 
@@ -470,12 +484,14 @@ def verify_canary(store, user_id):
 
 
 def queue(store, user_id, limit, include_localized=False, review_token=None,
-          scope="names_and_originals"):
+          scope="names_and_originals", smart_only=False):
     if not 1 <= limit <= MAX_TRACKS:
         raise ValueError("Choose between 1 and 5000 tracks")
     store.require_user(user_id)
     if scope not in {"names", "names_and_originals"}:
         raise ValueError("Choose a supported type of language update")
+    if smart_only and not review_token:
+        raise ValueError("Smart-filtered updates require a recent read-only review")
     is_canary = limit <= 3
     mode = "canary" if is_canary else "bulk"
     queue_progress.update(user_id, state="scanning", mode=mode, processed=0,
@@ -497,7 +513,8 @@ def queue(store, user_id, limit, include_localized=False, review_token=None,
         old_canary = canary_status(store, user_id)
         if not is_canary and (not old_canary.get("verified") or
                              old_canary.get("include_localized") != bool(include_localized)
-                             or (review_token and old_canary.get("scope") != scope)):
+                             or (review_token and old_canary.get("scope") != scope)
+                             or bool(old_canary.get("smart_only")) != bool(smart_only)):
             raise ValueError("Verify the three-track canary in Navidrome for this update scope before bulk application.")
         skipped = {"already_localized": 0, "manual_or_busy": 0, "invalid_or_missing": 0}
         if review_token:
@@ -508,6 +525,24 @@ def queue(store, user_id, limit, include_localized=False, review_token=None,
                 raise ValueError("Language review expired or changed. Run the read-only review again.")
             kinds = ("display_changes",) if scope == "names" else ("display_changes", "original_updates")
             selected_ids = [id for kind in kinds for id in review["by_kind"].get(kind, [])]
+            if smart_only:
+                if "display_rows" not in review:
+                    raise ValueError("Review again to compute the smart-filtered changes")
+                visible_ids = set(review["by_kind"].get("display_changes", []))
+                useful_ids = {row["id"] for row in review["display_rows"]
+                              if meaningful_name_change(row)}
+                selected_ids = [track_id for track_id in selected_ids
+                                if track_id not in visible_ids or track_id in useful_ids]
+            # Avoid queuing a reviewed name a second time after an individual
+            # Change, a verified canary, or a previous bulk submission.
+            prior = {item["target"] for item in store.rows(
+                """SELECT DISTINCT target FROM jobs WHERE user_id=? AND kind='track'
+                   AND json_extract(payload,'$.mode')='language'
+                   AND json_extract(payload,'$.review_token')=?
+                   AND state IN ('PENDING','RUNNING','DONE')""",
+                (user_id, review_token),
+            )}
+            selected_ids = [track_id for track_id in selected_ids if track_id not in prior]
             if not is_canary:
                 tested = set(old_canary.get("track_ids") or [])
                 selected_ids = [id for id in selected_ids if id not in tested]
@@ -558,13 +593,15 @@ def queue(store, user_id, limit, include_localized=False, review_token=None,
         if queued_ids:
             store.set_setting("english-language-batch:" + user_id,
                               {"ids": queued_ids, "mode": mode,
-                               "scope": scope, "review_token": review_token,
+                               "scope": scope, "smart_only": bool(smart_only),
+                               "review_token": review_token,
                                "created": time.time()})
         if is_canary and queued_ids:
             store.set_setting(_canary_key(user_id),
                               {"policy": LANGUAGE_POLICY, "track_ids": queued_ids,
                                "include_localized": bool(include_localized),
                                "scope": scope if review_token else "names_and_originals",
+                               "smart_only": bool(smart_only),
                                "verified": False})
         store.event("INFO", f"English-name {mode}: "
                     f"{len(queued_ids)} track jobs queued; {sum(skipped.values())} excluded. "
@@ -574,6 +611,7 @@ def queue(store, user_id, limit, include_localized=False, review_token=None,
                               skipped=skipped, error=None)
         return {"queued": len(queued_ids), "eligible_before": len(ready),
                 "scanned": scanned, "skipped": skipped, "mode": mode, "scope": scope,
+                "smart_only": bool(smart_only),
                 "message": "English-first metadata jobs queued; no downloads or album guessing."}
     except Exception as exc:
         queue_progress.update(user_id, state="error", error=str(exc))

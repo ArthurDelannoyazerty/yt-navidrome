@@ -33,32 +33,48 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Install audio tools
-        timeout-minutes: 12
+      - name: Install prebuilt audio tools (no apt downloads)
+        timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
-          # Hosted runners often already have FFmpeg. Only install the missing
-          # tools instead of downloading all FFmpeg dependencies each run.
-          missing=()
-          if ! command -v ffmpeg >/dev/null 2>&1; then missing+=(ffmpeg); fi
-          if ! command -v fpcalc >/dev/null 2>&1; then missing+=(libchromaprint-tools); fi
-          if [ "${#missing[@]}" -gt 0 ]; then
-            echo "Installing missing audio tools: ${missing[*]}"
-            # Keep the configured Ubuntu mirrors and their official fallbacks.
-            if [ -r /etc/apt/apt-mirrors.txt ] &&
-               ! timeout 10s getent ahostsv4 azure.archive.ubuntu.com >/dev/null &&
-               timeout 10s getent ahostsv4 archive.ubuntu.com >/dev/null; then
-              echo "Azure Ubuntu mirror DNS unavailable; using Ubuntu fallbacks."
-              sudo sed -i '\|^[[:space:]]*https\?://azure\.archive\.ubuntu\.com/ubuntu/|d' /etc/apt/apt-mirrors.txt
-            fi
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=45 -o Acquire::https::Timeout=45 update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=45 -o Acquire::https::Timeout=45 install -y --no-install-recommends "${missing[@]}"
-          else
-            echo "FFmpeg and Chromaprint are already available."
-          fi
-          command -v ffmpeg
-          command -v fpcalc
+          bin_dir="$RUNNER_TEMP/ci-audio-bin"
+          mkdir -p "$bin_dir"
+
+          # The pip wheel includes a ready-to-use FFmpeg executable. Avoid
+          # apt's full codec dependency tree (89 downloads on ubuntu-24.04).
+          python -m pip install --disable-pip-version-check --only-binary=:all: \
+            --no-deps --retries 2 --timeout 30 "imageio-ffmpeg==0.6.0"
+          ffmpeg_binary="$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
+          ln -s "$ffmpeg_binary" "$bin_dir/ffmpeg"
+
+          # Official acoustid/chromaprint fpcalc release (Linux x86_64).
+          # Pin the release checksum to prevent unexpected binary changes.
+          fpcalc_archive="$RUNNER_TEMP/fpcalc.tar.gz"
+          curl --fail --show-error --silent --location --retry 3 \
+            --connect-timeout 15 --max-time 90 \
+            "https://github.com/acoustid/chromaprint/releases/download/v1.6.2/chromaprint-fpcalc-1.6.2-linux-x86_64.tar.gz" \
+            --output "$fpcalc_archive"
+          echo "c968ad4a0821592a79b158fb2e1f46cbe0a22a0a1dbc0743c67d68e75d15d2bb  $fpcalc_archive" \
+            | sha256sum -c -
+          extract_dir="$RUNNER_TEMP/ci-fpcalc-extracted"
+          mkdir -p "$extract_dir"
+          tar -xzf "$fpcalc_archive" -C "$extract_dir"
+          fpcalc_binary="$(find "$extract_dir" -type f -name fpcalc -print -quit)"
+          test -n "$fpcalc_binary"
+          install -m 755 "$fpcalc_binary" "$bin_dir/fpcalc"
+
+          echo "$bin_dir" >> "$GITHUB_PATH"
+          export PATH="$bin_dir:$PATH"
+          ffmpeg -hide_banner -version | head -n 1
+          fpcalc -version
+
+          # Fail immediately if the bundled FFmpeg cannot encode the Opus
+          # fixtures used in the tests; no need to start the Python suite.
+          ffmpeg -hide_banner -loglevel error -f lavfi \
+            -i "sine=frequency=440:duration=3" -c:a libopus \
+            -y "$RUNNER_TEMP/ci-audio-smoke.opus"
+          test -s "$RUNNER_TEMP/ci-audio-smoke.opus"
       - run: python -m pip install uv
       - run: uv sync --frozen --extra test
       - run: uv run python -m compileall -q src tools tests
