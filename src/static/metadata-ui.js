@@ -14,7 +14,9 @@ window.MetadataUI = (() => {
     retryUntil: 0, pickerPage: 1, submitted: new Set(), manualOriginal: {},
     actions: {base: [], search: []}, audioKey: null, audioSerial: 0,
     releaseCache: new Map(), searchItems: [], searchEntity: "recording",
-    beetsNameCache: new Map(), artistNameCache: new Map()};
+    beetsNameCache: new Map(), artistNameCache: new Map(),
+    namesController: null, namesSerial: 0, namesTimer: null,
+    prefetchTimer: null};
   const manualFields = {artist: "metadataManualArtist", title: "metadataManualTitle", album: "metadataManualAlbum",
     mbid: "metadataManualMbid", release_id: "metadataManualRelease"};
   const list = value => Array.isArray(value) ? value.join("; ") : value || "";
@@ -44,7 +46,13 @@ window.MetadataUI = (() => {
     const audio = $("metadataAudio");
     audio.pause?.(); audio.removeAttribute("src"); audio.load?.();
   }
+  function stopNamePolling() {
+    ui.namesSerial += 1;
+    clearTimeout(ui.namesTimer); ui.namesTimer = null;
+    ui.namesController?.abort(); ui.namesController = null;
+  }
   function leave() {
+    stopNamePolling(); clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
     invalidateSearch(); ui.contextController?.abort(); ui.contextController = null;
     clearTimeout(ui.filterTimer); clearTimeout(ui.pickerTimer);
     ui.loadSerial += 1; ui.queueSerial += 1;
@@ -56,6 +64,7 @@ window.MetadataUI = (() => {
     leave(); ui.user = null; ui.context = null; ui.track = null; ui.tracks = []; ui.index = -1;
     ui.scope = ""; ui.submitted.clear(); ui.actions = {base: [], search: []};
     ui.retryUntil = 0; ui.pickerPage = 1; ui.releaseCache.clear(); ui.searchItems = [];
+    ui.beetsNameCache.clear(); ui.artistNameCache.clear();
     $("approvalFilter").value = "NEEDS_APPROVAL"; $("approvalSearch").value = "";
     $("approvalPickerSearch").value = ""; $("approvalPickerList").replaceChildren();
     $("approvalWorkspace").hidden = true; $("approvalEmpty").hidden = true;
@@ -152,41 +161,104 @@ window.MetadataUI = (() => {
                     error ? "MusicBrainz artist credit unavailable" : "Loading original artist credit…");
     }
   }
-  async function hydrateBeetsNames(context) {
-    const user = ui.user;
-    const candidates = choices().filter(item => item.mbid && item.kind !== "source" &&
-      item.kind !== "asis" && !item.asis).slice(0, 8);
-    // Exact-ID lookups are rate-limited by MusicBrainz. Render suggestions
-    // immediately and enrich their native characters without blocking Approval.
-    for (const item of candidates) {
-      if (!active() || context !== ui.context || user !== ui.user) return;
-      if (ui.beetsNameCache.has(item.mbid)) continue;
-      try {
-        const response = await fetch("/api/musicbrainz/recording-names?" +
-          new URLSearchParams({user_id: user, recording_id: item.mbid}), {cache: "no-store"});
-        const result = await response.json();
-        if (!response.ok || result.error) throw new Error(result.error || "Lookup failed");
-        if (result.id !== item.mbid) throw new Error("MusicBrainz identity mismatch");
-        ui.beetsNameCache.set(item.mbid, result);
-      } catch (_) {
-        // Never invent original characters when MusicBrainz is unavailable.
-        if (active() && context === ui.context) {
-          for (const row of $("metadataSuggestions").querySelectorAll("tr")) {
-            const index = Number(row.dataset.choice);
-            const choice = choices()[index];
-            if (choice?.mbid === item.mbid) hydrateBeetsRow(row, choice, null, true);
-          }
-        }
-        continue;
-      }
-      if (!active() || context !== ui.context || user !== ui.user) return;
-      for (const row of $("metadataSuggestions").querySelectorAll("tr")) {
-        const index = Number(row.dataset.choice);
-        const choice = choices()[index];
-        if (choice?.mbid === item.mbid)
-          hydrateBeetsRow(row, choice, ui.beetsNameCache.get(item.mbid));
+  function fillSearchLabel(row, item, names) {
+    if (!row || !names) return;
+    if (ui.searchEntity === "artist") {
+      const label = row.querySelector(".approval-search-artist-name");
+      if (label) bilingualName(label, "artist", item.id, names.name || item.name,
+                                names.preferred_name || item.preferred_name);
+    } else {
+      const title = row.querySelector(".approval-search-recording-name");
+      const artist = row.querySelector(".approval-search-recording-artist");
+      if (title) bilingualName(title, "recording", item.id, names.title || item.title,
+                                names.preferred_title || item.preferred_title);
+      if (artist) bilingualName(artist, "artist", null, names.artist || item.artist,
+                                 names.preferred_artist || item.preferred_artist);
+    }
+  }
+  function applyNamesToTables(data) {
+    for (const row of $("metadataSuggestions").querySelectorAll("tr")) {
+      const index = Number(row.dataset.choice);
+      const item = choices()[index];
+      if (!item?.mbid) continue;
+      const names = data.recordings?.[item.mbid];
+      if (names) ui.beetsNameCache.set(item.mbid, names);
+      const pending = (data.pending_recordings || []).includes(item.mbid);
+      hydrateBeetsRow(row, item, names || ui.beetsNameCache.get(item.mbid), !names && !pending);
+    }
+    for (const row of $("mbResults").querySelectorAll("tbody tr")) {
+      const item = ui.searchItems.find(value => value.id === row.dataset.mbid);
+      if (!item) continue;
+      const names = ui.searchEntity === "artist"
+        ? data.artists?.[item.id] : data.recordings?.[item.id];
+      if (names) {
+        (ui.searchEntity === "artist" ? ui.artistNameCache : ui.beetsNameCache).set(item.id, names);
+        fillSearchLabel(row, item, names);
       }
     }
+  }
+  async function hydrateApprovalNames(context) {
+    if (!active() || context !== ui.context) return;
+    const user = ui.user, serial = ++ui.namesSerial;
+    clearTimeout(ui.namesTimer); ui.namesTimer = null;
+    ui.namesController?.abort();
+    const controller = new AbortController(); ui.namesController = controller;
+    const recordings = new Set();
+    const artists = new Set();
+    // ALL suggestions and ALL results from the current search page,
+    // without the former 8/12-item truncation.
+    for (const item of choices()) if (item.mbid && !item.asis && item.kind !== "source")
+      recordings.add(item.mbid);
+    for (const item of ui.searchItems) {
+      if (ui.searchEntity === "artist") artists.add(item.id);
+      else {
+        recordings.add(item.id);
+        for (const credit of item.artists || []) if (credit.id) artists.add(credit.id);
+      }
+    }
+    if (!recordings.size && !artists.size) return;
+    try {
+      const query = new URLSearchParams({
+        user_id: user,
+        recording_ids: [...recordings].join(","),
+        artist_ids: [...artists].join(","),
+      });
+      const response = await fetch("/api/musicbrainz/approval-names?" + query,
+                                   {cache: "no-store", signal: controller.signal});
+      const data = await response.json();
+      if (!active() || ui.context !== context || ui.user !== user ||
+          serial !== ui.namesSerial) return;
+      if (!response.ok || data.error) throw Error(data.error || "Local name cache unavailable");
+      applyNamesToTables(data);
+      if (data.remaining > 0) {
+        ui.namesTimer = setTimeout(() => hydrateApprovalNames(context), 3500);
+      }
+    } catch (error) {
+      if (error.name !== "AbortError" && active() && context === ui.context &&
+          serial === ui.namesSerial) {
+        // The live search/Approval controls remain usable if the local cache
+        // is temporarily unavailable. Never turn a cosmetic lookup into a
+        // metadata-approval blocker.
+        ui.namesTimer = setTimeout(() => hydrateApprovalNames(context), 12000);
+      }
+    }
+  }
+  async function refreshPrefetchStatus() {
+    if (!active() || !ui.context) return;
+    const user = ui.user, context = ui.context;
+    try {
+      const response = await fetch("/api/musicbrainz/approval-prefetch-status?user_id=" +
+        encodeURIComponent(user), {cache: "no-store"});
+      const data = await response.json();
+      if (!active() || context !== ui.context || user !== ui.user || !response.ok) return;
+      $("approvalPrefetchStatus").textContent = data.background
+        ? "Background MusicBrainz prefetch: " +
+          Number(data.cached || 0).toLocaleString() + " cached; " +
+          Number(data.queued || 0).toLocaleString() + " queued. Approval remains available."
+        : "MusicBrainz name prefetch is not running; cached names remain available.";
+    } catch (_) { /* Cosmetic status must not affect approval. */ }
+    if (active() && context === ui.context)
+      ui.prefetchTimer = setTimeout(refreshPrefetchStatus, 20000);
   }
   function aliasNames(item) {
     const names = new Set();
@@ -392,9 +464,13 @@ window.MetadataUI = (() => {
     ui.manualOriginal = {artist: list(current.artist), title: list(current.title), album: list(current.album), mbid: data.current_mbid || "", release_id: data.current_release_id || ""};
     for (const [field, id] of Object.entries(manualFields)) $(id).value = ui.manualOriginal[field];
     syncAudio(data); renderSuggestions(); renderDecisions(); updateButtons();
-    void hydrateBeetsNames(data);
+    void hydrateApprovalNames(data);
+    clearTimeout(ui.prefetchTimer);
+    void refreshPrefetchStatus();
   }
   async function loadTrack(track, initialPane = "") {
+    stopNamePolling(); clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
+    ui.searchItems = []; ui.searchEntity = "recording";
     invalidateSearch(); ui.contextController?.abort(); stopAudio();
     const serial = ++ui.loadSerial, user = ui.user;
     ui.track = track; ui.context = null; flow.detail.start(); ui.actions = {base: [], search: []};
@@ -555,51 +631,6 @@ window.MetadataUI = (() => {
     }
     table.append(head, body); container.append(table); return container;
   }
-  async function enrichSearchNames(context, serial, entries, entity) {
-    const user = ui.user;
-    // MusicBrainz search snippets often omit alias lists. Fill exact native
-    // and English names by ID, without changing the candidate, order or score.
-    for (const item of entries.slice(0, 12)) {
-      if (!active() || context !== ui.context || serial !== ui.searchSerial || user !== ui.user) return;
-      if (entity === "recording" &&
-          item.preferred_title && item.preferred_title !== item.title &&
-          item.preferred_artist && item.preferred_artist !== item.artist) continue;
-      if (entity === "artist" && item.preferred_name && item.preferred_name !== item.name) continue;
-      const cache = entity === "artist" ? ui.artistNameCache : ui.beetsNameCache;
-      let names = cache.get(item.id);
-      if (!names) {
-        try {
-          const url = entity === "artist" ? "/api/musicbrainz/artist-names?" :
-            "/api/musicbrainz/recording-names?";
-          const params = new URLSearchParams({
-            user_id: user,
-            [entity === "artist" ? "artist_id" : "recording_id"]: item.id,
-          });
-          const response = await fetch(url + params, {cache: "no-store"});
-          const data = await response.json();
-          if (!response.ok || data.error || data.id !== item.id) throw new Error("Name lookup unavailable");
-          names = data; cache.set(item.id, data);
-        } catch (_) { continue; }
-      }
-      if (!active() || context !== ui.context || serial !== ui.searchSerial || user !== ui.user) return;
-      const row = [...$("mbResults").querySelectorAll("tbody tr")]
-        .find(tr => tr.dataset.mbid === item.id);
-      if (!row) continue;
-      if (entity === "artist") {
-        const label = row.querySelector(".approval-search-artist-name");
-        if (label) bilingualName(label, "artist", item.id, names.name || item.name,
-                                  names.preferred_name || item.preferred_name);
-      } else {
-        const track = row.querySelector(".approval-search-recording-name");
-        const artist = row.querySelector(".approval-search-recording-artist");
-        if (track) bilingualName(track, "recording", item.id, names.title || item.title,
-                                  names.preferred_title || item.preferred_title);
-        if (artist) bilingualName(artist, "artist", null, names.artist || item.artist,
-                                   names.preferred_artist || item.preferred_artist);
-      }
-    }
-  }
-
   async function search() {
     if (!active() || !ui.context || !canSearch() || flow.mutation.pending || flow.detail.pending) return;
     if (Date.now() < ui.retryUntil) {
@@ -628,6 +659,12 @@ window.MetadataUI = (() => {
         }
         status(data.error || `Search failed (HTTP ${response.status}).`, true); return;
       }
+      if (data.pending) {
+        flow.search.start();
+        status("Preparing search results in the background… Beets matches are ready to use.");
+        ui.timer = setTimeout(search, Math.max(1500, 1000 * (Number(data.retry_after) || 3)));
+        return;
+      }
       flow.search.finish();
       ui.effectiveQuery = data.query_used || null;
       ui.maxPage = Math.max(1, Math.min(100, Math.ceil(data.total / data.limit)));
@@ -636,7 +673,7 @@ window.MetadataUI = (() => {
       ui.searchItems = data.items; ui.searchEntity = entity;
       if (data.items.length) {
         $("mbResults").append(resultTable(data.items, entity));
-        void enrichSearchNames(context, serial, data.items, entity);
+        void hydrateApprovalNames(context);
       }
       status(data.query_note || (data.items.length ? "" : "No results."), data.query_strategy === "title_only");
       updateButtons();
