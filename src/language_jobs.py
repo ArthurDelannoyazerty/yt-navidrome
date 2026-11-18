@@ -240,7 +240,7 @@ def preview(store, user_id, include_localized=False):
                 f"{counts['original_updates']} original-tag repairs, "
                 f"{counts['unchanged']} no detectable changes, "
                 f"{counts['unknown']} require catalogue metadata. "
-                "No audio or tags changed.",
+                "No audio or tags were changed.",
                 user_id, "language-review")
     return result
 
