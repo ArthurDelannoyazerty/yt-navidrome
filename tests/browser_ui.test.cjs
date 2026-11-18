@@ -162,6 +162,9 @@ async function fixtureServer(t, data) {
         if (url.pathname === "/api/catalogue/language-name-change") {
           (data.languageJobStates ||= {})[payload.track_id] = "PENDING";
         }
+        if (url.pathname === "/api/catalogue/language-reverse") {
+          (data.languageJobStates ||= {})[payload.track_id] = "REVERSE_PENDING";
+        }
         if (url.pathname.endsWith("/artwork") && data.artwork) {
           data.artwork.preference = payload.selection === "auto"
             ? {mode: "auto", candidate_id: "cover-square", framing: "original"}
@@ -240,6 +243,11 @@ async function fixtureServer(t, data) {
         result = {ids:tracks.map(t=>t.id),tracks,total:tracks.length,matching_total:tracks.length,excluded:0,truncated:false};
       }
       else if (url.pathname === "/api/musicbrainz/search") result = {entity: "recording", items: data.searchResults || [], total: (data.searchResults || []).length, page: 1, limit: 20};
+      else if (url.pathname === "/api/musicbrainz/recording-names") {
+        const id = url.searchParams.get("recording_id");
+        result = data.recordingNames?.[id] || {id, title: "誓いの旋律",
+          preferred_title: "Melody of Oaths", artist: "末廣健一郎"};
+      }
       else if (url.pathname.endsWith("/metadata-context")) {
         const track = data.tracks.find(track => track.id === url.pathname.split("/")[3]) || data.tracks[0];
         result = {track_id: track.id, user_id: "admin", revision: "b".repeat(64),
@@ -804,5 +812,72 @@ test("real browser: full Language list scrolls and Change all queues only review
   assert.equal(bulk.body.smart_only,true,"Change all must enforce the checked filter server-side");
   assert.equal(bulk.body.review_token,"f".repeat(32));
   assert.equal(bulk.body.confirmed,true);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: Approval shows native characters and English aliases in both Beets and MusicBrainz tables", {timeout:60000}, async t => {
+  const chrome=await browser(t); if (!chrome) return;
+  const data=fixtures();
+  const id="11111111-1111-4111-8111-111111111111";
+  data.tracks[0].choices[0].title="Melody of Oaths";
+  data.tracks[0].choices[0].artist="Kenichiro Suehiro";
+  data.recordingNames={
+    [id]:{id,title:"誓いの旋律",preferred_title:"Melody of Oaths",artist:"末廣健一郎"}
+  };
+  data.searchResults=[{
+    id:"22222222-2222-4222-8222-222222222222",
+    title:"踊子プリムロゼのテーマ",preferred_title:"Primrose, the Dancer",
+    artist:"西木康智",preferred_artist:"Yasunori Nishiki",length_ms:200000,releases:[]
+  }];
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:1200,height:900,deviceScaleFactor:1,mobile:false});
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelector('#metadataSuggestions .approval-english-alias') && document.querySelectorAll('#mbResults tbody tr').length===1");
+
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name a').textContent"),"誓いの旋律");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name small').textContent"),"English: Melody of Oaths");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-artist').textContent.includes('末廣健一郎')"),true);
+  assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-artist small').textContent"),/Kenichiro Suehiro/);
+  assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-track a').textContent"),"踊子プリムロゼのテーマ");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-track .approval-english-alias').textContent"),"English: Primrose, the Dancer");
+  assert.match(await chrome.evaluate("document.querySelector('#mbResults .approval-artist').textContent"),/西木康智/);
+  assert.match(await chrome.evaluate("document.querySelector('#mbResults .approval-artist .approval-english-alias').textContent"),/Yasunori Nishiki/);
+  assert.ok(data.reads.some(x=>x.startsWith("/api/musicbrainz/recording-names?")));
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: completed Language row uses light-red Reverse and queues exact restoration", {timeout:60000},async t=>{
+  const chrome=await browser(t); if (!chrome) return;
+  const data=fixtures();
+  const id="11111111-1111-4111-8111-111111111111", token="f".repeat(32);
+  data.languageStoredReview={state:"ready",result:{
+    review_token:token,scanned:1,eligible:1,
+    changes:{display_changes:1,original_updates:0,unchanged:0,unknown:0},
+    skipped:{already_localized:0,manual_or_busy:0,invalid_or_missing:0},
+  }};
+  data.languageNameChanges=[{id, current_name:"Artist - Japanese",
+    proposed_name:"Artist - English",before_label:"Artist - Japanese",
+    after_label:"Artist - English",changed_field:"Title / artist"}];
+  data.languageJobStates={[id]:"REVERSIBLE"};
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=language]').click()");
+  await chrome.until("document.querySelector('#languageNameChangesList .language-reverse-button')");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesList .language-reverse-button').textContent"),"Reverse");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesList .language-reverse-button').disabled"),false);
+  assert.match(await chrome.evaluate("getComputedStyle(document.querySelector('#languageNameChangesList .language-reverse-button')).backgroundColor"),/rgb\\(251, 235, 234\\)/);
+  await chrome.evaluate("document.querySelector('#languageNameChangesList .language-reverse-button').click()");
+  await chrome.until("document.querySelector('#languageNameChangesList .language-change-row button').textContent==='Reversing'");
+  const written=data.writes.find(x=>x.path==="/api/catalogue/language-reverse");
+  assert.ok(written);
+  assert.deepEqual(written.body,{user_id:"admin",track_id:id,review_token:token,confirmed:true});
+  assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesList .language-change-row button').disabled"),true);
   assert.deepEqual(chrome.errors,[]);
 });
