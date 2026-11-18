@@ -98,3 +98,21 @@ test("leaving Help while its bundle loads does not mount a hidden diagram", asyn
   assert.equal(page.mounts.length, 1);
   assert.equal(page.scripts.length, 1);
 });
+
+
+test("Help menu has one reachable section for each application tab", () => {
+  const html = readFileSync(require.resolve("../src/static/index.html"), "utf8");
+  const tabs = [...html.matchAll(/class="tab(?: active)?" data-tab="([^"]+)"/g)].map(m => m[1]);
+  const topics = [...html.matchAll(/<section id="help-([^"]+)" class="help-topic"/g)].map(m => m[1]);
+  const links = [...html.matchAll(/<a href="#help-([^"]+)">/g)].map(m => m[1]);
+  assert.deepEqual(tabs, ["music", "approval", "catalogue", "language", "graph",
+    "sources", "activity", "maintenance", "help"]);
+  assert.deepEqual(topics, tabs);
+  assert.deepEqual(links, tabs);
+  assert.match(html, /id="workflowDiagram"/);
+  assert.match(html, /id="spotifyRedirect"/);
+  assert.match(html, /id="help-language"/);
+  assert.match(html, /ORIGINALTITLE/);
+  assert.doesNotMatch(html, /id="catalogueLanguagePreview"/,
+    "Language controls must not remain embedded in Catalogue");
+});
