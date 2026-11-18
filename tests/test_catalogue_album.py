@@ -648,7 +648,9 @@ def test_language_diff_review_separates_name_tags_unknown_and_noops(db, environm
     # canonical-name tags. The confirmed album's original tag is already right.
     tags = OggOpus(original_path)
     tags["album"] = ["Preview"]
+    tags["albumartist"] = ["Composer"]
     tags["originalalbum"] = ["Preview"]
+    tags["originalalbumartist"] = ["Composer"]
     tags.save()
     db.execute("UPDATE assets SET sha256=? WHERE track_id=?",
                (sha256_file(original_path), original_id))
@@ -684,7 +686,9 @@ def test_language_ui_scoped_apply_uses_recent_review_and_requires_matching_canar
         })
     tags = OggOpus(native_path)
     tags["album"] = ["Preview"]
+    tags["albumartist"] = ["Composer"]
     tags["originalalbum"] = ["Preview"]
+    tags["originalalbumartist"] = ["Composer"]
     tags.save()
     db.execute("UPDATE assets SET sha256=? WHERE track_id=?",
                (sha256_file(native_path), native_id))
