@@ -161,6 +161,29 @@
         </div>
       </details>
     </div>
+    <section class="approval-cache-panel" aria-labelledby="approvalCacheHeading">
+      <div class="approval-cache-heading">
+        <div><h3 id="approvalCacheHeading">MusicBrainz cache &amp; prefetch</h3>
+          <p id="approvalPrefetchStatus" class="hint" role="status">Checking saved metadata and background queue…</p></div>
+        <button type="button" id="approvalCacheClean" class="secondary">Clean unused cache</button>
+      </div>
+      <div class="approval-cache-metrics">
+        <div><strong id="approvalCacheCompleted">—</strong><small>Cached / known tasks</small></div>
+        <div><strong id="approvalCacheQueue">—</strong><small>Queued / total tasks</small></div>
+        <div><strong id="approvalCacheDeferred">—</strong><small>Waiting for retry</small></div>
+        <div><strong id="approvalCacheSize">—</strong><small>Approval cache data</small></div>
+      </div>
+      <progress id="approvalCacheProgress" max="1" value="0" aria-label="Background MusicBrainz prefetch completed out of discovered work"></progress>
+      <p id="approvalCacheDetail" class="hint">The total grows as searches discover more candidate recordings. Counts are shared across library users.</p>
+      <div id="approvalCacheConfirm" class="approval-cache-confirm" hidden>
+        <p id="approvalCacheImpact"></p>
+        <div class="row">
+          <button type="button" id="approvalCacheConfirmButton" class="danger">Confirm cleanup</button>
+          <button type="button" id="approvalCacheCancel" class="secondary">Cancel</button>
+        </div>
+      </div>
+      <p id="approvalCacheNotice" class="hint" role="status" aria-live="polite"></p>
+    </section>
     <div class="row approval-feedback"><p id="metadataNotice" role="status" aria-live="polite"></p><button id="metadataReload" type="button" class="secondary" hidden>Reload track</button></div>
     <p id="approvalEmpty" class="empty" hidden>No music waiting for approval.</p>
     <div id="approvalWorkspace" class="approval-workspace" hidden>
@@ -178,7 +201,7 @@
       <div id="approvalMetadata" class="approval-metadata">
         <section class="approval-matches" aria-labelledby="beetsHeading">
           <h3 id="beetsHeading">Beets matches</h3>
-          <p id="approvalPrefetchStatus" class="hint" role="status">Using cached MusicBrainz names; additional names are prepared in the background.</p>
+
           <div class="table-scroll"><table class="approval-table beets-table"><thead><tr><th scope="col" class="approval-action"><span class="sr-only">Action</span></th><th scope="col" class="approval-track">Track</th><th scope="col" class="approval-artist">Artist</th><th scope="col" class="approval-album">Album</th><th scope="col" class="approval-duration">Duration</th><th scope="col" class="approval-score" title="Beets similarity, not a probability">Match</th></tr></thead><tbody id="metadataSuggestions"></tbody></table></div>
           <p id="beetsEmpty" class="hint" hidden>No detected matches.</p>
         </section>
@@ -509,7 +532,9 @@
         <section id="help-approval" class="help-topic" aria-labelledby="help-approval-title">
           <h3 id="help-approval-title">Approval</h3>
           <p><strong>Cached names and background prefetch:</strong> Beets matches appear immediately; canonical MusicBrainz spellings and verified English aliases are filled from the shared persistent Catalogue cache. A background worker prefetches searches for <em>every</em> recording awaiting approval, including every stored Beets match and all results on each MusicBrainz search page. It also fetches credited artists once by MusicBrainz ID. This work survives restarts, uses the same shared MusicBrainz cooldown as normal searches and never changes music without your approval.</p>
-          <p>The status line shows overall cached and queued metadata. If a name is still missing, you can listen, compare the available characters and approve normally; metadata enriches as the background queue completes. A temporary MusicBrainz cooldown delays only background metadata, not Approval controls. Search page size is unchanged.</p>
+          <p><strong>Progress &amp; storage:</strong> The compact prefetch panel at the top of Approval shows cached / discovered tasks, queued / total tasks, retrying items and the approximate saved Approval-cache data size. The physical Catalogue SQLite file also stores unrelated MusicBrainz graph data; its size appears in the detail line. The known total can increase when searches discover more candidates, so progress is not a fixed library-song count. MusicBrainz HTTP 503 and cooldowns pause the background queue instead of spamming retries; the estimated remaining cooldown appears in the panel.</p>
+          <p><strong>Clean unused cache:</strong> Use the two-step button in Approval to preview and remove obsolete prefetched search results and jobs. Data for locally approved music, its credited artists, MusicBrainz candidates awaiting approval, and searches associated with pending approvals is retained across all library users. The main Catalogue/Graph database entities, audio files, approvals and local metadata are never deleted. Cleanup reports the logical amount freed; the shared SQLite file may not immediately shrink on disk. Names in a currently open table may be re-fetched if they are no longer associated with pending music.</p>
+          <p>If a name is still missing, you can listen, compare the available characters and approve normally; metadata enriches as the background queue completes. A temporary MusicBrainz cooldown delays only background metadata, not Approval controls. Search page size is unchanged.</p>
           <p>Approve one recording at a time. Current audio and its source appear on the left; Beets suggestions, MusicBrainz search and album-edition choices appear on the right.</p>
           <p><strong>Official MusicBrainz spelling first:</strong> recording titles and artist credits show their exact canonical characters (including Japanese) on the first line and a known English alias or Beets display name just below. This makes it possible to read English while comparing the source video's native characters with MusicBrainz. Beets suggestions load exact-ID official spellings without changing your choice. When a name is unavailable, the interface says so rather than inventing a translation. Selecting <strong>Use</strong> keeps the exact MusicBrainz recording ID. Search relevance is not proof of an audio match.</p>
           <p>Choose a specific album edition only when you know it is correct. A recording-only approval does not invent an album. You can retain original source tags, manually correct fields, or reject a wrong candidate; manually edited tags are protected from automatic Language updates.</p>
