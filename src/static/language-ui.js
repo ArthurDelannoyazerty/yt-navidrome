@@ -121,14 +121,16 @@ window.LanguageUI = (() => {
       renderActions();
       // A large viewport can fit all of a short page without producing a
       // scroll event; load the next page in that case.
-      const list = $("languageNameChangesList");
-      if (changes.nextOffset !== null && list.scrollHeight <= list.clientHeight + 25)
-        void loadNextNamePage();
     } catch (error) {
       if (active(user, serial) && stateUI.changes === changes)
         text("languageNameChangesStatus", error.message + " Run the review again if the list is outdated.", true);
     } finally {
-      if (stateUI.changes === changes) changes.loading = false;
+      if (stateUI.changes === changes) {
+        changes.loading = false;
+        const list = $("languageNameChangesList");
+        if (changes.nextOffset !== null && list.scrollHeight <= list.clientHeight + 25)
+          void loadNextNamePage();
+      }
     }
   }
   async function refreshNameStates(user, serial) {
@@ -250,6 +252,7 @@ window.LanguageUI = (() => {
     $("languageChangeAll").title = nameCanaryValid
       ? "Queue the remaining reviewed visible-name changes"
       : "First test up to three visible-name changes and confirm them in Navidrome below";
+    for (const row of stateUI.changes.items) updateNameRow(row);
     const label = !c.track_count ? "No test submitted yet." :
       !same ? "This selection differs from the last test. Run another 3-track test." :
       c.state === "running" ? number(c.pending) + " test job(s) still processing. Check Activity for details." :
