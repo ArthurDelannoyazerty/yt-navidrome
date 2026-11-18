@@ -280,9 +280,20 @@ class MusicBrainzSearch:
                     raise ValueError("MusicBrainz returned an invalid recording identity")
                 native = str(value["title"])[:1000]
                 english = preferred_english_name(value)
+                credits = []
+                for piece in value.get("artist-credit") or []:
+                    if not isinstance(piece, dict):
+                        continue
+                    credit_artist = piece.get("artist") or {}
+                    credits.append({
+                        "id": valid_id(credit_artist.get("id")),
+                        "name": str(piece.get("name") or credit_artist.get("name") or "")[:200],
+                        "joinphrase": str(piece.get("joinphrase") or ""),
+                    })
                 return {"id": recording_id, "title": native,
                         "preferred_title": english if english != native else None,
-                        "artist": artist_credit(value.get("artist-credit"))}
+                        "artist": artist_credit(value.get("artist-credit")),
+                        "artist_credits": credits}
             finally:
                 response.close()
 
@@ -290,9 +301,30 @@ class MusicBrainzSearch:
         identity = valid_id(recording_id)
         if not identity:
             raise ValueError("Invalid MusicBrainz recording ID")
-        return await self._cached(
+        result = await self._cached(
             ("recording_names", identity, 0),
             lambda: self.request_recording_names(identity))
+        credits = result.pop("artist_credits", [])
+        english = []
+        has_alias = False
+        # A lookup's embedded credits usually omit artist aliases, so resolve
+        # the exact credited artist MBIDs separately, with the same limiter.
+        for piece in credits[:4]:
+            alias = None
+            if piece["id"]:
+                try:
+                    artist = await self.artist(piece["id"])
+                    preferred = preferred_english_name(artist, field="name")
+                    if preferred != artist.get("name"):
+                        alias = preferred
+                except (ApiDeferred, ValueError, LookupError):
+                    pass
+            if alias:
+                has_alias = True
+            english.append((alias or piece["name"]) + piece["joinphrase"])
+        preferred_artist = "".join(english)[:1000]
+        result["preferred_artist"] = preferred_artist if has_alias else None
+        return result
 
     async def artist(self, artist_id):
         identity = valid_id(artist_id)
