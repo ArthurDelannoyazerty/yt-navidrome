@@ -738,7 +738,8 @@ def test_language_ui_scoped_apply_uses_recent_review_and_requires_matching_canar
         assert verified.json()["scope"] == "names"
         # Retrying the review after the test omits now-tagged tracks. The
         # remaining counter must subtract only test IDs still in the review.
-        preview(db, "admin")
+        latest_review = preview(db, "admin")
+        data["review_token"] = latest_review["review_token"]
         assert canary_status(db, "admin")["review_tested"] == 0
         assert client.post("/api/catalogue/language-apply", json={
             **data, "limit": 5000, "scope": "names_and_originals",
