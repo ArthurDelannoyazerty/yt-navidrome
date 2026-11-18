@@ -379,7 +379,11 @@ window.CatalogueUI = (() => {
       if (languageCurrent(user, token)) message(error.message, true, "catalogueLanguageStatus");
     } finally {
       ui.languageBusy = false;
-      if (languageCurrent(user, token)) byId("catalogueLanguagePreview").disabled = false;
+      if (languageCurrent(user, token)) {
+        byId("catalogueLanguagePreview").disabled = false;
+        await refreshCanary(user, token).catch(error =>
+          message(error.message, true, "catalogueLanguageStatus"));
+      }
     }
   }
   async function verifyEnglishCanary() {
@@ -395,7 +399,11 @@ window.CatalogueUI = (() => {
       await refreshCanary(user, token);
     } catch (error) {
       if (languageCurrent(user, token)) message(error.message, true, "catalogueLanguageStatus");
-    } finally { ui.languageBusy = false; }
+    } finally {
+      ui.languageBusy = false;
+      if (languageCurrent(user, token)) await refreshCanary(user, token).catch(error =>
+        message(error.message, true, "catalogueLanguageStatus"));
+    }
   }
 
   function setResultsHeight() {
