@@ -519,3 +519,6 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .language-changes-heading { flex-direction: column; }
   .language-changes-heading button { width: 100%; }
 }
+
+/* One opt-out smart filter, directly above the bounded name-change list. */
+.language-smart-check { margin: 8px 0 0; font-weight: 600; }
