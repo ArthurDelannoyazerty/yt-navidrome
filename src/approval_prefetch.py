@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS approval_prefetch_jobs (
 );
 CREATE INDEX IF NOT EXISTS approval_prefetch_due
  ON approval_prefetch_jobs(state,retry_at,priority,requested_at);
+CREATE TABLE IF NOT EXISTS approval_prefetch_search_refs (
+ cache_key TEXT NOT NULL, track_id TEXT NOT NULL, PRIMARY KEY(cache_key,track_id)
+);
+CREATE INDEX IF NOT EXISTS approval_prefetch_search_track
+ ON approval_prefetch_search_refs(track_id);
 """
 
 
@@ -199,6 +204,17 @@ class ApprovalPrefetch:
             self.enqueue_search(entity, title, artist, artist_id, page, priority=1)
         return {**payload, "cache_status": "fresh" if fresh else "stale"}
 
+    def remember_search_owner(self, track_id, entity, title, artist, artist_id=None, page=1):
+        """Associate *manual* Approval searches with a waiting track for cleanup.
+
+        Track ownership/state is checked by the API. Keys alone are public
+        MusicBrainz requests; this table stores no private source metadata.
+        """
+        key = search_key(entity, title, artist, artist_id, page)
+        with self.catalogue.db() as con:
+            con.execute("INSERT OR IGNORE INTO approval_prefetch_search_refs VALUES (?,?)",
+                        (key, track_id))
+
     def remember_search(self, entity, title, artist, artist_id, page, result):
         key = search_key(entity, title, artist, artist_id, page)
         self._store("search", key, result, SEARCH_TTL)
@@ -217,9 +233,16 @@ class ApprovalPrefetch:
                                if isinstance(credit, dict))
         return self.enqueue_names(recordings, artists, priority=priority)
 
-    def _store(self, kind, key, payload, ttl):
+    def _store(self, kind, key, payload, ttl, *, expected_job=False):
         now = time.time()
         with self.catalogue.db() as con:
+            # A cleanup may remove a job while its provider request is still
+            # in flight. Never resurrect deleted entries after the response.
+            if expected_job and not con.execute(
+                "SELECT 1 FROM approval_prefetch_jobs WHERE kind=? AND cache_key=? AND state='RUNNING'",
+                (kind, key),
+            ).fetchone():
+                return False
             con.execute(
                 """INSERT INTO approval_prefetch_cache
                    (kind,cache_key,payload,fetched_at,expires_at)
@@ -230,6 +253,7 @@ class ApprovalPrefetch:
                 (kind, key, _json(payload), now, now + ttl),
             )
             con.execute("DELETE FROM approval_prefetch_jobs WHERE kind=? AND cache_key=?", (kind, key))
+        return True
 
     def _artist(self, con, identity):
         exact, fresh = self._cached(con, "artist", identity)
@@ -445,21 +469,21 @@ class ApprovalPrefetch:
             value = await asyncio.to_thread(self.searcher.request_recording_names, args["id"])
             if value["id"] != args["id"]:
                 raise ValueError("MusicBrainz returned a different recording identity")
-            self._store(kind, args["id"], value, NAME_TTL)
-            self.enqueue_names(artists=[v["id"] for v in value.get("artist_credits") or []
-                                        if v.get("id")], priority=15)
+            if self._store(kind, args["id"], value, NAME_TTL, expected_job=True):
+                self.enqueue_names(artists=[v["id"] for v in value.get("artist_credits") or []
+                                            if v.get("id")], priority=15)
         elif kind == "artist":
             value = await asyncio.to_thread(self.searcher.request_artist, args["id"])
             if value["id"] != args["id"]:
                 raise ValueError("MusicBrainz returned a different artist identity")
-            self._store(kind, args["id"], value, NAME_TTL)
+            self._store(kind, args["id"], value, NAME_TTL, expected_job=True)
         elif kind == "search":
             result = await self.searcher.search(
                 args["entity"], args["title"], args["artist"], args["artist_id"],
                 args["page"], bypass_prefetch=True,
             )
-            self._store(kind, job["cache_key"], result, SEARCH_TTL)
-            self.enqueue_result_names(result, priority=20)
+            if self._store(kind, job["cache_key"], result, SEARCH_TTL, expected_job=True):
+                self.enqueue_result_names(result, priority=20)
         else:
             raise ValueError("Unsupported Approval prefetch operation")
 
@@ -490,7 +514,7 @@ class ApprovalPrefetch:
                     if any(word in str(exc).lower() for word in ("not found", "was not found")):
                         self._store(job["kind"], job["cache_key"],
                                     {"id": job["cache_key"], "unavailable": True},
-                                    NEGATIVE_TTL)
+                                    NEGATIVE_TTL, expected_job=True)
                     else:
                         await asyncio.to_thread(self.defer, job, exc)
                 except Exception as exc:
