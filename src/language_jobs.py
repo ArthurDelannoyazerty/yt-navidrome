@@ -333,6 +333,28 @@ def name_changes(store, user_id, review_token, offset=0, limit=100):
             "next_offset": offset + len(page) if offset + len(page) < len(all_rows) else None}
 
 
+def name_change_status(store, user_id, review_token):
+    """Return only jobs associated with this review; previous runs don't count."""
+    review = _checked_name_review(store, user_id, review_token)
+    ids = review["by_kind"].get("display_changes", [])
+    states = {}
+    for index in range(0, len(ids), 400):
+        chunk = ids[index:index + 400]
+        if not chunk:
+            continue
+        marks = ",".join("?" for _ in chunk)
+        rows = store.rows(
+            f"""SELECT target,state FROM jobs WHERE user_id=? AND kind='track'
+                AND json_extract(payload,'$.mode')='language'
+                AND json_extract(payload,'$.review_token')=?
+                AND target IN ({marks}) ORDER BY id DESC""",
+            (user_id, review_token, *chunk),
+        )
+        for row in rows:
+            states.setdefault(row["target"], row["state"])
+    return {"states": states}
+
+
 def queue_one_name_change(store, user_id, track_id, review_token):
     """Explicitly queue one selected visible-name change; never modify the canary."""
     review = _checked_name_review(store, user_id, review_token)
