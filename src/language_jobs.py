@@ -316,6 +316,7 @@ def canary_status(store, user_id):
             "verified": ready and bool(saved.get("verified")),
             "track_count": len(ids), "pending": pending, "failed": failed,
             "include_localized": bool(saved.get("include_localized")),
+            "scope": saved.get("scope", "names_and_originals"),
             "track_ids": ids}
 
 
@@ -332,10 +333,13 @@ def verify_canary(store, user_id):
     return canary_status(store, user_id)
 
 
-def queue(store, user_id, limit, include_localized=False):
+def queue(store, user_id, limit, include_localized=False, review_token=None,
+          scope="names_and_originals"):
     if not 1 <= limit <= MAX_TRACKS:
         raise ValueError("Choose between 1 and 5000 tracks")
     store.require_user(user_id)
+    if scope not in {"names", "names_and_originals"}:
+        raise ValueError("Choose a supported type of language update")
     is_canary = limit <= 3
     mode = "canary" if is_canary else "bulk"
     queue_progress.update(user_id, state="scanning", mode=mode, processed=0,
@@ -356,19 +360,53 @@ def queue(store, user_id, limit, include_localized=False):
     try:
         old_canary = canary_status(store, user_id)
         if not is_canary and (not old_canary.get("verified") or
-                             old_canary.get("include_localized") != bool(include_localized)):
-            raise ValueError("First apply three tracks, verify their Navidrome IDs/ratings/playlists, and acknowledge the canary check. Use the same recheck setting.")
-        # A canary only needs three safe candidates, not thousands of Opus reads.
-        ready, skipped = candidates(
-            store, user_id, include_localized=include_localized, progress=on_scan,
-            stop_after=3 if is_canary else None,
-        )
-        scanned = len(ready) + sum(skipped.values())
-        if not is_canary:
-            tested = set(old_canary.get("track_ids") or [])
-            ready = [row for row in ready if row["id"] not in tested]
-        queue_progress.update(user_id, state="queuing", processed=scanned,
-                              eligible=len(ready))
+                             old_canary.get("include_localized") != bool(include_localized)
+                             or (review_token and old_canary.get("scope") != scope)):
+            raise ValueError("Verify the three-track canary in Navidrome for this update scope before bulk application.")
+        skipped = {"already_localized": 0, "manual_or_busy": 0, "invalid_or_missing": 0}
+        if review_token:
+            review = store.setting(_review_key(user_id), {}) or {}
+            if (review.get("token") != review_token or
+                    time.time() - review.get("created", 0) > 4 * 3600 or
+                    bool(review.get("include_localized")) != bool(include_localized)):
+                raise ValueError("Language review expired or changed. Run the read-only review again.")
+            kinds = ("display_changes",) if scope == "names" else ("display_changes", "original_updates")
+            selected_ids = [id for kind in kinds for id in review["by_kind"].get(kind, [])]
+            if not is_canary:
+                tested = set(old_canary.get("track_ids") or [])
+                selected_ids = [id for id in selected_ids if id not in tested]
+            # Recheck asset identity and eligibility even though the review is
+            # recent. It is never sufficient authority to enqueue changed files.
+            hashes = review.get("asset_hashes") or {}
+            ready = []
+            for track_id in selected_ids[:limit]:
+                row = store.one(
+                    """SELECT t.id,t.current_asset_id,t.operation_state,t.health,
+                              t.metadata_edited,t.file_path,t.mbid,a.sha256 AS current_sha
+                       FROM tracks t LEFT JOIN assets a ON a.id=t.current_asset_id
+                       WHERE t.id=? AND t.user_id=?""", (track_id, user_id))
+                if not row or not hashes.get(track_id) or row["current_sha"] != hashes[track_id]:
+                    skipped["invalid_or_missing"] += 1
+                elif row["metadata_edited"] or row["operation_state"] != "IDLE":
+                    skipped["manual_or_busy"] += 1
+                else:
+                    ready.append(row)
+            scanned = len(selected_ids)
+            queue_progress.update(user_id, state="queuing", processed=scanned,
+                                  total=scanned, eligible=len(ready))
+        else:
+            # Compatibility for existing API clients; the new Language UI always
+            # passes an exact, time-limited review token and scope.
+            ready, skipped = candidates(
+                store, user_id, include_localized=include_localized, progress=on_scan,
+                stop_after=3 if is_canary else None,
+            )
+            scanned = len(ready) + sum(skipped.values())
+            if not is_canary:
+                tested = set(old_canary.get("track_ids") or [])
+                ready = [row for row in ready if row["id"] not in tested]
+            queue_progress.update(user_id, state="queuing", processed=scanned,
+                                  eligible=len(ready))
         queued_ids = []
         for row in ready[:limit]:
             try:
@@ -383,7 +421,9 @@ def queue(store, user_id, limit, include_localized=False):
         if is_canary and queued_ids:
             store.set_setting(_canary_key(user_id),
                               {"policy": LANGUAGE_POLICY, "track_ids": queued_ids,
-                               "include_localized": bool(include_localized), "verified": False})
+                               "include_localized": bool(include_localized),
+                               "scope": scope if review_token else "names_and_originals",
+                               "verified": False})
         store.event("INFO", f"English-name {mode}: "
                     f"{len(queued_ids)} track jobs queued; {sum(skipped.values())} excluded. "
                     "No downloads or identity changes; worker results will appear in Activity.",
@@ -391,7 +431,7 @@ def queue(store, user_id, limit, include_localized=False):
         queue_progress.update(user_id, state="complete", queued=len(queued_ids),
                               skipped=skipped, error=None)
         return {"queued": len(queued_ids), "eligible_before": len(ready),
-                "scanned": scanned, "skipped": skipped, "mode": mode,
+                "scanned": scanned, "skipped": skipped, "mode": mode, "scope": scope,
                 "message": "English-first metadata jobs queued; no downloads or album guessing."}
     except Exception as exc:
         queue_progress.update(user_id, state="error", error=str(exc))
