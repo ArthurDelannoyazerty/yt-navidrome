@@ -60,6 +60,7 @@ class LanguageApplyInput(BaseModel):
     include_localized: bool = False
     review_token: str | None = Field(default=None, min_length=32, max_length=32)
     scope: Literal["names", "names_and_originals"] = "names_and_originals"
+    smart_only: bool = False
 
 
 class LanguageUserInput(BaseModel):
@@ -156,8 +157,9 @@ def install_catalogue_routes(app, store, pipeline):
     @app.get("/api/catalogue/language-name-changes")
     def language_name_changes(user_id: str, review_token: str = Query(min_length=32, max_length=32),
                               offset: int = Query(0, ge=0, le=5000),
-                              limit: int = Query(100, ge=1, le=100)):
-        return name_changes(store, user_id, review_token, offset, limit)
+                              limit: int = Query(100, ge=1, le=100),
+                              smart_only: bool = True):
+        return name_changes(store, user_id, review_token, offset, limit, smart_only)
 
     @app.get("/api/catalogue/language-name-change-status")
     def language_name_change_status(user_id: str, review_token: str = Query(min_length=32, max_length=32)):
@@ -190,7 +192,8 @@ def install_catalogue_routes(app, store, pipeline):
         albums.require_migration_complete()
         store.require_user(data.user_id)
         return await asyncio.to_thread(queue_languages, store, data.user_id, data.limit,
-                                       data.include_localized, data.review_token, data.scope)
+                                       data.include_localized, data.review_token, data.scope,
+                                       data.smart_only)
 
     @app.get("/api/catalogue/graph")
     def graph(user_id: str, view: str = "downloaded", kinds: str = "artist,recording,release,release-group,work",
