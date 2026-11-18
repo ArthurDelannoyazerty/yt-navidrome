@@ -208,3 +208,38 @@ def test_release_endpoint_validates_user_and_exposes_retry_after(db, monkeypatch
         assert int(response.headers["Retry-After"]) >= 29
         assert client.get(url, params={**params, "user_id": "other"}).status_code == 400
         assert client.get(url, params={**params, "recording_id": "bad"}).status_code == 422
+
+
+def test_search_prefers_english_labels_without_changing_identity_or_canonical_name():
+    recording = normalize({"count": 1, "recordings": [{
+        "id": RID, "title": "踊子のテーマ",
+        "aliases": [{"name": "Dancer's Theme", "locale": "en", "primary": True}],
+        "artist-credit": [{"name": "西木康智", "artist": {
+            "id": ID, "name": "西木康智",
+            "aliases": [{"name": "Yasunori Nishiki", "locale": "en", "primary": True}]
+        }}],
+    }]}, "recording", 1)["items"][0]
+    assert recording["id"] == RID
+    assert recording["title"] == "踊子のテーマ"
+    assert recording["preferred_title"] == "Dancer's Theme"
+    assert recording["artist"] == "西木康智"
+    assert recording["preferred_artist"] == "Yasunori Nishiki"
+    assert recording["artists"][0]["id"] == ID
+
+    artist = normalize({"count": 1, "artists": [{
+        "id": ID, "name": "西木康智",
+        "aliases": [{"name": "Yasunori Nishiki", "locale": "en"}],
+    }]}, "artist", 1)["items"][0]
+    assert artist["id"] == ID
+    assert artist["name"] == "西木康智"
+    assert artist["preferred_name"] == "Yasunori Nishiki"
+
+
+def test_search_never_guesses_english_names_when_alias_is_missing():
+    item = normalize({"count": 1, "recordings": [{
+        "id": RID, "title": "原題",
+        "artist-credit": [{"name": "アーティスト", "artist": {"name": "アーティスト"}}],
+    }]}, "recording", 1)["items"][0]
+    assert item["preferred_title"] == "原題"
+    assert item["preferred_artist"] == "アーティスト"
+
