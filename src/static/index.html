@@ -454,10 +454,10 @@
             <li><strong>2. Listen</strong><p>Music is playable in Navidrome after its next library scan, even while a track waits for metadata approval.</p></li>
             <li><strong>3. Approve</strong><p>Go to Approval to confirm its MusicBrainz identity and metadata.</p></li>
           </ol>
-          <p><strong>Audio availability and operation progress are different.</strong> Playable/AVAILABLE means audio exists; Missing/MISSING means a previously present file is absent. Queued, Running, Deferred, Waiting for approval, Failed, Stopped and Idle describe work states.</p>
+          <p><strong>Two independent states:</strong> Audio availability and operation progress are different. Playable/AVAILABLE means audio exists; Missing/MISSING means a previously present file is absent. Queued, Running, Deferred, Waiting for approval, Failed, Stopped and Idle describe work states.</p>
           <div class="workflow-guide" role="group" aria-label="Music ingestion workflow">
             <h4>How work progresses</h4>
-            <figure class="workflow-diagram">
+            <figure class="workflow-diagram" role="group" aria-label="Track operation states and transitions">
               <div id="workflowDiagram" aria-label="Music operation states"></div>
               <div id="workflowZoom" class="workflow-zoom" role="group" aria-label="Diagram zoom" hidden>
                 <button id="workflowZoomOut" type="button" class="secondary" aria-label="Zoom out">−</button>
@@ -468,7 +468,7 @@
               <figcaption>Approval, retries and maintenance queue work. Temporary provider problems may defer a task. The diagram can be zoomed on touch screens.</figcaption>
             </figure>
           </div>
-          <details class="help-detail"><summary>Statuses and common actions</summary>
+          <details class="help-detail"><summary>Button reference and operation statuses</summary>
             <dl class="help-definitions">
               <dt>Waiting for approval</dt><dd>A recording needs your metadata decision.</dd>
               <dt>Queued / Running</dt><dd>The worker is waiting for, or executing, an operation.</dd>
@@ -479,7 +479,7 @@
               <dt>Remove / Ignore</dt><dd>Choose whether to remove a local entry or block a source URL. The dialog explains affected playlists and files.</dd>
             </dl>
           </details>
-          <details class="help-detail"><summary>Operation transition reference</summary>
+          <details class="help-detail"><summary>All operation transitions</summary>
             <table class="transition-table"><thead><tr><th>From</th><th>When</th><th>Next</th></tr></thead><tbody>
               <tr><td>Queued</td><td>Worker starts</td><td>Processing</td></tr>
               <tr><td>Processing</td><td>Review required</td><td>Waiting for approval</td></tr>
