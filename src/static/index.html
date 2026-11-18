@@ -257,16 +257,19 @@
     <section class="catalogue-details" aria-label="English-first music names">
       <h3>English-first names</h3>
       <p class="hint">Global default: prefer MusicBrainz English aliases for titles and artists; preserve canonical names in ORIGINALTITLE, ORIGINALARTIST and ORIGINALALBUM Opus tags. Missing English names are not invented. Catalogue indexing never edits audio.</p>
-      <div class="row"><button id="catalogueLanguagePreview" type="button" class="secondary">Review existing-library English tagging</button></div>
+      <div class="row"><button id="catalogueLanguagePreview" type="button" class="secondary">Review existing-library English tagging</button>
+        <label class="hint"><input type="checkbox" id="catalogueLanguageRecheck"> Recheck already tagged names</label></div>
       <p id="catalogueLanguageStatus" class="hint" role="status" aria-live="polite"></p>
+      <p id="catalogueLanguageActivity" class="hint" role="status" aria-live="polite"></p>
       <div id="catalogueLanguagePlan" hidden>
         <p id="catalogueLanguageCounts" class="hint"></p>
         <div id="catalogueLanguageSample" class="catalogue-results"></div>
         <div class="row">
           <button id="catalogueLanguageCanary" type="button" class="secondary">Apply to first 3 tracks</button>
-          <button id="catalogueLanguageBulk" type="button">Apply to remaining eligible tracks</button>
+          <button id="catalogueLanguageBulk" type="button" disabled>Apply to remaining eligible tracks</button>
+          <button id="catalogueLanguageVerify" type="button" class="secondary" hidden>Navidrome checked — enable remaining</button>
         </div>
-        <p class="hint">Back up music, importer and Navidrome first. Apply three tracks, let Navidrome scan and verify song IDs/playlists/ratings before applying the rest. User-edited metadata and busy tracks are excluded; stable paths and recording IDs remain unchanged.</p>
+        <p class="hint">Back up music, importer and Navidrome. Test up to three tracks first, allow Navidrome to scan, then confirm song IDs, favorites, ratings and playlists. Only then enable the remaining tracks. User-edited or busy tracks are excluded; MusicBrainz IDs and file paths remain unchanged. Review never edits files. Details appear in Activity.</p>
       </div>
     </section>
     <section class="catalogue-details" aria-label="Album organization">
@@ -437,7 +440,7 @@
       <p><strong>Global language policy:</strong> MusicBrainz aliases may be English translations, transliterations or commonly used English spellings. beets prefers an existing English alias for approved recording and artist names (and album titles of confirmed releases); it keeps canonical MusicBrainz names when no English alias exists. No machine translation is generated, and no per-user setting is needed.</p>
       <p><strong>Original names:</strong> the importer writes the canonical recording/artist/release names to the Opus/Vorbis fields ORIGINALTITLE, ORIGINALARTIST and ORIGINALALBUM when the corresponding identity is confirmed. These store the canonical MusicBrainz spellings, not the oldest historical performance or album. The usual TITLE, ARTIST and ALBUM tags are the preferred display names. Your player may need custom-tag configuration to show original-name fields.</p>
       <p><strong>Individual approval:</strong> choose a MusicBrainz recording using Use; its English-preferred name and canonical name are stored together. Use with a specific release to also assign an album. A recording-only approval never invents an edition or takes an arbitrary album; Unknown Album is expected until an edition is chosen.</p>
-      <p><strong>Existing-library scan:</strong> Index downloaded recordings only updates the public MusicBrainz catalogue and does not retag or download audio. To apply English names to existing local files, open Catalogue → English-first names → Review existing-library English tagging. Back up your library, use Apply to first 3 tracks, check Navidrome song IDs, favorites and playlists, then explicitly queue the remaining eligible tracks. This uses copy-on-write, SHA checks and local undo copies. It skips busy music and manually edited metadata and never changes MusicBrainz identities or album assignments.</p>
+      <p><strong>Existing-library scan:</strong> Index downloaded recordings only updates the public MusicBrainz catalogue and does not retag or download audio. To apply English names to existing local files, open Catalogue → English-first names → Review existing-library English tagging. Back up your library, use Apply to first 3 tracks, check Navidrome song IDs, favorites, ratings and playlists, acknowledge the check, then explicitly queue the remaining eligible tracks. Recheck already tagged names only when you want to refresh names from updated English aliases. This uses copy-on-write, SHA checks and local undo copies. It skips busy music and manually edited metadata and never changes MusicBrainz identities or album assignments.</p>
       <p><strong>Album comparison:</strong> a reviewed exact release can supply an English title from an available cached alias, retaining its canonical title in ORIGINALALBUM. No English release alias means the canonical album title stays. Album-only edits do not select an alternate edition or re-download audio.</p>
     </details>
     <details class="help-detail"><summary>MusicBrainz Catalogue, local search and graph</summary>
