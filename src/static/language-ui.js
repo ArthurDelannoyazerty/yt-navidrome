@@ -94,7 +94,7 @@ window.LanguageUI = (() => {
     const same = Boolean(c.include_localized) === recheck() &&
       (c.scope || "names_and_originals") === scope();
     const verified = c.verified && same;
-    const remaining = Math.max(0, available - (same ? (c.track_count || 0) : 0));
+    const remaining = Math.max(0, available - (same ? (c.review_tested || 0) : 0));
     const completedBatch = stateUI.batch?.mode === "bulk" && stateUI.batch?.state === "done";
     $("languageScopeSummary").textContent = stateUI.review
       ? number(available) + " candidates selected from the cached review" +
