@@ -161,8 +161,12 @@ def _classify(con, track, tags):
             expected_display["ALBUM"] = proposed_album
         if proposed_albumartist:
             expected_display["ALBUMARTIST"] = proposed_albumartist
-        display_changes = [key.title() for key, expected in expected_display.items()
-                           if expected and _tag(tags, key) != expected]
+        display_diffs = [
+            {"field": key, "before": _tag(tags, key), "after": expected}
+            for key, expected in expected_display.items()
+            if expected and _tag(tags, key) != expected
+        ]
+        display_changes = [change["field"].title() for change in display_diffs]
         expected_native = {"ORIGINALTITLE": native_title, "ORIGINALARTIST": native_artist}
         if native_album:
             expected_native["ORIGINALALBUM"] = native_album
@@ -172,10 +176,26 @@ def _classify(con, track, tags):
                             if expected and _tag(tags, key) != expected]
         kind = ("display_changes" if display_changes else
                 "original_updates" if original_changes else "unchanged")
+        proposed_name = " - ".join(x for x in (preferred_artist, preferred_title) if x)
+        if any(diff["field"] in {"TITLE", "ARTIST"} for diff in display_diffs):
+            before_label = base["current_name"]
+            after_label = proposed_name
+            changed_field = "Title / artist"
+        elif display_diffs:
+            # Album-only changes must show the field that actually changes,
+            # not an identical artist/title on both sides of the arrow.
+            diff = display_diffs[0]
+            before_label, after_label = diff["before"], diff["after"]
+            changed_field = "Album artist" if diff["field"] == "ALBUMARTIST" else "Album"
+        else:
+            before_label = after_label = None
+            changed_field = None
         return {**base, "kind": kind,
-                "proposed_name": " - ".join(x for x in (preferred_artist, preferred_title) if x),
+                "proposed_name": proposed_name,
                 "canonical_name": " - ".join(x for x in (native_artist, native_title) if x),
                 "album": proposed_album,
+                "before_label": before_label, "after_label": after_label,
+                "changed_field": changed_field, "display_diffs": display_diffs,
                 "changes": display_changes + original_changes,
                 "prediction": "Cache estimate; exact MusicBrainz data checked when applying"}
     except (ValueError, TypeError, KeyError, AttributeError):
@@ -194,6 +214,7 @@ def preview(store, user_id, include_localized=False):
     counts = {"display_changes": 0, "original_updates": 0, "unchanged": 0, "unknown": 0}
     ids = {key: [] for key in counts}
     evidence = {}
+    display_rows = []
     examples = []
     examples_by_kind = {key: 0 for key in counts}
     def on_progress(done, total, eligible, skipped):
@@ -212,6 +233,12 @@ def preview(store, user_id, include_localized=False):
                 counts[kind] += 1
                 ids[kind].append(track["id"])
                 evidence[track["id"]] = track["sha256"]
+                if kind == "display_changes":
+                    display_rows.append({
+                        key: item.get(key) for key in
+                        ("id", "current_name", "proposed_name",
+                         "before_label", "after_label", "changed_field", "changes")
+                    })
                 # Show substantive examples first, not eight unchanged titles.
                 if examples_by_kind[kind] < (3 if kind != "unchanged" else 2):
                     examples.append(item)
@@ -232,6 +259,7 @@ def preview(store, user_id, include_localized=False):
             "token": token, "created": time.time(),
             "include_localized": bool(include_localized),
             "by_kind": ids, "asset_hashes": evidence,
+            "display_rows": display_rows,
             "summary": result,
         })
     except Exception as exc:
@@ -264,6 +292,76 @@ def review_state(store, user_id):
         return {"state": "expired"}
     summary = saved.get("summary")
     return {"state": "ready", "result": summary} if summary else {"state": "idle"}
+
+
+
+def _checked_name_review(store, user_id, review_token):
+    """Authoritative recent review; track identity still rechecked at queue time."""
+    store.require_user(user_id)
+    review = store.setting(_review_key(user_id), {}) or {}
+    if (review.get("token") != review_token
+            or time.time() - review.get("created", 0) > 4 * 3600):
+        raise ValueError("Review expired or changed. Run the read-only review again.")
+    if "display_rows" not in review:
+        raise ValueError("Run the review again to generate the full name-change list.")
+    return review
+
+
+def name_changes(store, user_id, review_token, offset=0, limit=100):
+    """Return only visible-name changes, with server-side pagination and job state."""
+    if not 0 <= offset <= MAX_TRACKS or not 1 <= limit <= 100:
+        raise ValueError("Invalid name-change list page")
+    review = _checked_name_review(store, user_id, review_token)
+    all_rows = review["display_rows"]
+    page = [dict(row) for row in all_rows[offset:offset + limit]]
+    if page:
+        ids = [row["id"] for row in page]
+        marks = ",".join("?" for _ in ids)
+        jobs = store.rows(
+            f"""SELECT target,state FROM jobs WHERE user_id=? AND kind='track'
+                AND json_extract(payload,'$.mode')='language'
+                AND json_extract(payload,'$.review_token')=?
+                AND target IN ({marks}) ORDER BY id DESC""",
+            (user_id, review_token, *ids),
+        )
+        latest = {}
+        for job in jobs:
+            latest.setdefault(job["target"], job["state"])
+        for row in page:
+            row["job_state"] = latest.get(row["id"])
+    return {"total": len(all_rows), "offset": offset, "items": page,
+            "next_offset": offset + len(page) if offset + len(page) < len(all_rows) else None}
+
+
+def queue_one_name_change(store, user_id, track_id, review_token):
+    """Explicitly queue one selected visible-name change; never modify the canary."""
+    review = _checked_name_review(store, user_id, review_token)
+    if track_id not in review["by_kind"].get("display_changes", []):
+        raise ValueError("Only an explicitly reviewed visible-name change can be selected")
+    asset_sha = review.get("asset_hashes", {}).get(track_id)
+    track = store.one(
+        """SELECT t.id,t.file_path,t.health,t.operation_state,t.metadata_edited,
+                  t.mbid,t.current_asset_id,a.path AS asset_path,a.state AS asset_state,
+                  a.sha256 AS asset_sha
+           FROM tracks t LEFT JOIN assets a ON a.id=t.current_asset_id
+           WHERE t.id=? AND t.user_id=?""", (track_id, user_id),
+    )
+    if not track or not asset_sha or track["asset_sha"] != asset_sha:
+        raise ValueError("Music or its audio asset changed since review; review again")
+    path = Path(track["file_path"]) if track["file_path"] else None
+    root = (common.LIBRARY / user_id).resolve()
+    if (track["health"] != "AVAILABLE" or track["operation_state"] != "IDLE"
+            or track["metadata_edited"] or not track["mbid"]
+            or track["asset_state"] != "CURRENT" or not track["current_asset_id"]
+            or not path or path.is_symlink()
+            or path != root / "audio" / (track_id + ".opus")
+            or track["asset_path"] != str(path) or not path.is_file()):
+        raise ValueError("Music is no longer safe for this update; review again")
+    store.queue_track(track_id, user_id, {"mode": "language", "review_token": review_token})
+    store.event("INFO", f"Individual English-name update queued for {track_id}; "
+                "worker details will appear in Activity. Recording ID and audio path stay fixed.",
+                user_id, "language-review")
+    return {"queued": 1, "track_id": track_id, "message": "Name update queued; follow Activity for its result."}
 
 
 def batch_status(store, user_id):
@@ -426,7 +524,8 @@ def queue(store, user_id, limit, include_localized=False, review_token=None,
         queued_ids = []
         for row in ready[:limit]:
             try:
-                store.queue_track(row["id"], user_id, {"mode": "language"})
+                store.queue_track(row["id"], user_id, {"mode": "language",
+                                                        "review_token": review_token})
                 queued_ids.append(row["id"])
                 queue_progress.update(user_id, queued=len(queued_ids))
             except (ValueError, LookupError) as exc:
