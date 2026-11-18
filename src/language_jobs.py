@@ -320,9 +320,16 @@ def canary_status(store, user_id):
               or not is_localized(Path(track["file_path"]))):
             failed += 1
     ready = failed == 0 and pending == 0
+    review = store.setting(_review_key(user_id), {}) or {}
+    scope = saved.get("scope", "names_and_originals")
+    reviewed = review.get("by_kind", {})
+    eligible_types = ("display_changes",) if scope == "names" else ("display_changes", "original_updates")
+    in_current_review = set(track_id for kind in eligible_types for track_id in reviewed.get(kind, []))
+    already_in_review = sum(track_id in in_current_review for track_id in ids)
     return {"state": "failed" if failed else "running" if pending else "ready",
             "verified": ready and bool(saved.get("verified")),
-            "track_count": len(ids), "pending": pending, "failed": failed,
+            "track_count": len(ids), "review_tested": already_in_review,
+            "pending": pending, "failed": failed,
             "include_localized": bool(saved.get("include_localized")),
             "scope": saved.get("scope", "names_and_originals"),
             "track_ids": ids}
