@@ -252,3 +252,51 @@ def test_search_preserves_recording_credited_name_without_english_artist_alias()
     }]}, "recording", 1)["items"][0]
     assert item["preferred_artist"] == "Special Guest Credit"
     assert item["artist"] == "Special Guest Credit"
+
+
+def test_exact_recording_lookup_returns_canonical_characters_and_english_alias(db, monkeypatch):
+    requests_seen = []
+    def send(self, original, session, prepared, **kwargs):
+        requests_seen.append(prepared)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({
+            "id": RID, "title": "踊子プリムロゼのテーマ",
+            "aliases": [{"name": "Primrose, the Dancer", "locale": "en", "primary": True}],
+            "artist-credit": [{"name": "西木康智", "artist": {"id": ID, "name": "西木康智"}}],
+        }).encode("utf-8")
+        return response
+    monkeypatch.setattr(HttpPolicy, "send", send)
+    app = create_app(db, start_workers=False)
+    with TestClient(app) as client:
+        endpoint = "/api/musicbrainz/recording-names"
+        params = {"user_id": "admin", "recording_id": RID}
+        response = client.get(endpoint, params=params)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == RID
+        assert data["title"] == "踊子プリムロゼのテーマ"
+        assert data["preferred_title"] == "Primrose, the Dancer"
+        assert data["artist"] == "西木康智"
+        assert client.get(endpoint, params=params).json() == data
+        assert client.get(endpoint, params={**params, "user_id": "unknown"}).status_code == 400
+        assert client.get(endpoint, params={**params, "recording_id": "invalid"}).status_code == 422
+    assert len(requests_seen) == 1, "Exact lookups should be cached"
+    assert requests_seen[0].url.startswith("https://musicbrainz.org/ws/2/recording/" + RID)
+    assert "artist-credits" in requests_seen[0].url and "aliases" in requests_seen[0].url
+
+
+def test_exact_recording_lookup_does_not_invent_english_alias(db, monkeypatch):
+    def send(self, original, session, prepared, **kwargs):
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({
+            "id": RID, "title": "日本語の名前",
+            "artist-credit": [{"name": "西木康智", "artist": {"name": "西木康智"}}],
+        }).encode()
+        return response
+    monkeypatch.setattr(HttpPolicy, "send", send)
+    data = asyncio.run(MusicBrainzSearch(db).recording_names(RID))
+    assert data["title"] == "日本語の名前"
+    assert data["preferred_title"] is None
+    assert data["artist"] == "西木康智"
