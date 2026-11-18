@@ -161,6 +161,9 @@ class ApprovalPrefetch:
         }, priority)])
 
     def cached_search(self, entity, title, artist, artist_id=None, page=1):
+        query_for(entity, str(title), str(artist), artist_id)
+        if type(page) is not int or not 1 <= page <= 100:
+            raise ValueError("Search page must be between 1 and 100")
         key = search_key(entity, title, artist, artist_id, page)
         with self.catalogue.db() as con:
             payload, fresh = self._cached(con, "search", key)
@@ -297,22 +300,35 @@ class ApprovalPrefetch:
                 """SELECT t.id,t.user_id,t.choices,t.current_origin_id,t.pending_operation,
                           o.id AS origin_id,o.title AS origin_title,o.channel AS origin_channel
                    FROM tracks t LEFT JOIN track_origins o
-                   ON o.id=COALESCE(json_extract(t.pending_operation,'$.origin_id'),
-                                    t.current_origin_id)
+                   ON o.id=COALESCE(
+                       CASE WHEN json_valid(t.pending_operation)
+                            THEN json_extract(t.pending_operation,'$.origin_id') END,
+                       t.current_origin_id)
                    WHERE t.operation_state='NEEDS_APPROVAL'
                    ORDER BY t.updated_at DESC LIMIT 10000"""
             ).fetchall()
             tracks = len(rows)
             for row in rows:
-                for item in json.loads(row["choices"] or "[]"):
+                try:
+                    choices = json.loads(row["choices"] or "[]")
+                    if not isinstance(choices, list):
+                        choices = []
+                except (ValueError, TypeError):
+                    choices = []
+                for item in choices:
                     if isinstance(item, dict) and (mid := valid_id(item.get("mbid"))):
                         seeds.append(self._job("recording", mid, {"id": mid}, 20))
                 if not row["origin_id"]:
                     continue
                 origin = {"id": row["origin_id"], "title": row["origin_title"],
                           "channel": row["origin_channel"], "user_id": row["user_id"]}
-                source = source_snapshot(con, origin)
-                hint = search_hints(source, origin)
+                try:
+                    source = source_snapshot(con, origin)
+                    hint = search_hints(source, origin)
+                except (ValueError, TypeError, KeyError):
+                    # A malformed retained source must not block every other
+                    # waiting track from being prefetched.
+                    continue
                 if hint["artist"]:
                     alias = con.execute(
                         "SELECT * FROM metadata_artist_aliases WHERE user_id=? AND alias_key=?",
