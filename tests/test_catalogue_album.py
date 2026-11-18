@@ -709,6 +709,7 @@ def test_language_ui_scoped_apply_uses_recent_review_and_requires_matching_canar
         sent = client.post("/api/catalogue/language-apply", json=data)
         assert sent.status_code == 200, sent.text
         assert sent.json()["queued"] == 1, "Original-tag-only and unknown records must not be included"
+        assert canary_status(db, "admin")["review_tested"] == 1
         targets = {row["target"] for row in db.rows(
             "SELECT target FROM jobs WHERE kind='track' AND payload LIKE '%language%'")}
         assert targets == {name_id}
@@ -734,6 +735,10 @@ def test_language_ui_scoped_apply_uses_recent_review_and_requires_matching_canar
         })
         assert verified.status_code == 200
         assert verified.json()["scope"] == "names"
+        # Retrying the review after the test omits now-tagged tracks. The
+        # remaining counter must subtract only test IDs still in the review.
+        preview(db, "admin")
+        assert canary_status(db, "admin")["review_tested"] == 0
         assert client.post("/api/catalogue/language-apply", json={
             **data, "limit": 5000, "scope": "names_and_originals",
         }).status_code == 400, "A broader scope needs a new canary"
