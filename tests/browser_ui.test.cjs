@@ -248,6 +248,10 @@ async function fixtureServer(t, data) {
         result = data.recordingNames?.[id] || {id, title: "誓いの旋律",
           preferred_title: "Melody of Oaths", artist: "末廣健一郎"};
       }
+      else if (url.pathname === "/api/musicbrainz/artist-names") {
+        const id = url.searchParams.get("artist_id");
+        result = data.artistNames?.[id] || {id, name:"西木康智", preferred_name:"Yasunori Nishiki"};
+      }
       else if (url.pathname.endsWith("/metadata-context")) {
         const track = data.tracks.find(track => track.id === url.pathname.split("/")[3]) || data.tracks[0];
         result = {track_id: track.id, user_id: "admin", revision: "b".repeat(64),
@@ -879,5 +883,37 @@ test("real browser: completed Language row uses light-red Reverse and queues exa
   assert.ok(written);
   assert.deepEqual(written.body,{user_id:"admin",track_id:id,review_token:token,confirmed:true});
   assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesList .language-change-row button').disabled"),true);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: sparse MusicBrainz search adds English under Japanese only after exact-ID lookup", {timeout:60000}, async t => {
+  const chrome=await browser(t); if (!chrome) return;
+  const data=fixtures();
+  const rid="22222222-2222-4222-8222-222222222222";
+  const aid="11111111-1111-4111-8111-111111111111";
+  data.searchResults=[{id:rid,title:"踊子プリムロゼのテーマ",artist:"西木康智",length_ms:200000,releases:[]}];
+  data.recordingNames={[rid]:{
+    id:rid,title:"踊子プリムロゼのテーマ",preferred_title:"Primrose, the Dancer",
+    artist:"西木康智",preferred_artist:"Yasunori Nishiki",
+  }};
+  data.artistNames={[aid]:{id:aid,name:"西木康智",preferred_name:"Yasunori Nishiki"}};
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelector('#mbResults .approval-search-recording-name .approval-english-alias')");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-name a').textContent"),"踊子プリムロゼのテーマ");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-name .approval-english-alias').textContent"),"English: Primrose, the Dancer");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-artist strong').textContent"),"西木康智");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-artist .approval-english-alias').textContent"),"English: Yasunori Nishiki");
+  assert.ok(data.reads.some(s=>s.includes("/api/musicbrainz/recording-names?")&&s.includes(rid)));
+  data.searchResults=[{id:aid,name:"西木康智",country:"JP",type:"Person",aliases:[]}];
+  await chrome.evaluate("document.querySelector('#mbEntity').value='artist'; document.querySelector('#mbEntity').dispatchEvent(new Event('change'))");
+  await chrome.until("document.querySelector('#mbResults .approval-search-artist-name .approval-english-alias')");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-artist-name a').textContent"),"西木康智");
+  assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-search-artist-name .approval-english-alias').textContent"),"English: Yasunori Nishiki");
+  assert.ok(data.reads.some(s=>s.includes("/api/musicbrainz/artist-names?")&&s.includes(aid)));
   assert.deepEqual(chrome.errors,[]);
 });
