@@ -844,8 +844,8 @@ test("real browser: Approval shows native characters and English aliases in both
   assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-artist small').textContent"),/Kenichiro Suehiro/);
   assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-track a').textContent"),"踊子プリムロゼのテーマ");
   assert.equal(await chrome.evaluate("document.querySelector('#mbResults .approval-track .approval-english-alias').textContent"),"English: Primrose, the Dancer");
-  assert.match(await chrome.evaluate("document.querySelector('#mbResults .approval-artist').textContent"),/西木康智/);
-  assert.match(await chrome.evaluate("document.querySelector('#mbResults .approval-artist .approval-english-alias').textContent"),/Yasunori Nishiki/);
+  assert.match(await chrome.evaluate("document.querySelector('#mbResults tbody td.approval-artist').textContent"),/西木康智/);
+  assert.match(await chrome.evaluate("document.querySelector('#mbResults tbody td.approval-artist .approval-english-alias').textContent"),/Yasunori Nishiki/);
   assert.ok(data.reads.some(x=>x.startsWith("/api/musicbrainz/recording-names?")));
   assert.deepEqual(chrome.errors,[]);
 });
@@ -872,7 +872,7 @@ test("real browser: completed Language row uses light-red Reverse and queues exa
   await chrome.until("document.querySelector('#languageNameChangesList .language-reverse-button')");
   assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesList .language-reverse-button').textContent"),"Reverse");
   assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesList .language-reverse-button').disabled"),false);
-  assert.match(await chrome.evaluate("getComputedStyle(document.querySelector('#languageNameChangesList .language-reverse-button')).backgroundColor"),/rgb\\(251, 235, 234\\)/);
+  assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#languageNameChangesList .language-reverse-button')).backgroundColor"),"rgb(251, 235, 234)");
   await chrome.evaluate("document.querySelector('#languageNameChangesList .language-reverse-button').click()");
   await chrome.until("document.querySelector('#languageNameChangesList .language-change-row button').textContent==='Reversing'");
   const written=data.writes.find(x=>x.path==="/api/catalogue/language-reverse");
