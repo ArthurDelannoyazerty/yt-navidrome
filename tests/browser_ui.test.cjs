@@ -996,7 +996,8 @@ test("real browser: all twenty search candidates hydrate with one local request 
   assert.ok(requests.some(x=>x.includes(identity(19))),"The last candidate must be hydrated");
   assert.equal(data.reads.filter(x=>x.startsWith("/api/musicbrainz/recording-names?")||
                                      x.startsWith("/api/musicbrainz/artist-names?")).length,0);
-  assert.match(await chrome.evaluate("document.querySelector('#approvalPrefetchStatus').textContent"),/120 cached/);
+  assert.match(await chrome.evaluate("document.querySelector('#approvalCacheCompleted').textContent"),/120 \/ 1,920/);
+  assert.match(await chrome.evaluate("document.querySelector('#approvalPrefetchStatus').textContent"),/624 waiting tracks/);
   assert.deepEqual(chrome.errors,[]);
 });
 
