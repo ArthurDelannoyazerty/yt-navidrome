@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -86,6 +87,7 @@ class ApprovalPrefetch:
         self.last_seed_at = 0.0
         self.last_seed_count = 0
         self.pause_until = 0.0
+        self._cleanup_lock = threading.RLock()
 
     def init(self):
         with self.catalogue.db() as con:
@@ -469,21 +471,24 @@ class ApprovalPrefetch:
             value = await asyncio.to_thread(self.searcher.request_recording_names, args["id"])
             if value["id"] != args["id"]:
                 raise ValueError("MusicBrainz returned a different recording identity")
-            if self._store(kind, args["id"], value, NAME_TTL, expected_job=True):
-                self.enqueue_names(artists=[v["id"] for v in value.get("artist_credits") or []
-                                            if v.get("id")], priority=15)
+            with self._cleanup_lock:
+                if self._store(kind, args["id"], value, NAME_TTL, expected_job=True):
+                    self.enqueue_names(artists=[v["id"] for v in value.get("artist_credits") or []
+                                                if v.get("id")], priority=15)
         elif kind == "artist":
             value = await asyncio.to_thread(self.searcher.request_artist, args["id"])
             if value["id"] != args["id"]:
                 raise ValueError("MusicBrainz returned a different artist identity")
-            self._store(kind, args["id"], value, NAME_TTL, expected_job=True)
+            with self._cleanup_lock:
+                self._store(kind, args["id"], value, NAME_TTL, expected_job=True)
         elif kind == "search":
             result = await self.searcher.search(
                 args["entity"], args["title"], args["artist"], args["artist_id"],
                 args["page"], bypass_prefetch=True,
             )
-            if self._store(kind, job["cache_key"], result, SEARCH_TTL, expected_job=True):
-                self.enqueue_result_names(result, priority=20)
+            with self._cleanup_lock:
+                if self._store(kind, job["cache_key"], result, SEARCH_TTL, expected_job=True):
+                    self.enqueue_result_names(result, priority=20)
         else:
             raise ValueError("Unsupported Approval prefetch operation")
 
@@ -512,9 +517,10 @@ class ApprovalPrefetch:
                     raise
                 except (ValueError, LookupError) as exc:
                     if any(word in str(exc).lower() for word in ("not found", "was not found")):
-                        self._store(job["kind"], job["cache_key"],
-                                    {"id": job["cache_key"], "unavailable": True},
-                                    NEGATIVE_TTL, expected_job=True)
+                        with self._cleanup_lock:
+                            self._store(job["kind"], job["cache_key"],
+                                        {"id": job["cache_key"], "unavailable": True},
+                                        NEGATIVE_TTL, expected_job=True)
                     else:
                         await asyncio.to_thread(self.defer, job, exc)
                 except Exception as exc:
@@ -547,11 +553,10 @@ class ApprovalPrefetch:
                   CASE WHEN json_valid(t.pending_operation)
                        THEN json_extract(t.pending_operation,'$.origin_id') END,
                   t.current_origin_id)
-               WHERE (t.health='AVAILABLE' AND t.mbid IS NOT NULL)
-                  OR t.operation_state='NEEDS_APPROVAL'"""
+               WHERE t.mbid IS NOT NULL OR t.operation_state='NEEDS_APPROVAL'"""
         ).fetchall()
         for row in rows:
-            if row["health"] == "AVAILABLE" and (rid := valid_id(row["mbid"])):
+            if rid := valid_id(row["mbid"]):
                 retain["recording"].add(rid)
             if row["operation_state"] != "NEEDS_APPROVAL":
                 continue
@@ -703,21 +708,22 @@ class ApprovalPrefetch:
         Holding the owners DB write lock while planning prevents a recording
         becoming approved between retention analysis and the cache deletion.
         """
-        with self.store.db() as owner_con:
-            owner_con.execute("BEGIN IMMEDIATE")
-            with self.catalogue.db() as cache_con:
-                cache_con.execute("BEGIN IMMEDIATE")
-                retain, waiting = self._retained_keys(owner_con, cache_con)
-                plan = self._cleanup_plan(cache_con, retain, waiting)
-                cache_con.executemany(
-                    "DELETE FROM approval_prefetch_cache WHERE kind=? AND cache_key=?",
-                    plan["remove_cache"])
-                cache_con.executemany(
-                    "DELETE FROM approval_prefetch_jobs WHERE kind=? AND cache_key=?",
-                    plan["remove_jobs"])
-                cache_con.executemany(
-                    "DELETE FROM approval_prefetch_search_refs WHERE cache_key=? AND track_id=?",
-                    plan["remove_refs"])
+        with self._cleanup_lock:
+            with self.store.db() as owner_con:
+                owner_con.execute("BEGIN IMMEDIATE")
+                with self.catalogue.db() as cache_con:
+                    cache_con.execute("BEGIN IMMEDIATE")
+                    retain, waiting = self._retained_keys(owner_con, cache_con)
+                    plan = self._cleanup_plan(cache_con, retain, waiting)
+                    cache_con.executemany(
+                        "DELETE FROM approval_prefetch_cache WHERE kind=? AND cache_key=?",
+                        plan["remove_cache"])
+                    cache_con.executemany(
+                        "DELETE FROM approval_prefetch_jobs WHERE kind=? AND cache_key=?",
+                        plan["remove_jobs"])
+                    cache_con.executemany(
+                        "DELETE FROM approval_prefetch_search_refs WHERE cache_key=? AND track_id=?",
+                        plan["remove_refs"])
         # The on-disk Catalogue database is shared with Graph, Language and
         # other features. Do not VACUUM it during ingestion or drop its entities.
         summary = self._public_cleanup(plan)
