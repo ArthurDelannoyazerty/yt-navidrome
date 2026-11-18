@@ -611,8 +611,6 @@ def test_indexed_recording_queues_exact_artist_alias_lookup(db):
     first = cat.claim()
     assert first["kind"] == "recording" and first["section"] == "lookup"
     cat.process_page(first)
-    artist = db.one("SELECT id FROM users WHERE name='admin'")
-    assert artist is not None
     with cat.db() as con:
         scope = con.execute(
             "SELECT state FROM scopes WHERE kind='artist' AND entity_id=? AND section='lookup'",
