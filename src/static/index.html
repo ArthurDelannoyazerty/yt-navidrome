@@ -430,112 +430,129 @@
 
   </section>
   <section class="panel help-panel" data-panel="help" hidden>
-    <div class="panel-heading"><div><span class="eyebrow">QUICK GUIDE</span><h2>Import now. Organize when you’re ready.</h2></div></div>
-    <ol class="quick-start" aria-label="Music ingestion workflow">
-      <li><strong>1. Add a source</strong><p>Open Sources and paste a YouTube or public Spotify playlist URL. Monitor a playlist to import new additions. Spotify tracks automatically look for matching YouTube audio.</p></li>
-      <li><strong>2. Listen in Navidrome</strong><p>Downloaded songs appear in <b>Waiting for approval</b> and their playlists after Navidrome scans your library.</p></li>
-      <li><strong>3. Review the metadata</strong><p>Choose a suggested match with Use, search MusicBrainz, or keep the original source tags. The approved file replaces the temporary copy.</p></li>
-    </ol>
-    <h3>From import to approval</h3>
-    <p class="hint">YouTube and Spotify share the same download, identification and approval workflow. Follow the arrows to see what happens next.</p>
-    <div class="workflow-guide" role="group" aria-label="Track operation states and transitions">
-      <figure class="workflow-diagram">
-        <div id="workflowDiagram" aria-label="Music operation states"></div>
-        <div id="workflowZoom" class="workflow-zoom" role="group" aria-label="Diagram zoom" hidden><button id="workflowZoomOut" type="button" class="secondary" aria-label="Zoom out">−</button><button id="workflowZoomIn" type="button" class="secondary" aria-label="Zoom in">+</button><button id="workflowZoomReset" type="button" class="secondary">Reset zoom</button></div>
-        <p id="workflowDiagramStatus" class="hint" role="status">The workflow diagram loads when you open Help.</p>
-        <figcaption>Approval queues the worker to apply your choice. A successful operation ends at Idle. Queued or deferred work can also stop when you cancel an audio search or disable its URL; a shared download pause can defer queued work. On a small screen, use the + button or pinch to zoom.</figcaption>
-      </figure>
-      <p class="workflow-audio-note"><strong>Audio availability is separate.</strong> Playable means a local file exists, including temporary audio while you review it. Missing means an expected file needs redownloading; No audio means no local file is available. Retrying or replacing a track keeps existing audio playable until the replacement succeeds.</p>
-      <div class="workflow-exceptions">
-        <section><h4>Temporary problem</h4><p><strong>Processing → Deferred → Processing</strong></p><p>The displayed retry time controls the next attempt. A shared YouTube pause can also move queued work directly to Deferred. Repeated download failures eventually need your attention.</p></section>
-        <section><h4>Source cannot be downloaded</h4><p><strong>Download work → Stopped</strong></p><p>Use Stop retrying this URL, or let a restricted-video error stop it automatically. Choose another URL, or enable the old one before retrying. Existing audio stays playable.</p></section>
-        <section><h4>Operation failed</h4><p><strong>Processing → Failed → Queued</strong></p><p>Read the error and choose Retry. A failed replacement keeps existing audio playable.</p></section>
-        <section><h4>Update existing music</h4><p><strong>Idle → Queued → Processing</strong></p><p>Reprocess, Redownload and metadata edits start a new operation. The worker asks for review when a match needs your decision.</p></section>
+    <div class="panel-heading"><div><span class="eyebrow">USER GUIDE</span><h2>Help</h2>
+      <p class="hint">Choose a tab on the left. Each section describes the corresponding part of Music Ingestor.</p></div></div>
+    <div class="help-layout">
+      <nav class="help-sidebar" aria-label="Help topics">
+        <strong>Navigate help</strong>
+        <a href="#help-music">Music</a>
+        <a href="#help-approval">Approval</a>
+        <a href="#help-catalogue">Catalogue</a>
+        <a href="#help-language">Language</a>
+        <a href="#help-graph">Graph</a>
+        <a href="#help-sources">Sources</a>
+        <a href="#help-activity">Activity</a>
+        <a href="#help-maintenance">Maintenance</a>
+        <a href="#help-help">Help</a>
+      </nav>
+      <div class="help-topics">
+        <section id="help-music" class="help-topic" aria-labelledby="help-music-title">
+          <h3 id="help-music-title">Music</h3>
+          <p>Your library shows locally imported tracks, playback availability, approval state and actions. Choose a library user at the top of the page; each user has separate audio and playlists.</p>
+          <ol class="quick-start" aria-label="Getting started">
+            <li><strong>1. Import</strong><p>Open Sources, add a YouTube or public Spotify playlist and optionally monitor it.</p></li>
+            <li><strong>2. Listen</strong><p>Music is playable in Navidrome after its next library scan, even while a track waits for metadata approval.</p></li>
+            <li><strong>3. Approve</strong><p>Go to Approval to confirm its MusicBrainz identity and metadata.</p></li>
+          </ol>
+          <p><strong>Audio availability and operation progress are different.</strong> Playable/AVAILABLE means audio exists; Missing/MISSING means a previously present file is absent. Queued, Running, Deferred, Waiting for approval, Failed, Stopped and Idle describe work states.</p>
+          <div class="workflow-guide">
+            <h4>How work progresses</h4>
+            <figure class="workflow-diagram">
+              <div id="workflowDiagram" aria-label="Music operation states"></div>
+              <div id="workflowZoom" class="workflow-zoom" role="group" aria-label="Diagram zoom" hidden>
+                <button id="workflowZoomOut" type="button" class="secondary" aria-label="Zoom out">−</button>
+                <button id="workflowZoomIn" type="button" class="secondary" aria-label="Zoom in">+</button>
+                <button id="workflowZoomReset" type="button" class="secondary">Reset zoom</button>
+              </div>
+              <p id="workflowDiagramStatus" class="hint" role="status">The workflow diagram loads when you open Help.</p>
+              <figcaption>Approval, retries and maintenance queue work. Temporary provider problems may defer a task. The diagram can be zoomed on touch screens.</figcaption>
+            </figure>
+          </div>
+          <details class="help-detail"><summary>Statuses and common actions</summary>
+            <dl class="help-definitions">
+              <dt>Waiting for approval</dt><dd>A recording needs your metadata decision.</dd>
+              <dt>Queued / Running</dt><dd>The worker is waiting for, or executing, an operation.</dd>
+              <dt>Deferred</dt><dd>A provider or shared download cooldown delayed the operation. It will retry at its scheduled time.</dd>
+              <dt>Failed / Stopped</dt><dd>Read the error or change the disabled audio URL before retrying.</dd>
+              <dt>Idle</dt><dd>No operation is running. Audio may still be temporary until you approve metadata.</dd>
+              <dt>Reprocess / Redownload</dt><dd>Reprocess re-identifies a fresh download; Redownload replaces audio but checks the confirmed MusicBrainz recording identity.</dd>
+              <dt>Remove / Ignore</dt><dd>Choose whether to remove a local entry or block a source URL. The dialog explains affected playlists and files.</dd>
+            </dl>
+          </details>
+          <details class="help-detail"><summary>Operation transition reference</summary>
+            <table class="transition-table"><thead><tr><th>From</th><th>When</th><th>Next</th></tr></thead><tbody>
+              <tr><td>Queued</td><td>Worker starts</td><td>Processing</td></tr>
+              <tr><td>Processing</td><td>Review required</td><td>Waiting for approval</td></tr>
+              <tr><td>Waiting for approval</td><td>Confirmed choice</td><td>Queued</td></tr>
+              <tr><td>Processing</td><td>Completed</td><td>Idle</td></tr>
+              <tr><td>Processing</td><td>Temporary error</td><td>Deferred, then Processing</td></tr>
+              <tr><td>Processing</td><td>Error requiring action</td><td>Failed</td></tr>
+              <tr><td>Stopped</td><td>Audio URL re-enabled and retried</td><td>Queued</td></tr>
+            </tbody></table>
+          </details>
+        </section>
+        <section id="help-approval" class="help-topic" aria-labelledby="help-approval-title">
+          <h3 id="help-approval-title">Approval</h3>
+          <p>Approve one recording at a time. Current audio and its source appear on the left; Beets suggestions, MusicBrainz search and album-edition choices appear on the right.</p>
+          <p><strong>English-preferred suggestion on top:</strong> an English MusicBrainz alias is shown as the primary name, with the canonical native spelling underneath when different. Selecting <strong>Use</strong> keeps the exact MusicBrainz recording ID. Search relevance is not proof of an audio match.</p>
+          <p>Choose a specific album edition only when you know it is correct. A recording-only approval does not invent an album. You can retain original source tags, manually correct fields, or reject a wrong candidate; manually edited tags are protected from automatic Language updates.</p>
+          <details class="help-detail"><summary>Wrong matches and merged recordings</summary>
+            <p>Use <strong>Review metadata</strong> to find the right artist and recording, or <strong>Original source metadata</strong> to undo a wrong name. If unrelated uploads were combined, separate the incorrect source URL from Sources &amp; details. A protected currently-playing URL may need to be replaced before separating it.</p>
+          </details>
+        </section>
+        <section id="help-catalogue" class="help-topic" aria-labelledby="help-catalogue-title">
+          <h3 id="help-catalogue-title">Catalogue</h3>
+          <p>Explore the shared public MusicBrainz cache: artists, recordings, album families, specific release editions and compositions. Cached entries are not necessarily downloaded.</p>
+          <p><strong>Search cache</strong> uses saved metadata; <strong>Search MusicBrainz</strong> requests new data. <strong>Only items linked to my library</strong> filters by confirmed MusicBrainz IDs and their cached links, not similar names.</p>
+          <p><strong>Index downloaded recordings</strong> synchronizes recording and credited-artist metadata in the background. It is metadata-only: it never edits or downloads audio. Use <strong>Refresh progress</strong> for the shared queue; its totals can grow as more relationships are discovered.</p>
+          <p><strong>Organize albums</strong> compares known recordings to edition tracklists. Review the precise release before approving an album change. Applied album changes can be undone from history.</p>
+        </section>
+        <section id="help-language" class="help-topic" aria-labelledby="help-language-title">
+          <h3 id="help-language-title">Language</h3>
+          <p>Use Language to review and optionally update existing approved music. The global policy prefers an English alias for Title, Artist and confirmed Album where MusicBrainz provides one. No English alias means the canonical spelling remains. The original canonical names are kept in the <code>ORIGINALTITLE</code>, <code>ORIGINALARTIST</code> and <code>ORIGINALALBUM</code> Opus tags; their canonical names are not historical first editions.</p>
+          <ol>
+            <li><strong>Review existing music.</strong> This reads file tags and compares them with the local MusicBrainz cache. It can take time on large libraries but never writes files. Possible name changes, original-tag repairs, no detectable changes and incomplete cache entries are counted separately. The counts are <em>estimates</em>: the worker checks authoritative MusicBrainz data again before applying.</li>
+            <li><strong>Choose an update scope.</strong> Select visible names only, or include missing/incorrect original-name tags. Tracks with no detectable difference are not selected. If cache metadata is incomplete, index the recordings from Catalogue, then review again.</li>
+            <li><strong>Apply to up to three tracks.</strong> Back up music, importer state and Navidrome first. The background worker changes tags, not audio content or MusicBrainz recording/release IDs. Stable paths remain unchanged; the importer retains original-file undo copies.</li>
+            <li><strong>Verify in Navidrome.</strong> After the library scan, check song IDs, favorites, ratings and playlists, then confirm this in Language. The bulk button remains disabled until the verified test matches the selected scope.</li>
+            <li><strong>Apply remaining.</strong> The page shows submitted/completed/failed counts; detailed errors, retries and track-level successes are logged under Activity.</li>
+          </ol>
+          <p><strong>Recheck already tagged names</strong> can include recordings marked <code>english-first-v1</code> if MusicBrainz English aliases have since changed. This requires a new review and a matching three-track test. Busy, manually edited or unsafe files are excluded.</p>
+          <p><strong>Important:</strong> “Safe for review” never means that every title needs changing. A track with unchanged English names may need only original-name tags, or no update at all. Navidrome may not display custom ORIGINAL* tags without configuration.</p>
+        </section>
+        <section id="help-graph" class="help-topic" aria-labelledby="help-graph-title">
+          <h3 id="help-graph-title">Graph</h3>
+          <p>Visualize artist, recording, release, album-family and work relationships. <strong>Downloaded library</strong> starts with confirmed local recording IDs; <strong>Entire cached catalogue</strong> may include music you do not own.</p>
+          <p>Filter node types, search names or focus on an exact MusicBrainz ID. A request displays at most 180 nodes to keep navigation responsive. Graph browsing never changes local files or identities.</p>
+        </section>
+        <section id="help-sources" class="help-topic" aria-labelledby="help-sources-title">
+          <h3 id="help-sources-title">Sources</h3>
+          <p>Add a YouTube video or playlist, or a public Spotify playlist. Monitoring a playlist imports later additions. Spotify provides song metadata, not downloadable audio; the app finds a matching YouTube source and uses the same Approval process.</p>
+          <p>Open source details to inspect origins, playlist memberships, disabled URLs and source history. A disabled download URL stays blocked until explicitly re-enabled; existing audio is retained.</p>
+          <details class="help-detail"><summary>Optional Spotify connection and private playlists</summary>
+            <p>Public Spotify playlists do not require an account connection. To connect supported account playlists, configure <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code>, then restart. Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code>.</p>
+            <p>Use HTTPS, or an explicit loopback IP for local development. Spotify development-mode rules and playlist ownership can limit which playlists are accessible. This is read-only access and does not modify Spotify.</p>
+          </details>
+        </section>
+        <section id="help-activity" class="help-topic" aria-labelledby="help-activity-title">
+          <h3 id="help-activity-title">Activity</h3>
+          <p>Activity displays detailed importer, MusicBrainz, Beets, download and maintenance events, including Language review progress and per-track tagging results.</p>
+          <p>Disable <strong>Warnings and errors only</strong> to see INFO entries such as successful English tag updates. <strong>Follow latest</strong> keeps the log at its newest entry. Clearing the view does not delete stored server events.</p>
+          <p>Temporary provider errors (for example HTTP 503) may be followed by a successful retry. The operation's final success or failure is what matters.</p>
+        </section>
+        <section id="help-maintenance" class="help-topic" aria-labelledby="help-maintenance-title">
+          <h3 id="help-maintenance-title">Maintenance</h3>
+          <p>Use <strong>Verify library</strong> to check missing files, track identities, tags and other integrity issues. <strong>Repair eligible tags</strong> preserves audio and confirmed IDs; unexpected asset hashes are excluded.</p>
+          <p>Updates and rollbacks for yt-dlp and spotDL affect future operations without replacing running audio files. Read recent Activity errors if a provider or worker operation fails.</p>
+          <p>Navidrome reads file and playlist changes on its next library scan. ReplayGain tags are preserved; enable playback normalization in your player if desired.</p>
+        </section>
+        <section id="help-help" class="help-topic" aria-labelledby="help-help-title">
+          <h3 id="help-help-title">Help</h3>
+          <p>This page has one section per app tab. Use the topic menu to jump directly to a section. Open the relevant app tab to perform the described action.</p>
+          <p>Each library user has separate folders and playlists, but selecting a user is not authentication. Keep the administration interface behind an authenticated reverse proxy.</p>
+        </section>
       </div>
-      <details class="help-detail"><summary>All operation transitions</summary>
-        <table class="transition-table"><thead><tr><th>From</th><th>What happens</th><th>Next</th></tr></thead><tbody>
-          <tr><td>Queued</td><td>The worker claims the job</td><td>Processing</td></tr>
-          <tr><td>Processing</td><td>A metadata decision is needed, or a candidate changed</td><td>Waiting for approval</td></tr>
-          <tr><td>Waiting for approval</td><td>You approve a choice or apply a correction</td><td>Queued</td></tr>
-          <tr><td>Processing</td><td>The operation finishes successfully</td><td>Idle</td></tr>
-          <tr><td>Processing</td><td>A provider temporarily cannot complete the operation</td><td>Deferred</td></tr>
-          <tr><td>Queued</td><td>A shared YouTube cooldown pauses pending downloads</td><td>Deferred</td></tr>
-          <tr><td>Deferred</td><td>The retry time arrives and the worker claims the job</td><td>Processing</td></tr>
-          <tr><td>Processing</td><td>An error needs your attention</td><td>Failed</td></tr>
-          <tr><td>Failed</td><td>You choose Retry</td><td>Queued</td></tr>
-          <tr><td>Queued / Deferred / Processing</td><td>You cancel a waiting Spotify audio search, disable the download URL, or a source restriction stops the download. A file already being published finishes safely.</td><td>Stopped when cancellation finishes</td></tr>
-          <tr><td>Stopped</td><td>You retry the audio search, choose another URL, or enable the source and Retry</td><td>Queued</td></tr>
-          <tr><td>Idle</td><td>You request an operation, or monitored sync finds missing audio</td><td>Queued</td></tr>
-          <tr><td>Processing</td><td>The application restarts and recovers interrupted work</td><td>Queued</td></tr>
-        </tbody></table>
-      </details>
     </div>
-    <details class="help-detail"><summary>What do the statuses mean?</summary>
-      <p><strong>Two independent states:</strong> audio tells you whether a file is playable; the operation tells you what the app is doing.</p>
-      <dl class="help-definitions">
-        <dt>Playable / AVAILABLE</dt><dd>A local file is available, including temporary audio.</dd>
-        <dt>Missing / MISSING</dt><dd>A file expected in your library is missing. Use Redownload.</dd>
-        <dt>No audio / UNAVAILABLE</dt><dd>No local file is available yet. Spotify audio lookup runs automatically; use Link audio if it needs help.</dd>
-        <dt>Queued / QUEUED</dt><dd>The worker will start when earlier jobs finish.</dd>
-        <dt>Processing / RUNNING</dt><dd>A download or metadata operation is running.</dd>
-        <dt>Waiting / NEEDS_APPROVAL</dt><dd>Review the suggested metadata, search for another match, or use source tags.</dd>
-        <dt>Deferred / DEFERRED</dt><dd>A provider is temporarily unavailable. Wait for the displayed retry time.</dd>
-        <dt>Stopped / STOPPED</dt><dd>Downloads were stopped. Choose another URL, or enable the source and retry. Existing audio is kept.</dd>
-        <dt>Failed / FAILED</dt><dd>Open the error, fix the cause if needed, then Retry.</dd>
-        <dt>Idle / IDLE</dt><dd>No operation is running. Temporary audio remains marked until its metadata is approved.</dd>
-      </dl>
-    </details>
-    <details class="help-detail"><summary>English-first titles and original-script metadata</summary>
-      <p><strong>Global language policy:</strong> MusicBrainz aliases may be English translations, transliterations or commonly used English spellings. beets prefers an existing English alias for approved recording and artist names (and album titles of confirmed releases); it keeps canonical MusicBrainz names when no English alias exists. No machine translation is generated, and no per-user setting is needed.</p>
-      <p><strong>Original names:</strong> the importer writes the canonical recording/artist/release names to the Opus/Vorbis fields ORIGINALTITLE, ORIGINALARTIST and ORIGINALALBUM when the corresponding identity is confirmed. These store the canonical MusicBrainz spellings, not the oldest historical performance or album. The usual TITLE, ARTIST and ALBUM tags are the preferred display names. Your player may need custom-tag configuration to show original-name fields.</p>
-      <p><strong>Individual approval:</strong> choose a MusicBrainz recording using Use; its English-preferred name and canonical name are stored together. Use with a specific release to also assign an album. A recording-only approval never invents an edition or takes an arbitrary album; Unknown Album is expected until an edition is chosen.</p>
-      <p><strong>Existing-library scan:</strong> Index downloaded recordings only updates the public MusicBrainz catalogue and does not retag or download audio. To apply English names to existing local files, open Catalogue → English-first names → Review existing-library English tagging. Back up your library, use Apply to first 3 tracks, check Navidrome song IDs, favorites, ratings and playlists, acknowledge the check, then explicitly queue the remaining eligible tracks. Recheck already tagged names only when you want to refresh names from updated English aliases. This uses copy-on-write, SHA checks and local undo copies. It skips busy music and manually edited metadata and never changes MusicBrainz identities or album assignments.</p>
-      <p><strong>Album comparison:</strong> a reviewed exact release can supply an English title from an available cached alias, retaining its canonical title in ORIGINALALBUM. No English release alias means the canonical album title stays. Album-only edits do not select an alternate edition or re-download audio.</p>
-    </details>
-    <details class="help-detail"><summary>MusicBrainz Catalogue, local search and graph</summary>
-      <p><strong>Catalogue cache vs downloaded library:</strong> the catalogue stores public MusicBrainz artists, recordings, album editions, album families and compositions, including entries from online searches that are not downloaded. The <strong>Only items linked to my library</strong> checkbox (on by default) uses exact MusicBrainz IDs from locally approved recordings and their cached relationships; it never guesses from matching names. If a local artist or album is missing, choose <strong>Index downloaded recordings</strong> and wait for its relationships, or uncheck the filter to explore all cached entities.</p>
-      <p><strong>Search cache</strong> reads stored entities; <strong>Search MusicBrainz</strong> fetches and caches online results. The same local-only filter applies to both searches. <strong>Select</strong> opens the chosen item in the right-hand panel. Drag <strong>Results height</strong> to change the scrollable list size without expanding the whole page. The selected item may include a tracklist, relations, cached metadata and a <strong>Show in graph</strong> action.</p>
-      <p><strong>Sync / refresh</strong> on an artist queues its MusicBrainz lookup, credited recordings, release groups and works. Album-family requests can enqueue edition lookups and full tracklists. This is metadata only: it does not download audio or edit existing tags. <strong>Index downloaded recordings</strong> queues recording lookups and release associations for the selected library. Use <strong>Refresh progress</strong> to read the queue state; do not repeatedly force a refresh while it runs.</p>
-      <p><strong>Progress:</strong> PENDING means waiting, RUNNING means being fetched, and COMPLETE means a catalogue request finished. The totals can <em>increase</em> during synchronization because discovered albums, editions and works create additional jobs. One background worker makes rate-limited requests, and these totals cover the shared catalogue queue, not the number of downloaded songs. The graph can be sparse until relationships are cached.</p>
-      <p><strong>Music graph:</strong> Downloaded library starts from your confirmed recording IDs and their public MusicBrainz neighbors; Entire cached catalogue can include music you do not own. The graph is limited to 180 displayed nodes per request. Focus a MusicBrainz ID or search for a name to explore a different neighborhood; node type checkboxes only control visibility. Graph navigation never changes audio files.</p>
-      <p><strong>Organize albums → Compare albums:</strong> select imported sources or individual track IDs to compare their known MusicBrainz recordings against cached releases. The suggested coverage is evidence, not automatic proof of the correct edition. Review an exact release, sync its tracklist if necessary, preview compatible changes, and confirm before applying album tags. Changes keep stable audio paths and can be undone from the album-change history.</p>
-    </details>
-    <details class="help-detail"><summary>Fix a wrong match or separate different songs</summary>
-      <p>Use <strong>Review metadata</strong> to search MusicBrainz by artist and title, or choose <strong>Original source metadata</strong> to undo a wrong match.</p>
-      <p>If different uploads were merged, open <strong>Sources &amp; details → Separate track</strong> on the wrong URL. Its playlist memberships follow the new entry, its audio is queued, and the rejected match is excluded from future suggestions.</p>
-      <p>The source of the current audio is protected. First Reprocess using the correct URL, then separate the other one. <strong>Remove &amp; ignore origin</strong> instead excludes only that URL from future imports.</p>
-    </details>
-    <details class="help-detail"><summary>Button reference and bulk actions</summary>
-      <dl class="help-definitions">
-        <dt>Stop retrying this URL</dt><dd>Stop download work and disable future downloads from that URL. Keep existing music, audio and playlist membership. Enable it again in Music → Ignored music.</dd>
-        <dt>Use another URL…</dt><dd>Queue a different YouTube video for this track. Existing audio remains until the replacement succeeds; uncertain matches require review.</dd>
-        <dt>Refresh suggestions</dt><dd>Identify existing audio again using source hints, without downloading it again. Review the new suggestions before applying them.</dd>
-        <dt>Reprocess</dt><dd>Download and identify again. Changed identities require approval.</dd>
-        <dt>Redownload</dt><dd>Replace audio while retaining the confirmed identity. A mismatched recording is refused.</dd>
-        <dt>Approval</dt><dd>Review one track at a time. Current music is on the left; Beets matches, original-source metadata and automatic MusicBrainz search are on the right. Use Previous, Next or Choose music to navigate.</dd>
-        <dt>Advanced: Approve all</dt><dd>Accept the first suggestion for every waiting track in the selected library, across all pages and filters. Use reviewed selections when suggestions need checking.</dd>
-        <dt>Retry all failed</dt><dd>Retry failed operations across this library. Other states are unchanged.</dd>
-        <dt>Remove…</dt><dd>Choose whether to remove the local entry, ignore its URLs, or block a confirmed recording throughout this library. The dialog explains the exact scope. Undo ignore rules in Music → Ignored music.</dd>
-        <dt>Verify / Repair tags</dt><dd>Check files and metadata, then repair eligible tags without downloading audio again.</dd>
-      </dl>
-    </details>
-    <details class="help-detail"><summary>Spotify imports and optional connection setup</summary>
-      <p>Paste a <strong>public Spotify playlist URL</strong> in Sources, just like a YouTube playlist. No Spotify account connection is needed for public imports. The app reads track metadata with spotDL, finds matching YouTube audio, then uses the normal downloader, beets identification and Approval tab. Spotify itself does not supply downloadable audio.</p>
-      <p>Monitor the playlist to scan new additions. The original Spotify link stays with each track, so you can filter music by source. If an automatic audio match needs help, use <strong>Link audio</strong> to choose a recording in your library or supply a YouTube video.</p>
-      <details class="spotify-setup"><summary>Optional account connection and private playlists</summary>
-        <p>Create an app in the Spotify Developer Dashboard. Set <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code> in your server environment, then restart. A client secret is not required.</p>
-        <p>Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code></p>
-        <p>Use HTTPS, or HTTP with an explicit loopback IP for local development. Spotify does not accept localhost. Development-mode apps require an eligible Premium app owner and allowlisted users. Playlist contents are available only for playlists you own or collaborate on.</p>
-        <p>This is read-only access. Music Ingestor does not modify your Spotify library. Each library user connects separately; keep this administration interface behind authentication.</p>
-      </details>
-
-    </details>
-    <details class="help-detail"><summary>Playback, discovery dates and administration</summary>
-      <p>Navidrome sees changes on its next library scan. Temporary songs use the album <strong>Waiting for approval</strong>; approval moves them to their chosen album and updates exported playlists.</p>
-      <p>Discovery dates come from playlist additions or the first time a track was seen. They are saved in COMMENT and DESCRIPTION, separately from release dates.</p>
-      <p>Enable track ReplayGain in your player to use the measured loudness tags. Tag repair does not re-encode audio.</p>
-      <p>Each library user has separate files and playlists. These folders are not authentication: keep this administration app behind an authenticated reverse proxy.</p>
-    </details>
   </section>
 </main>
 
