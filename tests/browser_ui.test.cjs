@@ -200,6 +200,9 @@ async function fixtureServer(t, data) {
         eligible:0, skipped:{already_localized:0,manual_or_busy:0,invalid_or_missing:0}, sample:[]};
       else if (url.pathname === "/api/catalogue/language-progress") result = {state:"complete", processed:12, total:12, eligible:12};
       else if (url.pathname === "/api/catalogue/language-canary") result = data.languageCanary || {state:"not_started", verified:false, track_count:0};
+      else if (url.pathname === "/api/catalogue/language-review-state") result = data.languageStoredReview || {state:"idle"};
+      else if (url.pathname === "/api/catalogue/language-batch-status") result = data.languageBatch || {state:"idle",submitted:0,done:0,running:0,pending:0,failed:0};
+      else if (url.pathname === "/api/catalogue/language-apply-progress") result = {state:"complete",processed:12,eligible:12,queued:3};
       else if (url.pathname === "/api/catalogue/album-history") result = [];
       else if (url.pathname === "/api/catalogue/search") result = {items:data.catalogueSearch || [], remote:false};
       else if (url.pathname === "/api/catalogue/entity") result = data.catalogueEntity ||
@@ -379,7 +382,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
   assert.equal(await chrome.evaluate("!!document.querySelector('.review-toolbar,#startReview,#approveSelected,#metadataDialog')"),false);
-  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","catalogue","graph","sources","activity","maintenance","help"]);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","catalogue","language","graph","sources","activity","maintenance","help"]);
   await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
   await chrome.until("!document.querySelector('#approvalWorkspace').hidden && document.querySelectorAll('#mbResults tbody tr').length===1");
   assert.equal(await chrome.evaluate("document.querySelector('#approvalFilter').value"),"NEEDS_APPROVAL");
@@ -442,7 +445,11 @@ test("real browser: Help lazily renders the workflow with local Pele and fits na
   assert.equal(await chrome.evaluate("document.querySelector('#workflowDiagram svg title').textContent"),"Music operation states");
   assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#workflowDiagram .pele-node[data-id=queued] rect')).fill"),"rgb(247, 248, 246)");
   assert.equal(await chrome.evaluate("Array.from(document.scripts).filter(script=>script.src.includes('pele-flowchart.js')).every(script=>new URL(script.src).origin===location.origin)"),true);
-  assert.equal(await chrome.evaluate("document.querySelectorAll('.transition-table tbody tr').length>=10"),true);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.transition-table tbody tr').length>=7"),true);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.getAttribute('href'))"),
+    ["#help-music","#help-approval","#help-catalogue","#help-language","#help-graph",
+     "#help-sources","#help-activity","#help-maintenance","#help-help"]);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-topic').length"),9);
   await chrome.evaluate("document.querySelector('.workflow-diagram').scrollIntoView({block:'start'})");
   await chrome.screenshot("help-workflow-desktop");
   await chrome.evaluate("document.fonts.ready.then(() => {window.helpResizeBaseline=document.querySelector('#workflowDiagram svg');})");
@@ -645,36 +652,48 @@ test("real browser: Catalogue split layout, local scope, result slider and Selec
 });
 
 
-test("real browser: English-name preview stays read-only until explicitly applied", {timeout: 60000}, async t => {
+test("real browser: Language review distinguishes changes and enables only a verified canary", {timeout: 60000}, async t => {
   const chrome = await browser(t); if (!chrome) return;
   const data = fixtures();
-  data.languagePreview = {eligible:12,
+  data.languagePreview = {eligible:12, scanned:18, review_token:"e".repeat(32),
+    changes:{display_changes:3,original_updates:2,unchanged:5,unknown:2},
     skipped:{already_localized:2,manual_or_busy:3,invalid_or_missing:1},
-    sample:[{id:"11111111-1111-4111-8111-111111111111",current_name:"西木康智 - 踊子プリムロゼのテーマ",
-      proposed_name:"Yasunori Nishiki - Primrose, the Dancer", canonical_name:"西木康智 - 踊子プリムロゼのテーマ",
-      prediction:"Cached estimate"}]};
+    sample:[{id:"11111111-1111-4111-8111-111111111111",kind:"display_changes",
+      current_name:"西木康智 - 踊子プリムロゼのテーマ",
+      proposed_name:"Yasunori Nishiki - Primrose, the Dancer",
+      canonical_name:"西木康智 - 踊子プリムロゼのテーマ",
+      changes:["Title","Artist"],prediction:"Cache estimate"}]};
   const origin = await fixtureServer(t, data);
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width:1280,height:900,deviceScaleFactor:1,mobile:false});
   await chrome.send("Page.navigate", {url: origin});
   await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
   await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
-  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
-  await chrome.evaluate("document.querySelector('#catalogueLanguagePreview').click()");
-  await chrome.until("!document.querySelector('#catalogueLanguagePlan').hidden");
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageCounts').textContent"), /12 eligible of/);
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageSample').textContent"), /Primrose, the Dancer/);
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageSample').textContent"), /Original: 西木康智/);
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageStatus').textContent"), /No audio or tags changed/);
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageActivity').textContent"), /Review complete/);
-  assert.equal(await chrome.evaluate("document.querySelector('#catalogueLanguageBulk').disabled"), true,
-    "Bulk must remain unavailable until the canary is verified");
-  assert.equal(data.writes.filter(x => x.path === "/api/catalogue/language-apply").length, 0,
-    "Review does not alter audio or enqueue language jobs");
-  assert.ok(data.reads.some(x => x.startsWith("/api/catalogue/language-preview?user_id=admin")));
-  await chrome.evaluate("document.querySelector('#catalogueLanguageRecheck').click()");
-  await chrome.evaluate("document.querySelector('#catalogueLanguagePreview').click()");
-  await chrome.until("!document.querySelector('#catalogueLanguagePlan').hidden");
-  assert.ok(data.reads.some(x => x.includes("include_localized=true")));
-  assert.match(await chrome.evaluate("document.querySelector('[data-panel=help]').textContent"),
-    /ORIGINALTITLE/);
-  assert.deepEqual(chrome.errors, []);
+  await chrome.evaluate("document.querySelector('[data-tab=language]').click()");
+  await chrome.until("document.querySelector('#languageReview') && !document.querySelector('#languageReview').disabled");
+  assert.equal(await chrome.evaluate("document.querySelector('#cataloguePanel #languageReview') !== null"), false,
+    "Language controls are not in the Catalogue panel");
+  await chrome.evaluate("document.querySelector('#languageReview').click()");
+  await chrome.until("document.querySelector('#languageCountNames').textContent==='3'");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageCountScanned').textContent"),"18");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageCountOriginals').textContent"),"2");
+  assert.match(await chrome.evaluate("document.querySelector('#languageReviewStatus').textContent"),/No audio or tags were modified/);
+  await chrome.evaluate("document.querySelector('#languageExamplesDetails').open=true");
+  assert.match(await chrome.evaluate("document.querySelector('#languageExamples').textContent"),/Primrose, the Dancer/);
+  assert.match(await chrome.evaluate("document.querySelector('#languageExamples').textContent"),/Canonical: 西木康智/);
+  assert.match(await chrome.evaluate("document.querySelector('#languageScopeSummary').textContent"),/3 candidates/);
+  assert.equal(await chrome.evaluate("document.querySelector('#languageCanary').disabled"),false);
+  assert.equal(await chrome.evaluate("document.querySelector('#languageBulk').disabled"),true);
+  assert.equal(data.writes.filter(x=>x.path==="/api/catalogue/language-apply").length,0);
+  assert.ok(data.reads.some(x=>x.startsWith("/api/catalogue/language-preview?user_id=admin")));
+  await chrome.evaluate("document.querySelector('#languageScope').value='names_and_originals'; document.querySelector('#languageScope').dispatchEvent(new Event('change'))");
+  assert.match(await chrome.evaluate("document.querySelector('#languageScopeSummary').textContent"),/5 candidates/);
+  await chrome.evaluate("document.querySelector('#languageRecheck').click()");
+  assert.equal(await chrome.evaluate("document.querySelector('#languageCanary').disabled"),true,"Option change invalidates the review");
+  await chrome.evaluate("document.querySelector('#languageReview').click()");
+  await chrome.until("document.querySelector('#languageCountNames').textContent==='3'");
+  assert.ok(data.reads.some(x=>x.includes("include_localized=true")));
+  assert.equal(await chrome.evaluate("document.querySelector('#languageBulk').disabled"),true);
+  await chrome.send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true});
+  assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
+  assert.deepEqual(chrome.errors,[]);
 });
