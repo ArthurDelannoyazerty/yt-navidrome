@@ -71,7 +71,7 @@ def _recording_from_catalogue(value, identity):
                         "joinphrase": str(credit.get("joinphrase") or "")})
     return {"id": identity, "title": title,
             "preferred_title": preferred if preferred != title else None,
-            "artist": artist_credit(value.get("artist-credit")), "artist_credits": credits}
+            "artist": artist_credit(value), "artist_credits": credits}
 
 
 class ApprovalPrefetch:
