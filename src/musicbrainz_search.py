@@ -18,6 +18,7 @@ import requests
 from http_policy import ApiDeferred, HttpPolicy
 from state_machines import CACHE, cache_state
 from metadata_hints import clean_search_text, normalized_words
+from localized_names import preferred_english_name
 
 API_ROOT = "https://musicbrainz.org/ws/2/"
 PAGE_SIZE = 20
@@ -82,6 +83,7 @@ def artist_details(values) -> list[dict]:
         artist = value.get("artist") or {}
         if identity := valid_id(artist.get("id")):
             results.append({"id": identity, "name": str(artist.get("name") or value.get("name") or "")[:200],
+                            "preferred_name": preferred_english_name(artist, field="name"),
                             "credited_name": str(value.get("name") or artist.get("name") or "")[:200],
                             "sort_name": str(artist.get("sort-name") or "")[:200],
                             "aliases": aliases(artist.get("aliases"))})
@@ -100,6 +102,7 @@ def normalize(data: dict, entity: str, page: int) -> dict:
                 "disambiguation": str(value.get("disambiguation") or "")[:1000]}
         if entity == "artist":
             item.update(name=str(value.get("name") or "Unknown artist")[:1000],
+                        preferred_name=preferred_english_name(value, field="name"),
                         country=value.get("country"), type=value.get("type"),
                         sort_name=str(value.get("sort-name") or "")[:200], aliases=aliases(value.get("aliases")))
         else:
@@ -107,10 +110,21 @@ def normalize(data: dict, entity: str, page: int) -> dict:
             for release in (value.get("releases") or [])[:20]:
                 if rid := valid_id(release.get("id")):
                     releases.append({"id": rid, "title": str(release.get("title") or "Untitled")[:1000],
+                                     "preferred_title": preferred_english_name(release),
                                      "date": release.get("date"), "country": release.get("country"),
                                      "status": release.get("status")})
+            credited = artist_details(value.get("artist-credit"))
+            english_artist = "".join(
+                (artist["preferred_name"] if artist.get("preferred_name") != artist.get("name")
+                 else artist.get("credited_name") or artist["name"]) +
+                str(raw.get("joinphrase") or "")
+                for artist, raw in zip(credited, [v for v in value.get("artist-credit") or [] if isinstance(v, dict)])
+            )[:1000]
             item.update(title=str(value.get("title") or "Unknown title")[:1000],
-                        artist=artist_credit(value.get("artist-credit")), artists=artist_details(value.get("artist-credit")),
+                        preferred_title=preferred_english_name(value),
+                        artist=artist_credit(value.get("artist-credit")),
+                        preferred_artist=english_artist or artist_credit(value.get("artist-credit")),
+                        artists=credited,
                         length_ms=value.get("length"), first_release_date=value.get("first-release-date"),
                         releases=releases)
         items.append(item)

@@ -430,6 +430,15 @@ class Catalogue:
                 return
             if section == "lookup":
                 self.ingest(con, kind, data)
+                if kind == "recording":
+                    # Recording credits contain native spellings but rarely alias
+                    # lists; follow exact credited MBIDs to populate English
+                    # artist names without guessing from text.
+                    for credit in data.get("artist-credit") or []:
+                        if isinstance(credit, dict):
+                            artist = credit.get("artist") or {}
+                            if isinstance(artist, dict) and _id(artist.get("id")):
+                                self._queue_scope(con, "artist", artist["id"], "lookup")
                 if kind == "release":
                     self._store_release_tracks(con, data)
             else:

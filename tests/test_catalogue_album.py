@@ -525,3 +525,101 @@ def test_app_refuses_startup_before_navidrome_scan_ack(db):
     with pytest.raises(RuntimeError, match="Stable-path migration is AWAITING_NAVIDROME_SCAN"):
         with TestClient(create_app(db, start_workers=False)):
             pass
+
+
+def test_language_review_reports_activity_and_cached_english_preview(db, environment):
+    from language_jobs import preview, preview_progress
+    cat, _ = setup_catalogue(db)
+    track, path, original_hash = add_audio_track(db, environment, RECORDING_1)
+    with cat.db() as con:
+        cat.ingest(con, "artist", {"id": ARTIST, "name": "西木康智",
+            "aliases": [{"name": "Yasunori Nishiki", "locale": "en", "primary": True}]})
+        cat.ingest(con, "recording", {"id": RECORDING_1, "title": "原題",
+            "aliases": [{"name": "English Song", "locale": "en", "primary": True}],
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "西木康智"}}]})
+    result = preview(db, "admin")
+    assert result["eligible"] == 1
+    assert result["sample"][0]["id"] == track
+    assert result["sample"][0]["proposed_name"] == "Yasunori Nishiki - English Song"
+    assert result["sample"][0]["canonical_name"] == "西木康智 - 原題"
+    assert sha256_file(path) == original_hash, "Read-only review must not write Opus tags"
+    assert preview_progress.get("admin")["state"] == "complete"
+    events = db.rows("SELECT message FROM events WHERE user_id=? ORDER BY id", ("admin",))
+    assert any("English-name review started" in event["message"] for event in events)
+    assert any("No audio or tags were changed" in event["message"] for event in events)
+
+
+def test_bulk_english_retag_requires_completed_verified_canary(db, environment):
+    from language_jobs import preview, canary_status
+    from mutagen.oggopus import OggOpus
+    from localized_names import LANGUAGE_POLICY
+    tid, path, _ = add_audio_track(db, environment, RECORDING_1)
+    with TestClient(create_app(db, start_workers=False)) as client:
+        assert client.post("/api/catalogue/language-apply", json={
+            "user_id": "admin", "limit": 5000, "confirmed": True,
+        }).status_code == 400
+        response = client.post("/api/catalogue/language-apply", json={
+            "user_id": "admin", "limit": 3, "confirmed": True,
+        })
+        assert response.status_code == 200 and response.json()["queued"] == 1
+        assert canary_status(db, "admin")["state"] == "running"
+        assert client.post("/api/catalogue/language-canary-verify", json={
+            "user_id": "admin", "confirmed": True,
+        }).status_code == 400
+        audio = OggOpus(path)
+        audio["INGESTOR_LANGUAGE_POLICY"] = [LANGUAGE_POLICY]
+        audio.save()
+        db.execute("UPDATE tracks SET operation_state='IDLE' WHERE id=?", (tid,))
+        assert canary_status(db, "admin")["state"] == "ready"
+        verified = client.post("/api/catalogue/language-canary-verify", json={
+            "user_id": "admin", "confirmed": True,
+        })
+        assert verified.status_code == 200
+        assert verified.json()["verified"] is True
+        assert client.post("/api/catalogue/language-apply", json={
+            "user_id": "admin", "limit": 5000, "confirmed": True,
+            "include_localized": True,
+        }).status_code == 400, "Changing recheck mode requires a new canary"
+        bulk = client.post("/api/catalogue/language-apply", json={
+            "user_id": "admin", "limit": 5000, "confirmed": True,
+        })
+        assert bulk.status_code == 200
+        assert bulk.json()["queued"] == 0, "Canary IDs must not be queued twice"
+        plain = client.get("/api/catalogue/language-preview", params={"user_id": "admin"})
+        assert plain.status_code == 200
+        assert plain.json()["skipped"]["already_localized"] == 1
+        refreshed = client.get("/api/catalogue/language-preview", params={
+            "user_id": "admin", "include_localized": "true",
+        })
+        assert refreshed.status_code == 200
+        assert refreshed.json()["eligible"] == 1
+        progress = client.get("/api/catalogue/language-progress", params={"user_id": "admin"})
+        assert progress.json()["state"] == "complete"
+        assert client.get("/api/catalogue/language-progress", params={"user_id": "missing"}).status_code == 400
+
+
+
+def test_indexed_recording_queues_exact_artist_alias_lookup(db):
+    cat = Catalogue(db)
+    cat.init()
+    cat.index_recordings([RECORDING_1])
+    cat.request = lambda endpoint, params: {
+        "id": RECORDING_1, "title": "Original recording",
+        "artist-credit": [{"artist": {"id": ARTIST, "name": "原作者"}}],
+        "releases": [],
+    }
+    first = cat.claim()
+    assert first["kind"] == "recording" and first["section"] == "lookup"
+    cat.process_page(first)
+    with cat.db() as con:
+        scope = con.execute(
+            "SELECT state FROM scopes WHERE kind='artist' AND entity_id=? AND section='lookup'",
+            (ARTIST,),
+        ).fetchone()
+        assert scope is not None and scope["state"] == "PENDING"
+        row = con.execute(
+            "SELECT data FROM entities WHERE kind='artist' AND id=?", (ARTIST,)
+        ).fetchone()
+        assert json.loads(row["data"])["name"] == "原作者"
+
+

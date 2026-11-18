@@ -198,6 +198,8 @@ async function fixtureServer(t, data) {
       else if (url.pathname === "/api/catalogue/progress") result = {counts:{}, active:[]};
       else if (url.pathname === "/api/catalogue/language-preview") result = data.languagePreview || {
         eligible:0, skipped:{already_localized:0,manual_or_busy:0,invalid_or_missing:0}, sample:[]};
+      else if (url.pathname === "/api/catalogue/language-progress") result = {state:"complete", processed:12, total:12, eligible:12};
+      else if (url.pathname === "/api/catalogue/language-canary") result = data.languageCanary || {state:"not_started", verified:false, track_count:0};
       else if (url.pathname === "/api/catalogue/album-history") result = [];
       else if (url.pathname === "/api/catalogue/search") result = {items:data.catalogueSearch || [], remote:false};
       else if (url.pathname === "/api/catalogue/entity") result = data.catalogueEntity ||
@@ -648,7 +650,9 @@ test("real browser: English-name preview stays read-only until explicitly applie
   const data = fixtures();
   data.languagePreview = {eligible:12,
     skipped:{already_localized:2,manual_or_busy:3,invalid_or_missing:1},
-    sample:[{id:"11111111-1111-4111-8111-111111111111",current_name:"西木康智 - 踊子プリムロゼのテーマ"}]};
+    sample:[{id:"11111111-1111-4111-8111-111111111111",current_name:"西木康智 - 踊子プリムロゼのテーマ",
+      proposed_name:"Yasunori Nishiki - Primrose, the Dancer", canonical_name:"西木康智 - 踊子プリムロゼのテーマ",
+      prediction:"Cached estimate"}]};
   const origin = await fixtureServer(t, data);
   await chrome.send("Page.navigate", {url: origin});
   await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value === ''");
@@ -656,11 +660,20 @@ test("real browser: English-name preview stays read-only until explicitly applie
   await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
   await chrome.evaluate("document.querySelector('#catalogueLanguagePreview').click()");
   await chrome.until("!document.querySelector('#catalogueLanguagePlan').hidden");
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageCounts').textContent"), /12 eligible tracks/);
-  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageSample').textContent"), /踊子プリムロゼのテーマ/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageCounts').textContent"), /12 eligible of/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageSample').textContent"), /Primrose, the Dancer/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageSample').textContent"), /Original: 西木康智/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageStatus').textContent"), /No audio or tags changed/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueLanguageActivity').textContent"), /Review complete/);
+  assert.equal(await chrome.evaluate("document.querySelector('#catalogueLanguageBulk').disabled"), true,
+    "Bulk must remain unavailable until the canary is verified");
   assert.equal(data.writes.filter(x => x.path === "/api/catalogue/language-apply").length, 0,
     "Review does not alter audio or enqueue language jobs");
   assert.ok(data.reads.some(x => x.startsWith("/api/catalogue/language-preview?user_id=admin")));
+  await chrome.evaluate("document.querySelector('#catalogueLanguageRecheck').click()");
+  await chrome.evaluate("document.querySelector('#catalogueLanguagePreview').click()");
+  await chrome.until("!document.querySelector('#catalogueLanguagePlan').hidden");
+  assert.ok(data.reads.some(x => x.includes("include_localized=true")));
   assert.match(await chrome.evaluate("document.querySelector('[data-panel=help]').textContent"),
     /ORIGINALTITLE/);
   assert.deepEqual(chrome.errors, []);

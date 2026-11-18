@@ -9,7 +9,8 @@ from fastapi import Query
 
 from album_management import AlbumManager
 from catalogue import Catalogue, ENTITY_KINDS
-from language_jobs import preview as language_preview, queue as queue_languages
+from language_jobs import (preview as language_preview, queue as queue_languages,
+                           preview_progress, canary_status, verify_canary)
 
 
 class SyncRequest(BaseModel):
@@ -53,6 +54,12 @@ class IndexLibraryInput(BaseModel):
 class LanguageApplyInput(BaseModel):
     user_id: str
     limit: int = Field(default=3, ge=1, le=5000)
+    confirmed: Literal[True]
+    include_localized: bool = False
+
+
+class LanguageUserInput(BaseModel):
+    user_id: str
     confirmed: Literal[True]
 
 
@@ -118,15 +125,31 @@ def install_catalogue_routes(app, store, pipeline):
                 "message": "Indexing runs in the background and respects MusicBrainz's shared limiter."}
 
     @app.get("/api/catalogue/language-preview")
-    async def preview_language(user_id: str):
+    async def preview_language(user_id: str, include_localized: bool = False):
         store.require_user(user_id)
-        return await asyncio.to_thread(language_preview, store, user_id)
+        return await asyncio.to_thread(language_preview, store, user_id, include_localized)
+
+    @app.get("/api/catalogue/language-progress")
+    def language_progress(user_id: str):
+        store.require_user(user_id)
+        return preview_progress.get(user_id)
+
+    @app.get("/api/catalogue/language-canary")
+    def language_canary(user_id: str):
+        return canary_status(store, user_id)
+
+    @app.post("/api/catalogue/language-canary-verify")
+    async def language_canary_verify(data: LanguageUserInput):
+        albums.require_migration_complete()
+        store.require_user(data.user_id)
+        return await asyncio.to_thread(verify_canary, store, data.user_id)
 
     @app.post("/api/catalogue/language-apply")
     async def apply_language(data: LanguageApplyInput):
         albums.require_migration_complete()
         store.require_user(data.user_id)
-        return await asyncio.to_thread(queue_languages, store, data.user_id, data.limit)
+        return await asyncio.to_thread(queue_languages, store, data.user_id, data.limit,
+                                       data.include_localized)
 
     @app.get("/api/catalogue/graph")
     def graph(user_id: str, view: str = "downloaded", kinds: str = "artist,recording,release,release-group,work",

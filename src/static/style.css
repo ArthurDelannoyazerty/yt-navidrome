@@ -367,3 +367,12 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .graph-stage svg { min-height: 320px; }
   .catalogue-details { padding: .65rem; }
 }
+
+/* Compact bilingual labels: English first; native/canonical spelling beneath. */
+.approval-track small, .approval-artist small { display: block; color: var(--muted); font-size: 11px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; }
+#catalogueLanguageRecheck { width: auto; padding: 0; margin-right: 4px; vertical-align: middle; }
+.catalogue-language-example { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--sub); overflow-wrap: anywhere; }
+.catalogue-language-example strong, .catalogue-language-example small { display: block; }
+.catalogue-language-example small { color: var(--muted); font-size: 11px; line-height: 1.4; margin-top: 2px; }
+#catalogueLanguageSample { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 8px; }
+#catalogueLanguageActivity { font-size: 12px; margin-top: 0; }
