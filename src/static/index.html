@@ -299,10 +299,21 @@
         <div><strong id="languageCountUnknown">—</strong><span>Cache incomplete</span></div>
       </div>
       <p id="languageExcluded" class="hint"></p>
-      <details id="languageExamplesDetails" class="language-examples" hidden>
-        <summary>Examples from the review</summary>
-        <div id="languageExamples" class="language-example-list"></div>
-      </details>
+      <section class="language-name-changes" aria-labelledby="languageNameChangesHeading">
+        <div class="language-changes-heading">
+          <div>
+            <h4 id="languageNameChangesHeading">Possible name changes <span id="languageNameChangesCount" class="hint">(—)</span></h4>
+            <p class="hint">Review each current name against the proposed one. This list excludes original-tag-only repairs.</p>
+          </div>
+          <button id="languageChangeAll" type="button" disabled>Change all</button>
+        </div>
+        <p id="languageNameChangesStatus" class="hint" role="status" aria-live="polite">Run a review to load proposed name changes.</p>
+        <div id="languageNameChangesList" class="language-changes-scroll" role="list"
+             tabindex="0" aria-label="Scroll through proposed music name changes">
+          <p class="hint">No review loaded.</p>
+        </div>
+        <p class="hint">Name proposals come from cached MusicBrainz metadata. Confirm each suggestion: the worker checks MusicBrainz again when applying. Change all requires a verified three-track test for visible names.</p>
+      </section>
       <p class="hint">Numbers are estimates based on cached names. The worker checks MusicBrainz again before updating files. Cache-incomplete tracks are not automatically retagged; index their recordings in Catalogue, then review again.</p>
     </section>
     <section class="language-section" aria-labelledby="languageApplyHeading">
@@ -515,6 +526,7 @@
             <li><strong>Choose an update scope.</strong> Select visible names only, or include missing/incorrect original-name tags. Tracks with no detectable difference are not selected. If cache metadata is incomplete, index the recordings from Catalogue, then review again.</li>
             <li><strong>Apply to up to three tracks.</strong> Back up music, importer state and Navidrome first. The background worker changes tags, not audio content or MusicBrainz recording/release IDs. Stable paths remain unchanged; the importer retains original-file undo copies.</li>
             <li><strong>Verify in Navidrome.</strong> After the library scan, check song IDs, favorites, ratings and playlists, then confirm this in Language. The bulk button remains disabled until the verified test matches the selected scope.</li>
+            <li><strong>Review individual name changes.</strong> The fixed-height scrollable list shows each current name, the proposed name and a <strong>Change</strong> button. <strong>Change all</strong> only includes possible visible-name changes and requires a verified three-track test in the visible-names-only scope. Unreviewed and original-tag-only entries are not included.</li>
             <li><strong>Apply remaining.</strong> The page shows submitted/completed/failed counts; detailed errors, retries and track-level successes are logged under Activity.</li>
           </ol>
           <p><strong>Recheck already tagged names</strong> can include recordings marked <code>english-first-v1</code> if MusicBrainz English aliases have since changed. This requires a new review and a matching three-track test. Busy, manually edited or unsafe files are excluded.</p>
