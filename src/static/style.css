@@ -522,3 +522,16 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 
 /* One opt-out smart filter, directly above the bounded name-change list. */
 .language-smart-check { margin: 8px 0 0; font-weight: 600; }
+
+/* English aliases are readable directly below official MusicBrainz characters. */
+.approval-recording-name, .approval-recording-artist { min-width: 0; overflow-wrap: anywhere; }
+.approval-english-alias { display: block; margin-top: 3px; color: var(--accent);
+  font-size: 12px; font-weight: 550; line-height: 1.4; }
+.approval-name-note { display: block; color: var(--muted); margin-top: 3px; font-size: 11px; }
+.approval-other-aliases { font-size: 11px; color: var(--muted); }
+/* Reversing a completed tag update is a reversible, non-destructive action. */
+.language-change-actions .language-reverse-button {
+  background: var(--danger); color: #a0322e; border-color: #e7b6b3; min-width: 88px;
+}
+.language-change-actions .language-reverse-button:hover,
+.language-change-actions .language-reverse-button:focus-visible { background: #f6d9d6; }

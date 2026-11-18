@@ -1342,6 +1342,22 @@ class Store:
                 root = (LIBRARY / user).resolve()
                 if path != root / "audio" / (track_id + ".opus") or not path.is_file():
                     raise ValueError("Language updates require the canonical, existing audio path")
+            elif mode == "language_reverse":
+                if (track["health"] != "AVAILABLE" or track["operation_state"] != "IDLE"
+                        or track["metadata_edited"] or not track["current_asset_id"]
+                        or not track["mbid"] or not track["file_path"]):
+                    raise ValueError("Only idle, unedited, confirmed local music can be reversed")
+                path = Path(track["file_path"])
+                root = (LIBRARY / user).resolve()
+                asset = con.execute("SELECT * FROM assets WHERE id=? AND state='CURRENT'",
+                                    (track["current_asset_id"],)).fetchone()
+                if (not asset or asset["path"] != str(path) or not path.is_file()
+                        or path.is_symlink() or path != root / "audio" / (track_id + ".opus")
+                        or asset["sha256"] != payload.get("expected_after")
+                        or asset["id"] != payload.get("asset_id")
+                        or track["mbid"] != payload.get("mbid")
+                        or track["release_id"] != payload.get("release_id")):
+                    raise ValueError("Track identity or audio asset changed since the accepted name update")
             elif mode in {"repair", "source_links"}:
                 if track["health"] != "AVAILABLE" or not track["file_path"]:
                     raise ValueError("Tag/loudness repair requires an available audio file")

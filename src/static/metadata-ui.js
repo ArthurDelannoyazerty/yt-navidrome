@@ -13,7 +13,8 @@ window.MetadataUI = (() => {
     timer: null, filterTimer: null, pickerTimer: null, page: 1, maxPage: 1, artistId: null, effectiveQuery: null,
     retryUntil: 0, pickerPage: 1, submitted: new Set(), manualOriginal: {},
     actions: {base: [], search: []}, audioKey: null, audioSerial: 0,
-    releaseCache: new Map(), searchItems: [], searchEntity: "recording"};
+    releaseCache: new Map(), searchItems: [], searchEntity: "recording",
+    beetsNameCache: new Map(), artistNameCache: new Map()};
   const manualFields = {artist: "metadataManualArtist", title: "metadataManualTitle", album: "metadataManualAlbum",
     mbid: "metadataManualMbid", release_id: "metadataManualRelease"};
   const list = value => Array.isArray(value) ? value.join("; ") : value || "";
@@ -120,6 +121,73 @@ window.MetadataUI = (() => {
     const link = node("a", text); link.href = `https://musicbrainz.org/${kind}/${encodeURIComponent(id)}`;
     link.target = "_blank"; link.rel = "noopener noreferrer"; return link;
   }
+  function bilingualName(container, kind, id, canonical, english, note = "") {
+    container.replaceChildren();
+    const original = canonical || english || "Unknown";
+    container.append(id ? mbLink(kind, id, original) : node("strong", original));
+    if (english && english !== canonical) {
+      container.append(node("small", "English: " + english, "approval-english-alias"));
+    } else if (note) {
+      container.append(node("small", note, "approval-name-note"));
+    }
+  }
+  function hydrateBeetsRow(row, item, names, error = false) {
+    if (!row?.isConnected) return;
+    const title = row.querySelector(".approval-recording-name");
+    const artist = row.querySelector(".approval-recording-artist");
+    if (!title || !artist) return;
+    if (names) {
+      bilingualName(title, "recording", item.mbid, names.title,
+                    names.preferred_title || (item.title !== names.title ? item.title : null));
+      bilingualName(artist, "artist", null, names.artist || item.artist,
+                    names.preferred_artist ||
+                    (item.artist !== names.artist ? item.artist : null));
+    } else if (!item.mbid) {
+      bilingualName(title, "recording", null, item.title);
+      bilingualName(artist, "artist", null, item.artist || "—");
+    } else {
+      bilingualName(title, "recording", item.mbid, item.title, null,
+                    error ? "MusicBrainz original unavailable" : "Loading original MusicBrainz spelling…");
+      bilingualName(artist, "artist", null, item.artist || "—", null,
+                    error ? "MusicBrainz artist credit unavailable" : "Loading original artist credit…");
+    }
+  }
+  async function hydrateBeetsNames(context) {
+    const user = ui.user;
+    const candidates = choices().filter(item => item.mbid && item.kind !== "source" &&
+      item.kind !== "asis" && !item.asis).slice(0, 8);
+    // Exact-ID lookups are rate-limited by MusicBrainz. Render suggestions
+    // immediately and enrich their native characters without blocking Approval.
+    for (const item of candidates) {
+      if (!active() || context !== ui.context || user !== ui.user) return;
+      if (ui.beetsNameCache.has(item.mbid)) continue;
+      try {
+        const response = await fetch("/api/musicbrainz/recording-names?" +
+          new URLSearchParams({user_id: user, recording_id: item.mbid}), {cache: "no-store"});
+        const result = await response.json();
+        if (!response.ok || result.error) throw new Error(result.error || "Lookup failed");
+        if (result.id !== item.mbid) throw new Error("MusicBrainz identity mismatch");
+        ui.beetsNameCache.set(item.mbid, result);
+      } catch (_) {
+        // Never invent original characters when MusicBrainz is unavailable.
+        if (active() && context === ui.context) {
+          for (const row of $("metadataSuggestions").querySelectorAll("tr")) {
+            const index = Number(row.dataset.choice);
+            const choice = choices()[index];
+            if (choice?.mbid === item.mbid) hydrateBeetsRow(row, choice, null, true);
+          }
+        }
+        continue;
+      }
+      if (!active() || context !== ui.context || user !== ui.user) return;
+      for (const row of $("metadataSuggestions").querySelectorAll("tr")) {
+        const index = Number(row.dataset.choice);
+        const choice = choices()[index];
+        if (choice?.mbid === item.mbid)
+          hydrateBeetsRow(row, choice, ui.beetsNameCache.get(item.mbid));
+      }
+    }
+  }
   function aliasNames(item) {
     const names = new Set();
     for (const value of [item, ...(item.artists || [])]) {
@@ -205,9 +273,10 @@ window.MetadataUI = (() => {
       use.setAttribute("aria-label", `Approve ${item.title} recording without choosing an album`);
       action.append(use);
       const title = node("td", null, "approval-track");
-      title.append(item.mbid ? mbLink("recording", item.mbid, item.title) : node("strong", item.title));
+      title.append(node("div", null, "approval-recording-name"));
       title.append(evidence(item));
-      const artist = node("td", item.artist || "—", "approval-artist");
+      const artist = node("td", null, "approval-artist");
+      artist.append(node("div", null, "approval-recording-artist"));
       const recommended = item.evidence?.candidate_duration_seconds;
       const durationCell = node("td", Number.isFinite(recommended) ? duration(recommended) : "", "approval-duration");
       const score = node("td", item.match_score ?? item.similarity ?? "—", "approval-score");
@@ -218,6 +287,7 @@ window.MetadataUI = (() => {
       }
       row.append(action, title, artist, album, durationCell, score);
       body.append(row);
+      hydrateBeetsRow(row, item, item.mbid ? ui.beetsNameCache.get(item.mbid) : null);
     }
     $("beetsEmpty").hidden = matches.length > 0;
   }
@@ -322,6 +392,7 @@ window.MetadataUI = (() => {
     ui.manualOriginal = {artist: list(current.artist), title: list(current.title), album: list(current.album), mbid: data.current_mbid || "", release_id: data.current_release_id || ""};
     for (const [field, id] of Object.entries(manualFields)) $(id).value = ui.manualOriginal[field];
     syncAudio(data); renderSuggestions(); renderDecisions(); updateButtons();
+    void hydrateBeetsNames(data);
   }
   async function loadTrack(track, initialPane = "") {
     invalidateSearch(); ui.contextController?.abort(); stopAudio();
@@ -441,10 +512,11 @@ window.MetadataUI = (() => {
     for (const item of items) {
       const row = node("tr"), info = node("td", null, entity === "artist" ? "approval-artist" : "approval-track"), action = node("td", null, "approval-action");
       if (entity === "artist") {
-        info.append(mbLink("artist", item.id, item.preferred_name || item.name));
-        if (item.preferred_name && item.preferred_name !== item.name)
-          info.append(node("small", "Original: " + item.name));
-        else if (aliasNames(item)) info.append(node("small", aliasNames(item)));
+        row.dataset.mbid = item.id;
+        const artistLabel = node("div", null, "approval-search-artist-name");
+        info.append(artistLabel);
+        bilingualName(artistLabel, "artist", item.id, item.name, item.preferred_name);
+        if (aliasNames(item)) info.append(node("small", "Other names: " + aliasNames(item), "approval-other-aliases"));
         action.append(control("Tracks", () => {
           $("mbArtist").value = item.name; $("mbTitle").value = ""; $("mbEntity").value = "recording";
           ui.artistId = item.id; updateButtons(); scheduleSearch();
@@ -452,9 +524,10 @@ window.MetadataUI = (() => {
         const remember = rememberButton(item, "search"); if (remember) info.append(remember);
         row.append(action, info, node("td", [item.type, item.country, item.disambiguation].filter(Boolean).join(" \u00b7 "), "approval-artist-details"));
       } else {
-        info.append(mbLink("recording", item.id, item.preferred_title || item.title));
-        if (item.preferred_title && item.preferred_title !== item.title)
-          info.append(node("small", "Original: " + item.title));
+        row.dataset.mbid = item.id;
+        const titleLabel = node("div", null, "approval-search-recording-name");
+        info.append(titleLabel);
+        bilingualName(titleLabel, "recording", item.id, item.title, item.preferred_title);
         if (item.disambiguation) info.append(node("small", item.disambiguation));
         const details = node("details"); details.append(node("summary", "Details"));
         if (item.score != null) details.append(node("p", `Search relevance: ${item.score}`));
@@ -470,9 +543,9 @@ window.MetadataUI = (() => {
         album.append(editionPicker(item.id, releases, "search", release_id =>
           submit("select_recording", {mbid: item.id, release_id})));
         const artistCell = node("td", null, "approval-artist");
-        artistCell.append(node("span", item.preferred_artist || item.artist || "—"));
-        if (item.preferred_artist && item.preferred_artist !== item.artist)
-          artistCell.append(node("small", "Original: " + item.artist));
+        const artistLabel = node("div", null, "approval-search-recording-artist");
+        artistCell.append(artistLabel);
+        bilingualName(artistLabel, "artist", null, item.artist || "—", item.preferred_artist);
         row.append(action, info, artistCell, album,
           node("td", duration(Number.isFinite(item.length_ms) ? item.length_ms / 1000 : null), "approval-duration"));
         body.append(row);
@@ -482,6 +555,51 @@ window.MetadataUI = (() => {
     }
     table.append(head, body); container.append(table); return container;
   }
+  async function enrichSearchNames(context, serial, entries, entity) {
+    const user = ui.user;
+    // MusicBrainz search snippets often omit alias lists. Fill exact native
+    // and English names by ID, without changing the candidate, order or score.
+    for (const item of entries.slice(0, 12)) {
+      if (!active() || context !== ui.context || serial !== ui.searchSerial || user !== ui.user) return;
+      if (entity === "recording" &&
+          item.preferred_title && item.preferred_title !== item.title &&
+          item.preferred_artist && item.preferred_artist !== item.artist) continue;
+      if (entity === "artist" && item.preferred_name && item.preferred_name !== item.name) continue;
+      const cache = entity === "artist" ? ui.artistNameCache : ui.beetsNameCache;
+      let names = cache.get(item.id);
+      if (!names) {
+        try {
+          const url = entity === "artist" ? "/api/musicbrainz/artist-names?" :
+            "/api/musicbrainz/recording-names?";
+          const params = new URLSearchParams({
+            user_id: user,
+            [entity === "artist" ? "artist_id" : "recording_id"]: item.id,
+          });
+          const response = await fetch(url + params, {cache: "no-store"});
+          const data = await response.json();
+          if (!response.ok || data.error || data.id !== item.id) throw new Error("Name lookup unavailable");
+          names = data; cache.set(item.id, data);
+        } catch (_) { continue; }
+      }
+      if (!active() || context !== ui.context || serial !== ui.searchSerial || user !== ui.user) return;
+      const row = [...$("mbResults").querySelectorAll("tbody tr")]
+        .find(tr => tr.dataset.mbid === item.id);
+      if (!row) continue;
+      if (entity === "artist") {
+        const label = row.querySelector(".approval-search-artist-name");
+        if (label) bilingualName(label, "artist", item.id, names.name || item.name,
+                                  names.preferred_name || item.preferred_name);
+      } else {
+        const track = row.querySelector(".approval-search-recording-name");
+        const artist = row.querySelector(".approval-search-recording-artist");
+        if (track) bilingualName(track, "recording", item.id, names.title || item.title,
+                                  names.preferred_title || item.preferred_title);
+        if (artist) bilingualName(artist, "artist", null, names.artist || item.artist,
+                                   names.preferred_artist || item.preferred_artist);
+      }
+    }
+  }
+
   async function search() {
     if (!active() || !ui.context || !canSearch() || flow.mutation.pending || flow.detail.pending) return;
     if (Date.now() < ui.retryUntil) {
@@ -516,7 +634,10 @@ window.MetadataUI = (() => {
       $("mbPage").textContent = `${data.page} / ${ui.maxPage}`;
       $("mbPrev").disabled = data.page <= 1; $("mbNext").disabled = data.page >= ui.maxPage;
       ui.searchItems = data.items; ui.searchEntity = entity;
-      if (data.items.length) $("mbResults").append(resultTable(data.items, entity));
+      if (data.items.length) {
+        $("mbResults").append(resultTable(data.items, entity));
+        void enrichSearchNames(context, serial, data.items, entity);
+      }
       status(data.query_note || (data.items.length ? "" : "No results."), data.query_strategy === "title_only");
       updateButtons();
     } catch (error) { if (valid() && error.name !== "AbortError") { flow.search.fail(); status(error.message || String(error), true); } }

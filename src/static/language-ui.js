@@ -50,7 +50,12 @@ window.LanguageUI = (() => {
     const status = row.job_state;
     if (status === "PENDING") return {label: "Queued", locked: true, note: "Waiting"};
     if (status === "RUNNING") return {label: "Applying", locked: true, note: "In progress"};
-    if (status === "DONE") return {label: "Done", locked: true, note: "Applied"};
+    if (status === "REVERSIBLE") return {label: "Reverse", locked: false, reverse: true, note: "Accepted"};
+    if (status === "REVERSE_PENDING") return {label: "Reversing", locked: true, note: "Queued"};
+    if (status === "REVERSING") return {label: "Reversing", locked: true, note: "In progress"};
+    if (status === "REVERSED") return {label: "Change", locked: false, note: "Restored original tags"};
+    if (status === "REVERSE_FAILED") return {label: "Reverse failed", locked: true, note: "See Activity"};
+    if (status === "DONE") return {label: "Done", locked: true, note: "Original snapshot unavailable"};
     if (status === "FAILED" || status === "CANCELLED")
       return {label: "Retry", locked: false, note: "Check Activity"};
     return {label: "Change", locked: false, note: ""};
@@ -60,6 +65,10 @@ window.LanguageUI = (() => {
     const status = nameState(row);
     const button = row.element.querySelector("button");
     button.textContent = status.label;
+    button.className = status.reverse ? "language-reverse-button" : "secondary";
+    button.setAttribute("aria-label", status.reverse
+      ? "Reverse accepted name change for " + (row.current_name || row.before_label || row.id)
+      : "Change " + (row.current_name || row.before_label || row.id));
     button.disabled = status.locked || stateUI.busy;
     row.element.querySelector(".language-change-row-status").textContent = status.note;
   }
@@ -84,7 +93,8 @@ window.LanguageUI = (() => {
     actions.append(button, status);
     item.append(before, arrow, after, actions);
     row.element = item;
-    button.addEventListener("click", () => changeOneName(row));
+    button.addEventListener("click", () =>
+      nameState(row).reverse ? reverseOneName(row) : changeOneName(row));
     updateNameRow(row);
     return item;
   }
@@ -160,6 +170,36 @@ window.LanguageUI = (() => {
       }
     }
   }
+  async function reverseOneName(row) {
+    if (stateUI.busy || !stateUI.review?.review_token ||
+        !nameState(row).reverse || !state.user) return;
+    const user = state.user, serial = stateUI.serial;
+    const token = stateUI.review.review_token;
+    if (!confirm("Restore this track to its exact tags from before the accepted English-name change?\\n\\n" +
+      "Restored: " + (row.before_label || row.current_name) +
+      "\\nThis keeps the same MusicBrainz recording, file path and audio identity.")) return;
+    stateUI.busy = true;
+    renderActions();
+    text("languageNameChangesStatus", "Queuing the original-tag restoration…");
+    try {
+      await api("/api/catalogue/language-reverse", {
+        user_id: user, track_id: row.id, review_token: token, confirmed: true,
+      });
+      if (!active(user, serial) || stateUI.review?.review_token !== token) return;
+      row.job_state = "REVERSE_PENDING";
+      text("languageNameChangesStatus",
+        "Reverse queued. The original tags will be restored atomically; Activity shows details.");
+    } catch (error) {
+      if (active(user, serial)) text("languageNameChangesStatus", error.message, true);
+    } finally {
+      if (active(user, serial)) {
+        stateUI.busy = false;
+        renderActions();
+        updateNameRow(row);
+      }
+    }
+  }
+
   async function changeOneName(row) {
     if (stateUI.busy || !stateUI.review?.review_token || nameState(row).locked) return;
     const user = state.user, serial = stateUI.serial;

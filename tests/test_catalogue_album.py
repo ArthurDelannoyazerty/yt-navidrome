@@ -950,3 +950,117 @@ def test_smart_filter_matches_list_canary_and_bulk_without_hidden_updates(db, en
         assert client.post("/api/catalogue/language-apply", json={
             **request, "limit": 5000,
         }).json()["queued"] == 0, "Do not queue successful jobs twice"
+
+
+def test_reverse_accepted_language_update_restores_exact_opus_and_same_musicbrainz_identity(db, environment):
+    import asyncio
+    import time
+    from mutagen.oggopus import OggOpus
+    from localized_names import apply_to_opus
+    from language_jobs import name_changes
+    from language_reverse import undo_info
+    from pipeline import Pipeline
+
+    track_id, path, original_sha = add_audio_track(db, environment, RECORDING_1)
+    original_tags = dict(OggOpus(path))
+    original_row = db.one("SELECT mbid,release_id,matched_title,file_path FROM tracks WHERE id=?", (track_id,))
+    token = "f" * 32
+    db.set_setting("english-language-review:admin", {
+        "token": token, "created": time.time(), "include_localized": False,
+        "by_kind": {"display_changes": [track_id], "original_updates": []},
+        "asset_hashes": {track_id: original_sha},
+        "display_rows": [{"id": track_id, "before_label": "Artist - Track",
+                          "after_label": "Yasunori Nishiki - Primrose, the Dancer",
+                          "changed_field": "Title / artist"}],
+        "summary": {"review_token": token},
+    })
+    db.queue_track(track_id, "admin", {"mode": "language", "review_token": token})
+    job = db.claim()
+    worker = Pipeline(db)
+
+    async def fake_bridge(job, track, directory, mode, **kwargs):
+        if mode == "language":
+            return apply_to_opus(
+                kwargs["path"],
+                {"title": "Primrose, the Dancer", "artist": "Yasunori Nishiki",
+                 "album": "Octopath Traveler"},
+                {"title": "踊子プリムロゼのテーマ", "artist": "西木康智",
+                 "album": "オクトパストラベラー"},
+                include_album=True,
+            )
+        assert mode == "refresh"
+        file_tags = OggOpus(kwargs["path"])
+        return {"beets_id": 17, "matched_title": file_tags["artist"][0] + " - " + file_tags["title"][0]}
+
+    worker.bridge = fake_bridge
+    asyncio.run(worker.process_track(job))
+    db.finish_job(job["id"])
+    updated_sha = sha256_file(path)
+    assert updated_sha != original_sha
+    assert undo_info(db, "admin", track_id, token, verify_bytes=True) is not None
+    assert name_changes(db, "admin", token)["items"][0]["job_state"] == "REVERSIBLE"
+
+    with TestClient(create_app(db, start_workers=False)) as client:
+        payload = {"user_id": "admin", "track_id": track_id, "review_token": token, "confirmed": True}
+        assert client.post("/api/catalogue/language-reverse", json={
+            **payload, "review_token": "0" * 32,
+        }).status_code == 400
+        queued = client.post("/api/catalogue/language-reverse", json=payload)
+        assert queued.status_code == 200, queued.text
+        assert queued.json()["queued"] == 1
+        assert name_changes(db, "admin", token)["items"][0]["job_state"] == "REVERSE_PENDING"
+        assert client.post("/api/catalogue/language-reverse", json=payload).status_code == 400
+    reverse_job = db.claim()
+    assert json.loads(reverse_job["payload"])["mode"] == "language_reverse"
+    asyncio.run(worker.process_track(reverse_job))
+    db.finish_job(reverse_job["id"])
+    assert sha256_file(path) == original_sha
+    assert dict(OggOpus(path)) == original_tags, "Reverse must restore original Opus tags byte for byte"
+    after = db.one("SELECT mbid,release_id,file_path FROM tracks WHERE id=?", (track_id,))
+    for key in ("mbid", "release_id", "file_path"):
+        assert after[key] == original_row[key]
+    assert name_changes(db, "admin", token)["items"][0]["job_state"] == "REVERSED"
+    assert undo_info(db, "admin", track_id, token) is None
+    assert not list(path.parent.glob(track_id + ".1.opus"))
+    events = db.rows("SELECT message FROM events WHERE user_id=? ORDER BY id", ("admin",))
+    assert any("Reversed English-name update" in row["message"] for row in events)
+
+
+def test_reverse_rejects_external_audio_modifications_and_missing_undo(db, environment):
+    import asyncio
+    import time
+    from mutagen.oggopus import OggOpus
+    from localized_names import apply_to_opus
+    from language_reverse import undo_info
+    from pipeline import Pipeline
+
+    tid, path, original_sha = add_audio_track(db, environment, RECORDING_1)
+    token = "e" * 32
+    db.set_setting("english-language-review:admin", {
+        "token": token, "created": time.time(),
+        "by_kind": {"display_changes": [tid]},
+        "asset_hashes": {tid: original_sha}, "display_rows": [{"id": tid}],
+        "summary": {"review_token": token},
+    })
+    db.queue_track(tid, "admin", {"mode": "language", "review_token": token})
+    job = db.claim()
+    worker = Pipeline(db)
+
+    async def bridge(job, track, directory, mode, **kwargs):
+        if mode == "language":
+            return apply_to_opus(kwargs["path"], {"title": "New", "artist": "Artist"},
+                                 {"title": "Original", "artist": "Artist"})
+        return {"beets_id": 10, "matched_title": "Artist - New"}
+
+    worker.bridge = bridge
+    asyncio.run(worker.process_track(job))
+    db.finish_job(job["id"])
+    assert undo_info(db, "admin", tid, token, verify_bytes=True)
+    tags = OggOpus(path)
+    tags["title"] = ["Someone changed this later"]
+    tags.save()
+    with TestClient(create_app(db, start_workers=False)) as client:
+        payload = {"user_id": "admin", "track_id": tid, "review_token": token, "confirmed": True}
+        assert client.post("/api/catalogue/language-reverse", json=payload).status_code == 400
+    assert sha256_file(path) != original_sha
+    assert db.one("SELECT COUNT(*) AS n FROM jobs WHERE kind='track' AND json_extract(payload,'$.mode')='language_reverse'")["n"] == 0

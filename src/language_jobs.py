@@ -322,17 +322,20 @@ def name_changes(store, user_id, review_token, offset=0, limit=100, smart_only=T
         ids = [row["id"] for row in page]
         marks = ",".join("?" for _ in ids)
         jobs = store.rows(
-            f"""SELECT target,state FROM jobs WHERE user_id=? AND kind='track'
-                AND json_extract(payload,'$.mode')='language'
+            f"""SELECT target,state,payload FROM jobs WHERE user_id=? AND kind='track'
+                AND json_extract(payload,'$.mode') IN ('language','language_reverse')
                 AND json_extract(payload,'$.review_token')=?
                 AND target IN ({marks}) ORDER BY id DESC""",
             (user_id, review_token, *ids),
         )
+        from language_reverse import display_job_state
         latest = {}
         for job in jobs:
-            latest.setdefault(job["target"], job["state"])
+            latest.setdefault(job["target"], job)
         for row in page:
-            row["job_state"] = latest.get(row["id"])
+            job = latest.get(row["id"])
+            row["job_state"] = (display_job_state(store, user_id, row["id"], job)
+                                if job else None)
     return {"total": len(visible), "all_total": len(all_rows),
             "filtered_out": len(all_rows) - len(visible), "smart_only": bool(smart_only),
             "offset": offset, "items": page,
@@ -350,14 +353,16 @@ def name_change_status(store, user_id, review_token):
             continue
         marks = ",".join("?" for _ in chunk)
         rows = store.rows(
-            f"""SELECT target,state FROM jobs WHERE user_id=? AND kind='track'
-                AND json_extract(payload,'$.mode')='language'
+            f"""SELECT target,state,payload FROM jobs WHERE user_id=? AND kind='track'
+                AND json_extract(payload,'$.mode') IN ('language','language_reverse')
                 AND json_extract(payload,'$.review_token')=?
                 AND target IN ({marks}) ORDER BY id DESC""",
             (user_id, review_token, *chunk),
         )
+        from language_reverse import display_job_state
         for row in rows:
-            states.setdefault(row["target"], row["state"])
+            if row["target"] not in states:
+                states[row["target"]] = display_job_state(store, user_id, row["target"], row)
     return {"states": states}
 
 
