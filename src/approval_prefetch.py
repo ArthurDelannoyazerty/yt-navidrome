@@ -268,8 +268,9 @@ class ApprovalPrefetch:
             english.append((alias or piece.get("name") or "") + str(piece.get("joinphrase") or ""))
         item["preferred_artist"] = "".join(english)[:1000] if has_alias else None
         item.pop("artist_credits", None)  # Internal wiring, not additional public metadata.
-        return item, ((fresh or full_catalogue) and not need_artists)
-                       or (unavailable and fresh), need_artists
+        return (item,
+                ((fresh or full_catalogue) and not need_artists) or (unavailable and fresh),
+                need_artists)
 
     def names_batch(self, recordings=(), artists=()):
         """One local DB read, no provider/network waiting on the UI thread."""
