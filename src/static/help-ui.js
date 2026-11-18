@@ -1,6 +1,16 @@
 /* Load only the flowchart renderer, and only when the Help tab is opened. */
 "use strict";
 (() => {
+  // Native anchor navigation; no script dependency for moving between topics.
+  const links = document.querySelectorAll?.(".help-sidebar a") || [];
+  const selectTopic = target => {
+    for (const link of links) {
+      if (link === target) link.setAttribute("aria-current", "location");
+      else link.removeAttribute("aria-current");
+    }
+  };
+  for (const link of links) link.addEventListener("click", () => selectTopic(link));
+  if (links.length) selectTopic(links[0]);
   const panel = document.querySelector('[data-panel="help"]');
   const container = document.getElementById("workflowDiagram");
   if (!panel || !container) return;

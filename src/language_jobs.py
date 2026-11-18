@@ -8,10 +8,15 @@ from __future__ import annotations
 import json
 import threading
 import time
+from uuid import uuid4
+
+from mutagen.oggopus import OggOpus
+
 from pathlib import Path
 
 import common
-from localized_names import LANGUAGE_POLICY, artist_credit, is_localized, preferred_english_name
+from localized_names import (LANGUAGE_POLICY, POLICY_TAG, artist_credit,
+                             is_localized, preferred_english_name)
 
 MAX_TRACKS = 5000
 PROGRESS_STEP = 25
@@ -34,9 +39,11 @@ class PreviewProgress:
 
 
 preview_progress = PreviewProgress()
+queue_progress = PreviewProgress()
 
 
-def candidates(store, user_id, *, cap=MAX_TRACKS, include_localized=False, progress=None):
+def candidates(store, user_id, *, cap=MAX_TRACKS, include_localized=False, progress=None,
+               stop_after=None, inspect=None):
     store.require_user(user_id)
     root = (common.LIBRARY / user_id).resolve()
     rows = store.rows(
@@ -62,12 +69,24 @@ def candidates(store, user_id, *, cap=MAX_TRACKS, include_localized=False, progr
                     or row["asset_state"] != "CURRENT" or not row["sha256"]
                     or not path.is_file()):
                 summary["invalid_or_missing"] += 1
-            elif is_localized(path) and not include_localized:
-                summary["already_localized"] += 1
             else:
-                ready.append(row)
-        if progress and (index == 1 or index % PROGRESS_STEP == 0 or index == len(rows)):
+                try:
+                    tags = OggOpus(str(path))
+                    already_tagged = LANGUAGE_POLICY in (tags.get(POLICY_TAG) or [])
+                except Exception:
+                    summary["invalid_or_missing"] += 1
+                    continue
+                if already_tagged and not include_localized:
+                    summary["already_localized"] += 1
+                else:
+                    ready.append(row)
+                    if inspect:
+                        inspect(row, tags)
+        if progress and (index == 1 or index % PROGRESS_STEP == 0 or index == len(rows)
+                         or (stop_after and len(ready) >= stop_after)):
             progress(index, len(rows), len(ready), dict(summary))
+        if stop_after and len(ready) >= stop_after:
+            break
     if progress and not rows:
         progress(0, 0, 0, dict(summary))
     return ready, summary
@@ -95,86 +114,188 @@ def _credited_english_name(con, credits):
     return "".join(parts).strip()
 
 
-def _samples(store, ready):
-    """Best-effort cached display predictions; never guess a missing alias."""
-    from catalogue import Catalogue
+def _review_key(user_id):
+    return "english-language-review:" + user_id
 
-    result = []
+
+def _tag(tags, name):
+    return str((tags.get(name) or [""])[0]).strip()
+
+
+def _classify(con, track, tags):
+    """Cache-based estimate from the current file tags, not an online claim."""
+    current_title = _tag(tags, "TITLE")
+    current_artist = _tag(tags, "ARTIST")
+    current_album = _tag(tags, "ALBUM")
+    current = " - ".join(x for x in (current_artist, current_title) if x)
+    base = {"id": track["id"], "current_name": current or track["matched_title"] or track["id"],
+            "proposed_name": None, "canonical_name": None, "album": None,
+            "prediction": "MusicBrainz cache estimate", "changes": []}
     try:
-        with Catalogue(store).db() as con:
-            for track in ready[:8]:
-                current = track["matched_title"] or track["id"]
-                recording = con.execute(
-                    "SELECT data FROM entities WHERE kind='recording' AND id=?",
-                    (track["mbid"],),
-                ).fetchone()
-                if not recording:
-                    result.append({"id": track["id"], "current_name": current,
-                                   "proposed_name": None, "canonical_name": None,
-                                   "album": None, "prediction": "Needs MusicBrainz lookup on apply"})
-                    continue
-                raw = json.loads(recording["data"])
-                title = preferred_english_name(raw)
-                artist = _credited_english_name(con, raw.get("artist-credit"))
-                proposed = f"{artist} - {title}" if artist else title
-                native_artist = artist_credit(raw)
-                native = f"{native_artist} - {raw.get('title', '')}" if native_artist else raw.get("title", "")
-                album = None
-                if track["release_id"]:
-                    cached_album = con.execute(
-                        "SELECT data FROM entities WHERE kind='release' AND id=?",
-                        (track["release_id"],),
-                    ).fetchone()
-                    if cached_album:
-                        album = preferred_english_name(json.loads(cached_album["data"]))
-                result.append({"id": track["id"], "current_name": current,
-                               "proposed_name": proposed or None, "canonical_name": native,
-                               "album": album, "prediction": "Cached estimate; verified on apply"})
-    except Exception:
-        # No cached catalogue is not an error: the apply step uses beets'
-        # authoritative MusicBrainz lookup before touching a staged copy.
-        result = [{"id": track["id"], "current_name": track["matched_title"] or track["id"],
-                   "proposed_name": None, "canonical_name": None, "album": None,
-                   "prediction": "Needs MusicBrainz lookup on apply"} for track in ready[:8]]
-    return result
+        row = con.execute("SELECT data FROM entities WHERE kind='recording' AND id=?",
+                          (track["mbid"],)).fetchone()
+        if not row:
+            return {**base, "kind": "unknown", "prediction": "Recording is not cached; index it in Catalogue first"}
+        recording = json.loads(row["data"])
+        if not recording.get("title") or not recording.get("artist-credit"):
+            return {**base, "kind": "unknown", "prediction": "Recording credits are not cached yet"}
+        native_title = str(recording["title"]).strip()
+        native_artist = artist_credit(recording)
+        preferred_title = preferred_english_name(recording)
+        preferred_artist = _credited_english_name(con, recording["artist-credit"]) or native_artist
+        proposed_album, native_album = None, None
+        proposed_albumartist, native_albumartist = None, None
+        if track["release_id"]:
+            row = con.execute("SELECT data FROM entities WHERE kind='release' AND id=?",
+                              (track["release_id"],)).fetchone()
+            if not row:
+                return {**base, "kind": "unknown", "prediction": "Confirmed album edition is not cached yet"}
+            release = json.loads(row["data"])
+            proposed_album = preferred_english_name(release)
+            native_album = str(release.get("title") or "").strip()
+            if release.get("artist-credit"):
+                native_albumartist = artist_credit(release)
+                proposed_albumartist = _credited_english_name(con, release["artist-credit"]) or native_albumartist
+        expected_display = {"TITLE": preferred_title, "ARTIST": preferred_artist}
+        if proposed_album:
+            expected_display["ALBUM"] = proposed_album
+        if proposed_albumartist:
+            expected_display["ALBUMARTIST"] = proposed_albumartist
+        display_changes = [key.title() for key, expected in expected_display.items()
+                           if expected and _tag(tags, key) != expected]
+        expected_native = {"ORIGINALTITLE": native_title, "ORIGINALARTIST": native_artist}
+        if native_album:
+            expected_native["ORIGINALALBUM"] = native_album
+        if native_albumartist:
+            expected_native["ORIGINALALBUMARTIST"] = native_albumartist
+        original_changes = [key.title() for key, expected in expected_native.items()
+                            if expected and _tag(tags, key) != expected]
+        kind = ("display_changes" if display_changes else
+                "original_updates" if original_changes else "unchanged")
+        return {**base, "kind": kind,
+                "proposed_name": " - ".join(x for x in (preferred_artist, preferred_title) if x),
+                "canonical_name": " - ".join(x for x in (native_artist, native_title) if x),
+                "album": proposed_album,
+                "changes": display_changes + original_changes,
+                "prediction": "Cache estimate; exact MusicBrainz data checked when applying"}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return {**base, "kind": "unknown", "prediction": "Incomplete cached metadata; index in Catalogue"}
 
 
 def preview(store, user_id, include_localized=False):
+    from catalogue import Catalogue
+
     store.require_user(user_id)
     preview_progress.update(user_id, state="running", processed=0, total=0,
                             eligible=0, skipped={}, error=None)
     started = time.monotonic()
     store.event("INFO", "English-name review started (read-only; no audio or tags will change).",
                 user_id, "language-review")
-
+    counts = {"display_changes": 0, "original_updates": 0, "unchanged": 0, "unknown": 0}
+    ids = {key: [] for key in counts}
+    evidence = {}
+    examples = []
+    examples_by_kind = {key: 0 for key in counts}
     def on_progress(done, total, eligible, skipped):
         preview_progress.update(user_id, state="running", processed=done, total=total,
-                                eligible=eligible, skipped=skipped)
+                                eligible=eligible, skipped=skipped, changes=dict(counts))
         if done and (done % 250 == 0 or done == total):
             store.event("INFO", f"English-name review: examined {done}/{total}; "
-                        f"{eligible} eligible, {sum(skipped.values())} excluded.",
+                        f"{eligible} safe candidates, {sum(skipped.values())} excluded.",
                         user_id, "language-review")
 
     try:
-        ready, skipped = candidates(store, user_id,
-                                    include_localized=include_localized, progress=on_progress)
-        result = {"eligible": len(ready), "skipped": skipped, "sample": _samples(store, ready),
-                  "include_localized": bool(include_localized), "scanned": len(ready) + sum(skipped.values()),
-                  "note": "Read-only review; no tags or audio changed. Cached name predictions may change when the MusicBrainz lookup runs during apply."}
+        with Catalogue(store).db() as con:
+            def on_candidate(track, tags):
+                item = _classify(con, track, tags)
+                kind = item["kind"]
+                counts[kind] += 1
+                ids[kind].append(track["id"])
+                evidence[track["id"]] = track["sha256"]
+                # Show substantive examples first, not eight unchanged titles.
+                if examples_by_kind[kind] < (3 if kind != "unchanged" else 2):
+                    examples.append(item)
+                    examples_by_kind[kind] += 1
+            ready, skipped = candidates(store, user_id,
+                                        include_localized=include_localized,
+                                        progress=on_progress, inspect=on_candidate)
+        # Reorder examples by usefulness and keep the UI bounded.
+        priority = {"display_changes": 0, "original_updates": 1, "unknown": 2, "unchanged": 3}
+        examples.sort(key=lambda item: priority[item["kind"]])
+        result = {"eligible": len(ready), "skipped": skipped, "sample": examples[:8],
+                  "changes": counts, "include_localized": bool(include_localized),
+                  "scanned": len(ready) + sum(skipped.values()),
+                  "note": "Safe candidates are not necessarily changes. Predictions use cached metadata; the worker checks MusicBrainz again before writing."}
+        token = uuid4().hex
+        result["review_token"] = token
+        store.set_setting(_review_key(user_id), {
+            "token": token, "created": time.time(),
+            "include_localized": bool(include_localized),
+            "by_kind": ids, "asset_hashes": evidence,
+            "summary": result,
+        })
     except Exception as exc:
         preview_progress.update(user_id, state="error", error=str(exc))
         store.event("ERROR", f"English-name review failed without changing audio: {exc}",
                     user_id, "language-review")
         raise
     elapsed = round(time.monotonic() - started, 1)
-    preview_progress.update(user_id, state="complete", elapsed_seconds=elapsed, **{
+    preview_progress.update(user_id, state="complete", elapsed_seconds=elapsed,
+                            changes=dict(counts), **{
         k: result[k] for k in ("eligible", "skipped", "scanned")})
     store.event("INFO", f"English-name review finished in {elapsed}s: "
-                f"{result['scanned']} checked, {result['eligible']} eligible, "
-                f"{sum(skipped.values())} excluded. No audio or tags were changed.",
+                f"{counts['display_changes']} possible display-name changes, "
+                f"{counts['original_updates']} original-tag repairs, "
+                f"{counts['unchanged']} no detectable changes, "
+                f"{counts['unknown']} require catalogue metadata. "
+                "No audio or tags were changed.",
                 user_id, "language-review")
     return result
 
+
+
+def review_state(store, user_id):
+    """Return last review summary without rescanning thousands of audio files."""
+    store.require_user(user_id)
+    saved = store.setting(_review_key(user_id), {}) or {}
+    if not saved:
+        return {"state": "idle"}
+    if time.time() - saved.get("created", 0) > 4 * 3600:
+        return {"state": "expired"}
+    summary = saved.get("summary")
+    return {"state": "ready", "result": summary} if summary else {"state": "idle"}
+
+
+def batch_status(store, user_id):
+    """Durable, bounded summary of the last language-tag submission."""
+    store.require_user(user_id)
+    saved = store.setting("english-language-batch:" + user_id, {}) or {}
+    ids = saved.get("ids") or []
+    if not ids:
+        return {"state": "idle", "submitted": 0, "done": 0, "running": 0,
+                "pending": 0, "failed": 0}
+    states = {}
+    for start in range(0, len(ids), 400):
+        chunk = ids[start:start + 400]
+        marks = ",".join("?" for _ in chunk)
+        rows = store.rows(
+            f"""SELECT target,state,id FROM jobs
+                WHERE user_id=? AND kind='track'
+                  AND json_extract(payload,'$.mode')='language'
+                  AND target IN ({marks})
+                ORDER BY id DESC""", (user_id, *chunk))
+        for row in rows:
+            if row["target"] not in states:
+                states[row["target"]] = row["state"]
+    done = sum(value == "DONE" for value in states.values())
+    failed = sum(value in {"FAILED", "CANCELLED"} for value in states.values())
+    running = sum(value == "RUNNING" for value in states.values())
+    pending = len(ids) - done - failed - running
+    return {"state": "failed" if failed else "running" if pending or running else "done",
+            "mode": saved.get("mode"), "scope": saved.get("scope"),
+            "review_token": saved.get("review_token"),
+            "submitted": len(ids), "done": done, "running": running,
+            "pending": pending, "failed": failed}
 
 def _canary_key(user_id):
     return "english-language-canary:" + user_id
@@ -200,10 +321,18 @@ def canary_status(store, user_id):
               or not is_localized(Path(track["file_path"]))):
             failed += 1
     ready = failed == 0 and pending == 0
+    review = store.setting(_review_key(user_id), {}) or {}
+    scope = saved.get("scope", "names_and_originals")
+    reviewed = review.get("by_kind", {})
+    eligible_types = ("display_changes",) if scope == "names" else ("display_changes", "original_updates")
+    in_current_review = set(track_id for kind in eligible_types for track_id in reviewed.get(kind, []))
+    already_in_review = sum(track_id in in_current_review for track_id in ids)
     return {"state": "failed" if failed else "running" if pending else "ready",
             "verified": ready and bool(saved.get("verified")),
-            "track_count": len(ids), "pending": pending, "failed": failed,
+            "track_count": len(ids), "review_tested": already_in_review,
+            "pending": pending, "failed": failed,
             "include_localized": bool(saved.get("include_localized")),
+            "scope": saved.get("scope", "names_and_originals"),
             "track_ids": ids}
 
 
@@ -220,34 +349,113 @@ def verify_canary(store, user_id):
     return canary_status(store, user_id)
 
 
-def queue(store, user_id, limit, include_localized=False):
+def queue(store, user_id, limit, include_localized=False, review_token=None,
+          scope="names_and_originals"):
     if not 1 <= limit <= MAX_TRACKS:
         raise ValueError("Choose between 1 and 5000 tracks")
     store.require_user(user_id)
+    if scope not in {"names", "names_and_originals"}:
+        raise ValueError("Choose a supported type of language update")
     is_canary = limit <= 3
-    old_canary = canary_status(store, user_id)
-    if not is_canary and (not old_canary.get("verified") or
-                         old_canary.get("include_localized") != bool(include_localized)):
-        raise ValueError("First apply three tracks, verify their Navidrome IDs/ratings/playlists, and acknowledge the canary check. Use the same recheck setting.")
-    ready, skipped = candidates(store, user_id, include_localized=include_localized)
-    if not is_canary:
-        tested = set(old_canary.get("track_ids") or [])
-        ready = [row for row in ready if row["id"] not in tested]
-    queued_ids = []
-    for row in ready[:limit]:
-        try:
-            store.queue_track(row["id"], user_id, {"mode": "language"})
-            queued_ids.append(row["id"])
-        except (ValueError, LookupError):
-            skipped["manual_or_busy"] += 1
-    if is_canary and queued_ids:
-        store.set_setting(_canary_key(user_id),
-                          {"policy": LANGUAGE_POLICY, "track_ids": queued_ids,
-                           "include_localized": bool(include_localized), "verified": False})
-    store.event("INFO", f"English-name {'canary' if is_canary else 'bulk'}: "
-                f"{len(queued_ids)} track jobs queued; {sum(skipped.values())} excluded. "
-                "No downloads or identity changes; results will appear in Activity.",
+    mode = "canary" if is_canary else "bulk"
+    queue_progress.update(user_id, state="scanning", mode=mode, processed=0,
+                          total=0, eligible=0, queued=0, error=None)
+    store.event("INFO", f"English-name {mode} requested: selecting up to {limit} "
+                "eligible tracks. Audio has not changed; queue progress will follow.",
                 user_id, "language-review")
-    return {"queued": len(queued_ids), "eligible_before": len(ready),
-            "skipped": skipped, "mode": "canary" if is_canary else "bulk",
-            "message": "English-first metadata jobs queued; no downloads or album guessing."}
+
+    def on_scan(done, total, eligible, skipped):
+        queue_progress.update(user_id, state="scanning", mode=mode, processed=done,
+                              total=total, eligible=eligible, skipped=skipped)
+        if done == 1 or done % 500 == 0 or done == total:
+            store.event("INFO", f"English-name {mode} selection: checked "
+                        f"{done}/{total}, {eligible} eligible, "
+                        f"{sum(skipped.values())} excluded.",
+                        user_id, "language-review")
+
+    try:
+        old_canary = canary_status(store, user_id)
+        if not is_canary and (not old_canary.get("verified") or
+                             old_canary.get("include_localized") != bool(include_localized)
+                             or (review_token and old_canary.get("scope") != scope)):
+            raise ValueError("Verify the three-track canary in Navidrome for this update scope before bulk application.")
+        skipped = {"already_localized": 0, "manual_or_busy": 0, "invalid_or_missing": 0}
+        if review_token:
+            review = store.setting(_review_key(user_id), {}) or {}
+            if (review.get("token") != review_token or
+                    time.time() - review.get("created", 0) > 4 * 3600 or
+                    bool(review.get("include_localized")) != bool(include_localized)):
+                raise ValueError("Language review expired or changed. Run the read-only review again.")
+            kinds = ("display_changes",) if scope == "names" else ("display_changes", "original_updates")
+            selected_ids = [id for kind in kinds for id in review["by_kind"].get(kind, [])]
+            if not is_canary:
+                tested = set(old_canary.get("track_ids") or [])
+                selected_ids = [id for id in selected_ids if id not in tested]
+            # Recheck asset identity and eligibility even though the review is
+            # recent. It is never sufficient authority to enqueue changed files.
+            hashes = review.get("asset_hashes") or {}
+            ready = []
+            for track_id in selected_ids[:limit]:
+                row = store.one(
+                    """SELECT t.id,t.current_asset_id,t.operation_state,t.health,
+                              t.metadata_edited,t.file_path,t.mbid,a.sha256 AS current_sha
+                       FROM tracks t LEFT JOIN assets a ON a.id=t.current_asset_id
+                       WHERE t.id=? AND t.user_id=?""", (track_id, user_id))
+                if not row or not hashes.get(track_id) or row["current_sha"] != hashes[track_id]:
+                    skipped["invalid_or_missing"] += 1
+                elif row["metadata_edited"] or row["operation_state"] != "IDLE":
+                    skipped["manual_or_busy"] += 1
+                else:
+                    ready.append(row)
+            scanned = len(selected_ids)
+            queue_progress.update(user_id, state="queuing", processed=scanned,
+                                  total=scanned, eligible=len(ready))
+        else:
+            # Compatibility for existing API clients; the new Language UI always
+            # passes an exact, time-limited review token and scope.
+            ready, skipped = candidates(
+                store, user_id, include_localized=include_localized, progress=on_scan,
+                stop_after=3 if is_canary else None,
+            )
+            scanned = len(ready) + sum(skipped.values())
+            if not is_canary:
+                tested = set(old_canary.get("track_ids") or [])
+                ready = [row for row in ready if row["id"] not in tested]
+            queue_progress.update(user_id, state="queuing", processed=scanned,
+                                  eligible=len(ready))
+        queued_ids = []
+        for row in ready[:limit]:
+            try:
+                store.queue_track(row["id"], user_id, {"mode": "language"})
+                queued_ids.append(row["id"])
+                queue_progress.update(user_id, queued=len(queued_ids))
+            except (ValueError, LookupError) as exc:
+                skipped["manual_or_busy"] += 1
+                store.event("WARNING", f"English-name {mode}: skipped track "
+                            f"{row['id']} after an eligibility change: {exc}",
+                            user_id, "language-review")
+        if queued_ids:
+            store.set_setting("english-language-batch:" + user_id,
+                              {"ids": queued_ids, "mode": mode,
+                               "scope": scope, "review_token": review_token,
+                               "created": time.time()})
+        if is_canary and queued_ids:
+            store.set_setting(_canary_key(user_id),
+                              {"policy": LANGUAGE_POLICY, "track_ids": queued_ids,
+                               "include_localized": bool(include_localized),
+                               "scope": scope if review_token else "names_and_originals",
+                               "verified": False})
+        store.event("INFO", f"English-name {mode}: "
+                    f"{len(queued_ids)} track jobs queued; {sum(skipped.values())} excluded. "
+                    "No downloads or identity changes; worker results will appear in Activity.",
+                    user_id, "language-review")
+        queue_progress.update(user_id, state="complete", queued=len(queued_ids),
+                              skipped=skipped, error=None)
+        return {"queued": len(queued_ids), "eligible_before": len(ready),
+                "scanned": scanned, "skipped": skipped, "mode": mode, "scope": scope,
+                "message": "English-first metadata jobs queued; no downloads or album guessing."}
+    except Exception as exc:
+        queue_progress.update(user_id, state="error", error=str(exc))
+        store.event("ERROR", f"English-name {mode} request failed: {exc}",
+                    user_id, "language-review")
+        raise

@@ -251,6 +251,9 @@ def test_language_job_preserves_stable_path_and_creates_undo_copy(db, environmen
     assert sha256_file(snapshots[0]) == original_sha
     assert OggOpus(snapshots[0])["title"] == ["Track"]
     assert not list((environment[1] / "admin" / "audio").glob(tid + ".1.opus"))
+    events = db.rows("SELECT message FROM events WHERE user_id=? ORDER BY id", ("admin",))
+    assert any("Visible metadata changed" in event["message"] and
+               "Primrose, the Dancer" in event["message"] for event in events)
 
 
 def test_confirmed_release_alias_is_english_and_native_album_is_preserved(db, environment):
@@ -623,3 +626,128 @@ def test_indexed_recording_queues_exact_artist_alias_lookup(db):
         assert json.loads(row["data"])["name"] == "原作者"
 
 
+
+
+def test_language_diff_review_separates_name_tags_unknown_and_noops(db, environment):
+    """A safe file must not automatically count as a necessary name change."""
+    from mutagen.oggopus import OggOpus
+    from language_jobs import preview, review_state
+    cat, _ = setup_catalogue(db)
+    changed_id, changed_path, original_hash = add_audio_track(db, environment, RECORDING_1)
+    original_id, original_path, _ = add_audio_track(db, environment, RECORDING_2)
+    unknown_id, _, _ = add_audio_track(db, environment, RECORDING_4)
+    with cat.db() as con:
+        cat.ingest(con, "recording", {
+            "id": RECORDING_1, "title": "原題",
+            "aliases": [{"name": "English title", "locale": "en", "primary": True}],
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "作曲家"}}],
+        })
+        cat.ingest(con, "recording", {
+            "id": RECORDING_2, "title": "Track",
+            "artist-credit": [{"artist": {"id": "99999999-9999-4999-8999-999999999999",
+                                          "name": "Artist"}}],
+        })
+    # The second track already has its desired visible fields, but lacks two
+    # canonical-name tags. The confirmed album's original tag is already right.
+    tags = OggOpus(original_path)
+    tags["album"] = ["Preview"]
+    tags["albumartist"] = ["Composer"]
+    tags["originalalbum"] = ["Preview"]
+    tags["originalalbumartist"] = ["Composer"]
+    tags.save()
+    db.execute("UPDATE assets SET sha256=? WHERE track_id=?",
+               (sha256_file(original_path), original_id))
+    result = preview(db, "admin")
+    assert result["eligible"] == 3
+    assert result["changes"] == {
+        "display_changes": 1, "original_updates": 1, "unchanged": 0, "unknown": 1,
+    }
+    assert [item["kind"] for item in result["sample"]][:3] == [
+        "display_changes", "original_updates", "unknown",
+    ]
+    assert result["review_token"] and len(result["review_token"]) == 32
+    assert review_state(db, "admin")["result"]["review_token"] == result["review_token"]
+    assert sha256_file(changed_path) == original_hash, "Review must not write any tags"
+
+
+def test_language_ui_scoped_apply_uses_recent_review_and_requires_matching_canary(db, environment):
+    from mutagen.oggopus import OggOpus
+    from language_jobs import preview, canary_status, batch_status
+    cat, _ = setup_catalogue(db)
+    name_id, name_path, _ = add_audio_track(db, environment, RECORDING_1)
+    native_id, native_path, _ = add_audio_track(db, environment, RECORDING_2)
+    unknown_id, _, _ = add_audio_track(db, environment, RECORDING_4)
+    with cat.db() as con:
+        cat.ingest(con, "recording", {
+            "id": RECORDING_1, "title": "原題",
+            "aliases": [{"name": "English title", "locale": "en"}],
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "Composer"}}],
+        })
+        cat.ingest(con, "recording", {
+            "id": RECORDING_2, "title": "Track",
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "Artist"}}],
+        })
+    tags = OggOpus(native_path)
+    tags["album"] = ["Preview"]
+    tags["albumartist"] = ["Composer"]
+    tags["originalalbum"] = ["Preview"]
+    tags["originalalbumartist"] = ["Composer"]
+    tags.save()
+    db.execute("UPDATE assets SET sha256=? WHERE track_id=?",
+               (sha256_file(native_path), native_id))
+    review = preview(db, "admin")
+    token = review["review_token"]
+    assert review["changes"]["display_changes"] == 1
+    assert review["changes"]["original_updates"] == 1
+    assert review["changes"]["unknown"] == 1
+    with TestClient(create_app(db, start_workers=False)) as client:
+        data = {"user_id": "admin", "limit": 3, "confirmed": True,
+                "scope": "names", "review_token": token}
+        assert client.post("/api/catalogue/language-apply", json={
+            **data, "review_token": "0" * 32,
+        }).status_code == 400, "Forged review tokens must be rejected"
+        sent = client.post("/api/catalogue/language-apply", json=data)
+        assert sent.status_code == 200, sent.text
+        assert sent.json()["queued"] == 1, "Original-tag-only and unknown records must not be included"
+        assert canary_status(db, "admin")["review_tested"] == 1
+        targets = {row["target"] for row in db.rows(
+            "SELECT target FROM jobs WHERE kind='track' AND payload LIKE '%language%'")}
+        assert targets == {name_id}
+        batch = client.get("/api/catalogue/language-batch-status",
+                           params={"user_id": "admin"}).json()
+        assert batch["submitted"] == 1 and batch["pending"] == 1
+        assert batch["review_token"] == token, "Batch must refer to this exact review"
+        assert client.post("/api/catalogue/language-apply", json={
+            **data, "limit": 5000,
+        }).status_code == 400, "Bulk cannot bypass the canary"
+        assert client.get("/api/catalogue/language-review-state",
+                          params={"user_id": "guest"}).json()["state"] == "idle"
+        assert client.get("/api/catalogue/language-batch-status",
+                          params={"user_id": "not-a-user"}).status_code == 400
+
+        # Simulate completed language job and Navidrome scan.
+        tags = OggOpus(name_path)
+        tags["INGESTOR_LANGUAGE_POLICY"] = ["english-first-v1"]
+        tags.save()
+        db.execute("UPDATE tracks SET operation_state='IDLE' WHERE id=?", (name_id,))
+        assert canary_status(db, "admin")["state"] == "ready"
+        verified = client.post("/api/catalogue/language-canary-verify", json={
+            "user_id": "admin", "confirmed": True,
+        })
+        assert verified.status_code == 200
+        assert verified.json()["scope"] == "names"
+        # Retrying the review after the test omits now-tagged tracks. The
+        # remaining counter must subtract only test IDs still in the review.
+        latest_review = preview(db, "admin")
+        data["review_token"] = latest_review["review_token"]
+        assert canary_status(db, "admin")["review_tested"] == 0
+        assert client.post("/api/catalogue/language-apply", json={
+            **data, "limit": 5000, "scope": "names_and_originals",
+        }).status_code == 400, "A broader scope needs a new canary"
+        remainder = client.post("/api/catalogue/language-apply", json={
+            **data, "limit": 5000,
+        })
+        assert remainder.status_code == 200
+        assert remainder.json()["queued"] == 0, "Already-tested track excluded from remainder"
+        assert db.one("SELECT operation_state FROM tracks WHERE id=?", (native_id,))["operation_state"] == "IDLE"
+        assert db.one("SELECT operation_state FROM tracks WHERE id=?", (unknown_id,))["operation_state"] == "IDLE"

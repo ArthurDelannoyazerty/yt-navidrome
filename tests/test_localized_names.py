@@ -98,3 +98,30 @@ def test_recording_only_approval_does_not_assign_album(audio):
     assert tags["album"] == ["旧アルバム"]  # Existing album tag is not guessed.
     assert "originalalbum" not in tags
     assert tags["originaltitle"] == ["踊子プリムロゼのテーマ"]
+
+
+def test_activity_report_distinguishes_visible_changes_from_canonical_tags(audio, tmp_path):
+    from shutil import copyfile
+    from localized_names import language_change_report
+
+    visible = tmp_path / "english.opus"
+    copyfile(audio, visible)
+    apply_to_opus(visible,
+                  {"title": "Primrose, the Dancer", "artist": "Yasunori Nishiki"},
+                  {"title": "踊子プリムロゼのテーマ", "artist": "西木康智"})
+    message = language_change_report(audio, visible)
+    assert "Visible metadata changed" in message
+    assert "TITLE:" in message and "Primrose, the Dancer" in message
+    assert "ARTIST:" in message and "Yasunori Nishiki" in message
+    assert "ORIGINALTITLE" in message and "ORIGINALARTIST" in message
+    assert "MusicBrainz IDs and file paths unchanged" in message
+
+    originals_only = tmp_path / "originals.opus"
+    copyfile(audio, originals_only)
+    apply_to_opus(originals_only,
+                  {"title": "踊子プリムロゼのテーマ", "artist": "西木康智"},
+                  {"title": "踊子プリムロゼのテーマ", "artist": "西木康智"})
+    message = language_change_report(audio, originals_only)
+    assert "Visible title, artist and album names unchanged" in message
+    assert "ORIGINALTITLE" in message
+    assert "English-first policy marker set" in message

@@ -90,3 +90,39 @@ def is_localized(path):
         return LANGUAGE_POLICY in (OggOpus(str(path)).get(POLICY_TAG) or [])
     except Exception:
         return False
+
+
+def language_change_report(before_path, after_path):
+    """Describe *actual* staged tag edits for Activity, not cache predictions.
+
+    Only compare known display/native-name fields and the policy marker.
+    Reading tags never alters the original or staged audio file.
+    """
+    old = OggOpus(str(before_path))
+    new = OggOpus(str(after_path))
+
+    def value(audio, key):
+        return str((audio.get(key) or [""])[0]).strip()
+
+    def short(value):
+        return repr(value[:80] + ("…" if len(value) > 80 else ""))
+
+    display = []
+    for key in ("TITLE", "ARTIST", "ALBUM", "ALBUMARTIST"):
+        a, b = value(old, key), value(new, key)
+        if a != b:
+            display.append(f"{key}: {short(a)} → {short(b)}")
+    original = []
+    for key in NATIVE_KEYS.values():
+        if value(old, key) != value(new, key):
+            original.append(key)
+
+    if display:
+        parts = ["Visible metadata changed: " + "; ".join(display)]
+    else:
+        parts = ["Visible title, artist and album names unchanged"]
+    parts.append("Canonical tags updated: " + ", ".join(original)
+                 if original else "Canonical tags already correct")
+    if value(old, POLICY_TAG) != value(new, POLICY_TAG):
+        parts.append("English-first policy marker set")
+    return ". ".join(parts) + ". MusicBrainz IDs and file paths unchanged; no redownload."

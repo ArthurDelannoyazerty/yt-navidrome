@@ -376,3 +376,109 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 .catalogue-language-example small { color: var(--muted); font-size: 11px; line-height: 1.4; margin-top: 2px; }
 #catalogueLanguageSample { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 8px; }
 #catalogueLanguageActivity { font-size: 12px; margin-top: 0; }
+
+
+/* Language tab: compact guided action rows, meaningful counts and readable diffs. */
+.language-panel { max-width: 1160px; }
+.language-panel .panel-heading { align-items: flex-start; }
+.language-panel .panel-heading .hint { max-width: 72ch; }
+.language-stepbar { display: grid; grid-template-columns: repeat(4,minmax(0,1fr));
+  gap: 8px; margin: 14px 0 18px; }
+.language-stepbar span { font-size: 12px; font-weight: 600; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+  background: var(--sub); text-align: center; }
+.language-section { border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel); padding: 20px; margin: 16px 0; min-width: 0; }
+.language-section h3 { margin: 0 0 6px; }
+.language-section h4 { margin: 0 0 3px; }
+.language-section-title { display: flex; align-items: flex-start;
+  justify-content: space-between; gap: 16px; }
+.language-section-title > div { min-width: 0; }
+.language-section-title button { flex-shrink: 0; }
+.language-section p { margin: 9px 0; overflow-wrap: anywhere; }
+.language-check { display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 400; margin: 6px 0 12px; }
+.language-check input { width: auto; margin: 0; }
+#languageReviewBar { width: 100%; max-width: 550px; height: 11px; accent-color: var(--accent); }
+.language-metrics { display: grid; grid-template-columns: repeat(5,minmax(0,1fr));
+  gap: 8px; margin-top: 16px; }
+.language-metrics > div { background: var(--sub); border: 1px solid var(--border);
+  padding: 12px 10px; border-radius: 8px; min-width: 0; }
+.language-metrics strong, .language-metrics span { display: block; }
+.language-metrics strong { font-size: 23px; line-height: 1.25;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.language-metrics span { color: var(--muted); font-size: 12px; margin-top: 5px; line-height: 1.35; }
+.language-examples { margin: 14px 0; }
+.language-examples summary { font-weight: 600; cursor: pointer; }
+.language-example-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr));
+  gap: 8px; margin: 10px 0; }
+.language-example { border: 1px solid var(--border); border-radius: 7px;
+  padding: 10px; min-width: 0; background: var(--sub); overflow-wrap: anywhere; }
+.language-example strong, .language-example small { display: block; }
+.language-example strong { font-size: 13px; margin: 3px 0; }
+.language-example small { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.language-example-kind { font-weight: 600; color: var(--accent); font-size: 11px; }
+.language-scope { display: block; max-width: 550px; margin: 14px 0; }
+.language-scope select { width: 100%; max-width: 100%; margin-top: 6px; }
+.language-action-row { border: 1px solid var(--border); border-radius: 8px;
+  overflow: hidden; margin: 14px 0; }
+.language-action { display: grid; grid-template-columns: 30px minmax(0,1fr) auto;
+  align-items: center; gap: 12px; padding: 14px; border-bottom: 1px solid var(--border); }
+.language-action:last-child { border-bottom: 0; }
+.language-action button { min-width: 158px; }
+.language-step-number { display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; width: 26px; height: 26px; background: var(--secondary);
+  border: 1px solid var(--border); font-size: 12px; font-weight: 600; }
+.language-action .hint { margin: 0; }
+.language-job-summary { font-size: 13px; font-weight: 600;
+  padding: 10px 12px; background: var(--sub); border-radius: 6px; }
+@media (max-width: 850px) {
+  .language-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .language-action button { min-width: 130px; }
+}
+@media (max-width: 600px) {
+  .language-stepbar { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .language-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .language-section { padding: 14px; }
+  .language-section-title { display: block; }
+  .language-section-title button { margin-top: 10px; width: 100%; }
+  .language-example-list { grid-template-columns: 1fr; }
+  .language-action { grid-template-columns: 26px minmax(0,1fr); }
+  .language-action button { grid-column: 1/-1; width: 100%; }
+}
+
+
+/* Help navigation follows the real tab order; topics stay readable on phones. */
+.help-layout { display: grid; grid-template-columns: 192px minmax(0,1fr);
+  align-items: start; gap: 22px; margin: 18px 0; }
+.help-sidebar { position: sticky; top: 16px; display: grid; gap: 2px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+  background: var(--panel); max-height: calc(100vh - 32px); overflow: auto; }
+.help-sidebar > strong { font-size: 12px; color: var(--muted);
+  padding: 6px 10px; text-transform: uppercase; letter-spacing: .04em; }
+.help-sidebar a { display: block; padding: 8px 10px; border-radius: 5px;
+  font-size: 13px; text-decoration: none; color: inherit; }
+.help-sidebar a:hover, .help-sidebar a:focus-visible { background: var(--secondary); }
+.help-sidebar a[aria-current="location"] { color: var(--accent); background: var(--good); font-weight: 600; }
+.help-topics { min-width: 0; display: grid; gap: 14px; }
+.help-topic { scroll-margin-top: 20px; border: 1px solid var(--border);
+  padding: 22px; background: var(--panel); border-radius: 10px; min-width: 0; }
+.help-topic h3 { margin: 0 0 12px; font-size: 21px; }
+.help-topic h4 { margin-bottom: 8px; }
+.help-topic p, .help-topic li { overflow-wrap: anywhere; }
+.help-topic p { max-width: 80ch; }
+.help-topic li { margin: 8px 0; }
+.help-topic .quick-start { gap: 12px; margin: 16px 0 20px; }
+.help-topic .quick-start li { padding: 12px; background: var(--sub);
+  border: 1px solid var(--border); border-radius: 6px; }
+.help-topic .quick-start p { font-size: 12px; }
+.help-topic .help-detail { margin: 10px 0; }
+.help-topic .workflow-diagram { padding: 12px; }
+@media (max-width: 840px) {
+  .help-layout { grid-template-columns: minmax(0,1fr); gap: 12px; }
+  .help-sidebar { position: static; display: flex; flex-wrap: nowrap; overflow-x: auto;
+    max-height: none; scrollbar-width: thin; white-space: nowrap; }
+  .help-sidebar > strong { display: none; }
+  .help-sidebar a { flex-shrink: 0; }
+  .help-topic { padding: 16px; }
+}
