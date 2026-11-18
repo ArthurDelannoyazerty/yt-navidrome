@@ -11,7 +11,8 @@ from album_management import AlbumManager
 from catalogue import Catalogue, ENTITY_KINDS
 from language_jobs import (preview as language_preview, queue as queue_languages,
                            preview_progress, queue_progress, canary_status, verify_canary,
-                           review_state, batch_status)
+                           review_state, batch_status, name_changes,
+                           queue_one_name_change)
 
 
 class SyncRequest(BaseModel):
@@ -63,6 +64,13 @@ class LanguageApplyInput(BaseModel):
 
 class LanguageUserInput(BaseModel):
     user_id: str
+    confirmed: Literal[True]
+
+
+class LanguageOneChangeInput(BaseModel):
+    user_id: str
+    track_id: str = Field(min_length=32, max_length=64)
+    review_token: str = Field(min_length=32, max_length=32)
     confirmed: Literal[True]
 
 
@@ -144,6 +152,19 @@ def install_catalogue_routes(app, store, pipeline):
     @app.get("/api/catalogue/language-batch-status")
     def language_batch_status(user_id: str):
         return batch_status(store, user_id)
+
+    @app.get("/api/catalogue/language-name-changes")
+    def language_name_changes(user_id: str, review_token: str = Query(min_length=32, max_length=32),
+                              offset: int = Query(0, ge=0, le=5000),
+                              limit: int = Query(100, ge=1, le=100)):
+        return name_changes(store, user_id, review_token, offset, limit)
+
+    @app.post("/api/catalogue/language-name-change")
+    async def language_name_change(data: LanguageOneChangeInput):
+        albums.require_migration_complete()
+        store.require_user(data.user_id)
+        return await asyncio.to_thread(queue_one_name_change, store, data.user_id,
+                                       data.track_id, data.review_token)
 
     @app.get("/api/catalogue/language-apply-progress")
     def language_apply_progress(user_id: str):
