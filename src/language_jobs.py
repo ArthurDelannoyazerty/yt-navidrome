@@ -263,12 +263,13 @@ def preview(store, user_id, include_localized=False):
                   "scanned": len(ready) + sum(skipped.values()),
                   "note": "Safe candidates are not necessarily changes. Predictions use cached metadata; the worker checks MusicBrainz again before writing."}
         token = uuid4().hex
+        result["review_token"] = token
         store.set_setting(_review_key(user_id), {
             "token": token, "created": time.time(),
             "include_localized": bool(include_localized),
             "by_kind": ids, "asset_hashes": evidence,
+            "summary": result,
         })
-        result["review_token"] = token
     except Exception as exc:
         preview_progress.update(user_id, state="error", error=str(exc))
         store.event("ERROR", f"English-name review failed without changing audio: {exc}",
@@ -287,6 +288,45 @@ def preview(store, user_id, include_localized=False):
                 user_id, "language-review")
     return result
 
+
+
+def review_state(store, user_id):
+    """Return last review summary without rescanning thousands of audio files."""
+    store.require_user(user_id)
+    saved = store.setting(_review_key(user_id), {}) or {}
+    if time.time() - saved.get("created", 0) > 4 * 3600:
+        return {"state": "expired"}
+    summary = saved.get("summary")
+    return {"state": "ready", "result": summary} if summary else {"state": "idle"}
+
+
+def batch_status(store, user_id):
+    """Durable, bounded summary of the last language-tag submission."""
+    store.require_user(user_id)
+    saved = store.setting("english-language-batch:" + user_id, {}) or {}
+    ids = saved.get("ids") or []
+    if not ids:
+        return {"state": "idle", "submitted": 0, "done": 0, "running": 0,
+                "pending": 0, "failed": 0}
+    states = {}
+    for start in range(0, len(ids), 400):
+        chunk = ids[start:start + 400]
+        marks = ",".join("?" for _ in chunk)
+        rows = store.rows(
+            f"""SELECT target,state,id FROM jobs
+                WHERE user_id=? AND kind='track' AND target IN ({marks})
+                ORDER BY id DESC""", (user_id, *chunk))
+        for row in rows:
+            if row["target"] not in states:
+                states[row["target"]] = row["state"]
+    done = sum(value == "DONE" for value in states.values())
+    failed = sum(value in {"FAILED", "CANCELLED"} for value in states.values())
+    running = sum(value == "RUNNING" for value in states.values())
+    pending = len(ids) - done - failed - running
+    return {"state": "failed" if failed else "running" if pending or running else "done",
+            "mode": saved.get("mode"), "scope": saved.get("scope"),
+            "submitted": len(ids), "done": done, "running": running,
+            "pending": pending, "failed": failed}
 
 def _canary_key(user_id):
     return "english-language-canary:" + user_id
@@ -418,6 +458,10 @@ def queue(store, user_id, limit, include_localized=False, review_token=None,
                 store.event("WARNING", f"English-name {mode}: skipped track "
                             f"{row['id']} after an eligibility change: {exc}",
                             user_id, "language-review")
+        if queued_ids:
+            store.set_setting("english-language-batch:" + user_id,
+                              {"ids": queued_ids, "mode": mode,
+                               "scope": scope, "created": time.time()})
         if is_canary and queued_ids:
             store.set_setting(_canary_key(user_id),
                               {"policy": LANGUAGE_POLICY, "track_ids": queued_ids,
