@@ -251,6 +251,9 @@ def test_language_job_preserves_stable_path_and_creates_undo_copy(db, environmen
     assert sha256_file(snapshots[0]) == original_sha
     assert OggOpus(snapshots[0])["title"] == ["Track"]
     assert not list((environment[1] / "admin" / "audio").glob(tid + ".1.opus"))
+    events = db.rows("SELECT message FROM events WHERE user_id=? ORDER BY id", ("admin",))
+    assert any("Visible metadata changed" in event["message"] and
+               "Primrose, the Dancer" in event["message"] for event in events)
 
 
 def test_confirmed_release_alias_is_english_and_native_album_is_preserved(db, environment):
