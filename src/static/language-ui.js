@@ -94,15 +94,20 @@ window.LanguageUI = (() => {
     const same = Boolean(c.include_localized) === recheck() &&
       (c.scope || "names_and_originals") === scope();
     const verified = c.verified && same;
+    const remaining = Math.max(0, available - (same ? (c.track_count || 0) : 0));
+    const completedBatch = stateUI.batch?.mode === "bulk" && stateUI.batch?.state === "done";
     $("languageScopeSummary").textContent = stateUI.review
-      ? number(available) + " candidates selected from the cached review. " +
+      ? number(available) + " candidates selected from the cached review" +
+        (same && c.track_count ? " (" + number(remaining) + " not in the test)" : "") + ". " +
         (scope() === "names" ? "Original-tag-only updates are excluded." :
           "Both visible-name changes and original-tag repairs are included.") +
         " Cache-incomplete and unchanged tracks are excluded."
       : "Review the library to select actual differences. Nothing is selected yet.";
-    $("languageCanary").disabled = stateUI.busy || !stateUI.review?.review_token || available < 1;
+    $("languageCanary").disabled = stateUI.busy || !stateUI.review?.review_token ||
+      available < 1 || (same && c.track_count && ["running", "ready"].includes(c.state));
     $("languageVerify").disabled = stateUI.busy || !same || c.state !== "ready" || Boolean(c.verified);
-    $("languageBulk").disabled = stateUI.busy || !stateUI.review?.review_token || available < 1 || !verified;
+    $("languageBulk").disabled = stateUI.busy || !stateUI.review?.review_token ||
+      remaining < 1 || !verified || completedBatch;
     const label = !c.track_count ? "No test submitted yet." :
       !same ? "This selection differs from the last test. Run another 3-track test." :
       c.state === "running" ? number(c.pending) + " test job(s) still processing. Check Activity for details." :
