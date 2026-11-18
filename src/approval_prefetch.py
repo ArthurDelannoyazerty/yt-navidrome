@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +44,11 @@ CREATE TABLE IF NOT EXISTS approval_prefetch_jobs (
 );
 CREATE INDEX IF NOT EXISTS approval_prefetch_due
  ON approval_prefetch_jobs(state,retry_at,priority,requested_at);
+CREATE TABLE IF NOT EXISTS approval_prefetch_search_refs (
+ cache_key TEXT NOT NULL, track_id TEXT NOT NULL, PRIMARY KEY(cache_key,track_id)
+);
+CREATE INDEX IF NOT EXISTS approval_prefetch_search_track
+ ON approval_prefetch_search_refs(track_id);
 """
 
 
@@ -80,6 +86,8 @@ class ApprovalPrefetch:
         self.workers_enabled = False
         self.last_seed_at = 0.0
         self.last_seed_count = 0
+        self.pause_until = 0.0
+        self._cleanup_lock = threading.RLock()
 
     def init(self):
         with self.catalogue.db() as con:
@@ -198,6 +206,17 @@ class ApprovalPrefetch:
             self.enqueue_search(entity, title, artist, artist_id, page, priority=1)
         return {**payload, "cache_status": "fresh" if fresh else "stale"}
 
+    def remember_search_owner(self, track_id, entity, title, artist, artist_id=None, page=1):
+        """Associate *manual* Approval searches with a waiting track for cleanup.
+
+        Track ownership/state is checked by the API. Keys alone are public
+        MusicBrainz requests; this table stores no private source metadata.
+        """
+        key = search_key(entity, title, artist, artist_id, page)
+        with self.catalogue.db() as con:
+            con.execute("INSERT OR IGNORE INTO approval_prefetch_search_refs VALUES (?,?)",
+                        (key, track_id))
+
     def remember_search(self, entity, title, artist, artist_id, page, result):
         key = search_key(entity, title, artist, artist_id, page)
         self._store("search", key, result, SEARCH_TTL)
@@ -216,9 +235,16 @@ class ApprovalPrefetch:
                                if isinstance(credit, dict))
         return self.enqueue_names(recordings, artists, priority=priority)
 
-    def _store(self, kind, key, payload, ttl):
+    def _store(self, kind, key, payload, ttl, *, expected_job=False):
         now = time.time()
         with self.catalogue.db() as con:
+            # A cleanup may remove a job while its provider request is still
+            # in flight. Never resurrect deleted entries after the response.
+            if expected_job and not con.execute(
+                "SELECT 1 FROM approval_prefetch_jobs WHERE kind=? AND cache_key=? AND state='RUNNING'",
+                (kind, key),
+            ).fetchone():
+                return False
             con.execute(
                 """INSERT INTO approval_prefetch_cache
                    (kind,cache_key,payload,fetched_at,expires_at)
@@ -229,6 +255,7 @@ class ApprovalPrefetch:
                 (kind, key, _json(payload), now, now + ttl),
             )
             con.execute("DELETE FROM approval_prefetch_jobs WHERE kind=? AND cache_key=?", (kind, key))
+        return True
 
     def _artist(self, con, identity):
         exact, fresh = self._cached(con, "artist", identity)
@@ -407,7 +434,8 @@ class ApprovalPrefetch:
 
     def defer(self, job, exc):
         attempt = int(job["attempts"]) + 1
-        if isinstance(exc, ApiDeferred):
+        provider_wait = isinstance(exc, ApiDeferred)
+        if provider_wait:
             when = max(time.time() + 2, float(exc.retry_at or time.time() + 30))
         else:
             when = time.time() + min(1800, 10 * 2 ** min(attempt, 7))
@@ -417,7 +445,20 @@ class ApprovalPrefetch:
                    retry_at=?,last_error=? WHERE kind=? AND cache_key=?""",
                 (attempt, when, str(exc)[:400], job["kind"], job["cache_key"]),
             )
-        if attempt in {1, 5, 15}:
+        if provider_wait:
+            # A provider cooldown is GLOBAL. Without this pause the worker
+            # would claim thousands of unrelated jobs while MusicBrainz is
+            # throttled, flooding Activity with identical deferrals.
+            previous = self.pause_until
+            self.pause_until = max(previous, when)
+            if previous < time.time() and self.pause_until > time.time() + 3:
+                self.store.event(
+                    "WARNING",
+                    f"Approval MusicBrainz prefetch paused for provider cooldown "
+                    f"({int(self.pause_until - time.time())} s). Queued jobs are retained.",
+                    target="approval-prefetch",
+                )
+        elif attempt in {1, 5, 15}:
             logging.warning(
                 "Approval MusicBrainz prefetch %s deferred (attempt %s): %s",
                 job["kind"], attempt, str(exc)[:180],
@@ -430,21 +471,24 @@ class ApprovalPrefetch:
             value = await asyncio.to_thread(self.searcher.request_recording_names, args["id"])
             if value["id"] != args["id"]:
                 raise ValueError("MusicBrainz returned a different recording identity")
-            self._store(kind, args["id"], value, NAME_TTL)
-            self.enqueue_names(artists=[v["id"] for v in value.get("artist_credits") or []
-                                        if v.get("id")], priority=15)
+            with self._cleanup_lock:
+                if self._store(kind, args["id"], value, NAME_TTL, expected_job=True):
+                    self.enqueue_names(artists=[v["id"] for v in value.get("artist_credits") or []
+                                                if v.get("id")], priority=15)
         elif kind == "artist":
             value = await asyncio.to_thread(self.searcher.request_artist, args["id"])
             if value["id"] != args["id"]:
                 raise ValueError("MusicBrainz returned a different artist identity")
-            self._store(kind, args["id"], value, NAME_TTL)
+            with self._cleanup_lock:
+                self._store(kind, args["id"], value, NAME_TTL, expected_job=True)
         elif kind == "search":
             result = await self.searcher.search(
                 args["entity"], args["title"], args["artist"], args["artist_id"],
                 args["page"], bypass_prefetch=True,
             )
-            self._store(kind, job["cache_key"], result, SEARCH_TTL)
-            self.enqueue_result_names(result, priority=20)
+            with self._cleanup_lock:
+                if self._store(kind, job["cache_key"], result, SEARCH_TTL, expected_job=True):
+                    self.enqueue_result_names(result, priority=20)
         else:
             raise ValueError("Unsupported Approval prefetch operation")
 
@@ -459,6 +503,10 @@ class ApprovalPrefetch:
                     except Exception as exc:
                         logging.warning("Approval prefetch library scan deferred: %s", exc)
                         self.last_seed_at = time.time()
+                remaining_pause = self.pause_until - time.time()
+                if remaining_pause > 0:
+                    await asyncio.sleep(min(10, remaining_pause))
+                    continue
                 job = await asyncio.to_thread(self.claim)
                 if not job:
                     await asyncio.sleep(1.5)
@@ -469,9 +517,10 @@ class ApprovalPrefetch:
                     raise
                 except (ValueError, LookupError) as exc:
                     if any(word in str(exc).lower() for word in ("not found", "was not found")):
-                        self._store(job["kind"], job["cache_key"],
-                                    {"id": job["cache_key"], "unavailable": True},
-                                    NEGATIVE_TTL)
+                        with self._cleanup_lock:
+                            self._store(job["kind"], job["cache_key"],
+                                        {"id": job["cache_key"], "unavailable": True},
+                                        NEGATIVE_TTL, expected_job=True)
                     else:
                         await asyncio.to_thread(self.defer, job, exc)
                 except Exception as exc:
@@ -480,15 +529,264 @@ class ApprovalPrefetch:
         finally:
             self.workers_enabled = False
 
+    @staticmethod
+    def _chunks(values, width=250):
+        values = list(values)
+        for start in range(0, len(values), width):
+            yield values[start:start + width]
+
+    def _retained_keys(self, owner_con, cache_con):
+        """Protect ALL users' local approved music and pending approval matches.
+
+        Do not infer an approved identity from a video, a text search or a
+        similarity score. Only a stored track MBID, an explicit Beets candidate,
+        or a cached search owned by a *still-pending* approval is retained.
+        """
+        retain = {"recording": set(), "artist": set(), "search": set()}
+        waiting = set()
+        rows = owner_con.execute(
+            """SELECT t.id,t.user_id,t.mbid,t.health,t.operation_state,t.choices,
+                      t.pending_operation,
+                      o.id AS origin_id,o.title AS origin_title,o.channel AS origin_channel
+               FROM tracks AS t LEFT JOIN track_origins AS o
+               ON o.id=COALESCE(
+                  CASE WHEN json_valid(t.pending_operation)
+                       THEN json_extract(t.pending_operation,'$.origin_id') END,
+                  t.current_origin_id)
+               WHERE t.mbid IS NOT NULL OR t.operation_state='NEEDS_APPROVAL'"""
+        ).fetchall()
+        for row in rows:
+            if rid := valid_id(row["mbid"]):
+                retain["recording"].add(rid)
+            if row["operation_state"] != "NEEDS_APPROVAL":
+                continue
+            waiting.add(row["id"])
+            try:
+                items = json.loads(row["choices"] or "[]")
+                if not isinstance(items, list):
+                    items = []
+            except (ValueError, TypeError):
+                items = []
+            for choice in items:
+                if isinstance(choice, dict) and (rid := valid_id(choice.get("mbid"))):
+                    retain["recording"].add(rid)
+            if not row["origin_id"]:
+                continue
+            origin = {"id": row["origin_id"], "user_id": row["user_id"],
+                      "title": row["origin_title"], "channel": row["origin_channel"]}
+            try:
+                source = source_snapshot(owner_con, origin)
+                hint = search_hints(source, origin)
+                if hint["artist"]:
+                    alias = owner_con.execute(
+                        "SELECT * FROM metadata_artist_aliases WHERE user_id=? AND alias_key=?",
+                        (row["user_id"], alias_key(hint["artist"])),
+                    ).fetchone()
+                    if alias:
+                        hint = search_hints(source, origin, dict(alias))
+                query_for("recording", hint["title"], hint["artist"], hint["artist_id"])
+                retain["search"].add(search_key(
+                    "recording", hint["title"], hint["artist"], hint["artist_id"], 1))
+            except (ValueError, TypeError, KeyError):
+                continue
+
+        # Confirmed aliases are user choices and must never be discarded as
+        # unrelated prefetch clutter (even if the original recording is gone).
+        for row in owner_con.execute("SELECT DISTINCT artist_id FROM metadata_artist_aliases"):
+            if aid := valid_id(row["artist_id"]):
+                retain["artist"].add(aid)
+
+        # User-initiated searches may not match the default title/artist hint.
+        # Keep those search pages while the associated track still awaits review.
+        for row in cache_con.execute("SELECT cache_key,track_id FROM approval_prefetch_search_refs"):
+            if row["track_id"] in waiting:
+                retain["search"].add(row["cache_key"])
+
+        # All results of a pending Approval search are still relevant. Preserve
+        # their exact recording and credited-artist metadata, not just the
+        # first/highest-ranked suggestion.
+        for keys in self._chunks(retain["search"]):
+            markers = ",".join("?" for _ in keys)
+            for row in cache_con.execute(
+                "SELECT payload FROM approval_prefetch_cache WHERE kind='search' "
+                f"AND cache_key IN ({markers})", keys
+            ):
+                try:
+                    result = json.loads(row["payload"])
+                except (TypeError, ValueError):
+                    continue
+                for item in result.get("items") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    kind = result.get("entity")
+                    if kind == "recording" and (rid := valid_id(item.get("id"))):
+                        retain["recording"].add(rid)
+                    elif kind == "artist" and (aid := valid_id(item.get("id"))):
+                        retain["artist"].add(aid)
+                    for artist in item.get("artists") or []:
+                        if isinstance(artist, dict) and (aid := valid_id(artist.get("id"))):
+                            retain["artist"].add(aid)
+
+        # Artist links are shared by many recordings. Gather the artist credits
+        # from both exact name lookups and Catalogue's persistent graph.
+        for ids in self._chunks(retain["recording"]):
+            markers = ",".join("?" for _ in ids)
+            for table, kind in (("approval_prefetch_cache", "recording"),
+                                ("entities", "recording")):
+                for row in cache_con.execute(
+                    f"SELECT payload AS data FROM {table} WHERE kind=? AND cache_key IN ({markers})"
+                    if table == "approval_prefetch_cache" else
+                    f"SELECT data FROM entities WHERE kind=? AND id IN ({markers})",
+                    (kind, *ids),
+                ):
+                    try:
+                        data = json.loads(row["data"])
+                    except (ValueError, TypeError):
+                        continue
+                    for credit in (data.get("artist_credits") or data.get("artist-credit") or []):
+                        if not isinstance(credit, dict):
+                            continue
+                        artist = credit.get("artist") or credit
+                        if isinstance(artist, dict) and (aid := valid_id(artist.get("id"))):
+                            retain["artist"].add(aid)
+            for row in cache_con.execute(
+                "SELECT source_id FROM links WHERE source_kind='artist' "
+                f"AND target_kind='recording' AND target_id IN ({markers})", ids
+            ):
+                if aid := valid_id(row["source_id"]):
+                    retain["artist"].add(aid)
+        return retain, waiting
+
+    @staticmethod
+    def _cleanup_plan(cache_con, retain, waiting):
+        cached = cache_con.execute(
+            "SELECT kind,cache_key,length(CAST(payload AS BLOB)) AS bytes "
+            "FROM approval_prefetch_cache"
+        ).fetchall()
+        queued = cache_con.execute(
+            "SELECT kind,cache_key FROM approval_prefetch_jobs"
+        ).fetchall()
+        remove_cache = [(row["kind"], row["cache_key"]) for row in cached
+                        if row["cache_key"] not in retain.get(row["kind"], set())]
+        remove_jobs = [(row["kind"], row["cache_key"]) for row in queued
+                       if row["cache_key"] not in retain.get(row["kind"], set())]
+        removed_set = set(remove_cache)
+        reclaim = sum(row["bytes"] or 0 for row in cached
+                      if (row["kind"], row["cache_key"]) in removed_set)
+        stale_refs = [(row["cache_key"], row["track_id"]) for row in cache_con.execute(
+            "SELECT cache_key,track_id FROM approval_prefetch_search_refs"
+        ) if row["track_id"] not in waiting]
+        return {
+            "remove_cache": remove_cache, "remove_jobs": remove_jobs,
+            "remove_refs": stale_refs,
+            "remove_entries": len(remove_cache),
+            "remove_queued": len(remove_jobs),
+            "reclaim_bytes": reclaim,
+            "keep_entries": len(cached) - len(remove_cache),
+            "keep_queued": len(queued) - len(remove_jobs),
+            "protected_recordings": len(retain["recording"]),
+            "protected_artists": len(retain["artist"]),
+            "protected_searches": len(retain["search"]),
+            "pending_tracks": len(waiting),
+            "scope": "approval_prefetch_only",
+        }
+
+    @staticmethod
+    def _public_cleanup(plan):
+        return {key: value for key, value in plan.items()
+                if key not in {"remove_cache", "remove_jobs", "remove_refs"}}
+
+    def cleanup_preview(self):
+        with self.store.db() as owner_con:
+            with self.catalogue.db() as cache_con:
+                retain, waiting = self._retained_keys(owner_con, cache_con)
+                return self._public_cleanup(self._cleanup_plan(cache_con, retain, waiting))
+
+    def cleanup_unused(self):
+        """Remove obsolete Approval cache/jobs atomically; NEVER alter Catalogue.
+
+        Holding the owners DB write lock while planning prevents a recording
+        becoming approved between retention analysis and the cache deletion.
+        """
+        with self._cleanup_lock:
+            with self.store.db() as owner_con:
+                owner_con.execute("BEGIN IMMEDIATE")
+                with self.catalogue.db() as cache_con:
+                    cache_con.execute("BEGIN IMMEDIATE")
+                    retain, waiting = self._retained_keys(owner_con, cache_con)
+                    plan = self._cleanup_plan(cache_con, retain, waiting)
+                    cache_con.executemany(
+                        "DELETE FROM approval_prefetch_cache WHERE kind=? AND cache_key=?",
+                        plan["remove_cache"])
+                    cache_con.executemany(
+                        "DELETE FROM approval_prefetch_jobs WHERE kind=? AND cache_key=?",
+                        plan["remove_jobs"])
+                    cache_con.executemany(
+                        "DELETE FROM approval_prefetch_search_refs WHERE cache_key=? AND track_id=?",
+                        plan["remove_refs"])
+        # The on-disk Catalogue database is shared with Graph, Language and
+        # other features. Do not VACUUM it during ingestion or drop its entities.
+        summary = self._public_cleanup(plan)
+        self.store.event(
+            "INFO", "Approval cache cleanup: "
+            f"{summary['remove_entries']} cached records and "
+            f"{summary['remove_queued']} obsolete jobs removed; "
+            f"{summary['keep_entries']} entries and "
+            f"{summary['keep_queued']} jobs retained for local or pending music. "
+            "Catalogue graph and music files untouched.",
+            target="approval-prefetch",
+        )
+        return summary
+
     def status(self):
+        """Durable counts. The denominator grows when new search matches appear."""
+        now = time.time()
+        with self.store.db() as con:
+            waiting_tracks = con.execute(
+                "SELECT COUNT(*) FROM tracks WHERE operation_state='NEEDS_APPROVAL'"
+            ).fetchone()[0]
         with self.catalogue.db() as con:
             counts = {row["state"]: row["n"] for row in con.execute(
                 "SELECT state,COUNT(*) AS n FROM approval_prefetch_jobs GROUP BY state"
             )}
-            ready = con.execute(
-                "SELECT COUNT(*) FROM approval_prefetch_cache WHERE expires_at>?",
-                (time.time(),),
+            kinds = {row["kind"]: row["n"] for row in con.execute(
+                "SELECT kind,COUNT(*) AS n FROM approval_prefetch_cache GROUP BY kind"
+            )}
+            cache_stats = con.execute(
+                """SELECT COUNT(*) AS n,
+                          COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes,
+                          SUM(CASE WHEN expires_at>? THEN 1 ELSE 0 END) AS fresh
+                   FROM approval_prefetch_cache""", (now,)
+            ).fetchone()
+            completed = con.execute(
+                """SELECT COUNT(*) FROM approval_prefetch_cache AS c
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM approval_prefetch_jobs AS j
+                     WHERE j.kind=c.kind AND j.cache_key=c.cache_key)"""
             ).fetchone()[0]
-        return {"waiting_tracks": self.last_seed_count, "cached": ready,
-                "queued": counts.get("PENDING", 0) + counts.get("RUNNING", 0),
-                "background": self.workers_enabled}
+            delayed = con.execute(
+                "SELECT COUNT(*) FROM approval_prefetch_jobs WHERE state='PENDING' AND retry_at>?",
+                (now,)
+            ).fetchone()[0]
+            queued = counts.get("PENDING", 0) + counts.get("RUNNING", 0)
+            due = queued - delayed - counts.get("RUNNING", 0)
+            by_kind = {row["kind"]: row["n"] for row in con.execute(
+                "SELECT kind,COUNT(*) AS n FROM approval_prefetch_jobs GROUP BY kind"
+            )}
+            total = completed + queued
+            page_count = con.execute("PRAGMA page_count").fetchone()[0]
+            page_size = con.execute("PRAGMA page_size").fetchone()[0]
+        return {
+            "waiting_tracks": waiting_tracks,
+            "cached": cache_stats["fresh"] or 0,
+            "cache_entries": cache_stats["n"], "cache_by_kind": kinds,
+            "cache_bytes": cache_stats["bytes"],
+            "catalogue_db_bytes": page_count * page_size,
+            "completed": completed, "total": total,
+            "queued": queued, "queued_by_kind": by_kind,
+            "due": max(0, due), "deferred": delayed,
+            "running": counts.get("RUNNING", 0),
+            "cooldown_seconds": max(0, int(self.pause_until - now + 0.999)),
+            "background": self.workers_enabled,
+            "note": "Total counts distinct cached/queued tasks and grows as searches discover recordings.",
+        }

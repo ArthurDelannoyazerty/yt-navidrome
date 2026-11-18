@@ -535,3 +535,24 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 }
 .language-change-actions .language-reverse-button:hover,
 .language-change-actions .language-reverse-button:focus-visible { background: #f6d9d6; }
+
+
+/* Approval background cache: always visible, even when the approval list is empty. */
+.approval-cache-panel { padding: 13px 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin: 12px 0 16px; }
+.approval-cache-heading { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.approval-cache-heading h3 { font-size: 14px; margin: 0 0 3px; }
+.approval-cache-heading .hint { margin: 0 0 7px; }
+.approval-cache-heading button { font-size: 12px; padding: 6px 10px; }
+.approval-cache-metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin: 8px 0; }
+.approval-cache-metrics > div { min-width: 0; display: grid; gap: 0; }
+.approval-cache-metrics strong { font-size: 16px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.approval-cache-metrics small { font-size: 11px; color: var(--muted); }
+#approvalCacheProgress { display: block; width: 100%; height: 7px; margin: 6px 0; accent-color: var(--accent); }
+#approvalCacheDetail, #approvalCacheNotice { font-size: 11px; margin: 6px 0 0; overflow-wrap: anywhere; }
+.approval-cache-confirm { background: var(--sub); border: 1px solid var(--border); border-radius: 7px; padding: 11px; margin-top: 10px; }
+.approval-cache-confirm p { font-size: 12px; margin: 0 0 9px; }
+.approval-cache-confirm button { font-size: 12px; padding: 6px 10px; }
+@media (max-width: 720px) {
+  .approval-cache-panel { padding: 12px; }
+  .approval-cache-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+}
