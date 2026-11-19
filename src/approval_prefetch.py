@@ -419,6 +419,10 @@ class ApprovalPrefetch:
             raise ValueError("Too many MusicBrainz IDs in a single batch")
         result_r, result_a, pending_r, pending_a = {}, {}, [], []
         missing_r, missing_a = [], list(aids)
+        # Schedule first so the same read sees a pending release lookup and
+        # keeps polling until the possible pseudo-release English title arrives.
+        if self.workers_enabled:
+            self.enqueue_releases(rids, priority=8)
         with self.catalogue.db() as con:
             for identity in rids:
                 label, complete, credited = self._recording(con, identity)
@@ -438,7 +442,6 @@ class ApprovalPrefetch:
                     pending_a.append(identity)
         if self.workers_enabled:
             self.enqueue_names(missing_r, missing_a, priority=0)
-            self.enqueue_releases(rids, priority=8)
         return {"recordings": result_r, "artists": result_a,
                 "pending_recordings": pending_r, "pending_artists": pending_a,
                 "cached": len(result_r) + len(result_a),
@@ -637,8 +640,7 @@ class ApprovalPrefetch:
                             continue
                         with self.catalogue.db() as con:
                             previous, _ = self._cached(con, "pseudo_title", identity)
-                        if not self._valid_pseudo_title(candidate["title"],
-                                                         previous.get("title") if previous else None):
+                        if not self._valid_pseudo_title(candidate["title"], None):
                             continue
                         # Prefer verified English pseudo-releases over ones
                         # with unspecified tracklist language. Stable tie-break.
