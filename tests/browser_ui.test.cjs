@@ -165,6 +165,16 @@ async function fixtureServer(t, data) {
             deferred:77,due:1705,running:0,cache_bytes:1048576-81920,
             catalogue_db_bytes:8388608,cooldown_seconds:0};
         }
+        if (url.pathname === "/api/musicbrainz/approval-prefetch-retry") {
+          data.failedJobs = (data.failedJobs || []).filter(item => item.job_id !== payload.job_id);
+          if (data.prefetchStatus) {
+            data.prefetchStatus.failed = data.failedJobs.length;
+            data.prefetchStatus.queued += 1;
+            data.prefetchStatus.due += 1;
+            data.prefetchStatus.tail_queued = (data.prefetchStatus.tail_queued || 0) + 1;
+          }
+          result = {requeued: true, attempts_remaining: 3};
+        }
         const parts = url.pathname.split("/");
         const current = data.tracks.find(track => track.id === parts[3]);
         if (url.pathname === "/api/catalogue/language-name-change") {
@@ -276,6 +286,12 @@ async function fixtureServer(t, data) {
         } else {
           result = data.releaseResults?.[rid] || {recording_id:rid,releases:[],page:1,total:0};
         }
+      }
+      else if (url.pathname === "/api/musicbrainz/approval-prefetch-failures") {
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const limit = Number(url.searchParams.get("limit") || 50);
+        const jobs = data.failedJobs || [];
+        result = {total: jobs.length, offset, limit, items: jobs.slice(offset, offset + limit)};
       }
       else if (url.pathname === "/api/musicbrainz/approval-prefetch-clean-preview")
         result = data.cleanPreview || {
@@ -1185,6 +1201,45 @@ test("real browser: Graph canvas loads with strict CSP, switches layers and supp
   assert.equal(await chrome.evaluate("document.querySelector('#graphRepelForce').value"),"11");
   assert.equal(await chrome.evaluate("document.querySelector('#graphLayout').value"),"layers");
   assert.equal(await chrome.evaluate("document.querySelector('#graphNodeSelect').value"),"artist:b");
+  assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+test("real browser: failed MusicBrainz prefetch dropdown retries one request without duplicates", {timeout:60000}, async t => {
+  const chrome = await browser(t); if (!chrome) return;
+  const data = fixtures();data.strictCsp = true;
+  data.prefetchStatus = {background:true,waiting_tracks:2,cached:10,cache_entries:10,
+    completed:10,queued:4,total:16,deferred:1,due:3,running:0,failed:2,tail_queued:1,
+    cache_bytes:9000,catalogue_db_bytes:55000,cooldown_seconds:0};
+  data.failedJobs = [
+    {job_id:"a".repeat(32),kind:"releases",label:"Releases · 11111111-1111-4111-8111-111111111111",
+     attempts:6,last_error:"MusicBrainz releases returned HTTP 404"},
+    {job_id:"b".repeat(32),kind:"search",label:"Search request #abcdef1234",
+     attempts:6,last_error:"MusicBrainz search returned HTTP 503"}
+  ];
+  const origin = await fixtureServer(t,data);
+  await chrome.send("Page.addScriptToEvaluateOnNewDocument",{source:
+    "window.styleViolations=[];document.addEventListener('securitypolicyviolation',event=>{if(event.effectiveDirective.startsWith('style-src'))window.styleViolations.push(event.violatedDirective);});"});
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1");
+  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
+  await chrome.until("document.querySelector('#approvalFailedCount').textContent==='2'");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalFailedSection').open"),false);
+  await chrome.evaluate("document.querySelector('#approvalFailedSection > summary').click()");
+  await chrome.until("document.querySelectorAll('#approvalFailedList .approval-failed-row').length===2");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('#approvalFailedList button').length"),2);
+  assert.match(await chrome.evaluate("document.querySelector('#approvalFailedList').textContent"),/HTTP 404/);
+  assert.match(await chrome.evaluate("document.querySelector('#approvalCacheDetail').textContent"),/1 at the queue tail, 2 disabled/);
+  await chrome.evaluate("document.querySelector('#approvalFailedList button').click()");
+  await chrome.until("document.querySelectorAll('#approvalFailedList .approval-failed-row').length===1 && document.querySelector('#approvalFailedCount').textContent==='1'");
+  assert.equal(data.writes.filter(row=>row.path==="/api/musicbrainz/approval-prefetch-retry").length,1);
+  const attempt=data.writes.find(row=>row.path==="/api/musicbrainz/approval-prefetch-retry");
+  assert.deepEqual(attempt.body,{user_id:"admin",job_id:"a".repeat(32)});
+  assert.match(await chrome.evaluate("document.querySelector('#approvalFailedNotice').textContent"),/requeued at low priority/);
+  await chrome.screenshot("catalogue-disabled-prefetch-jobs");
   assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
   assert.deepEqual(chrome.errors,[]);
 });
