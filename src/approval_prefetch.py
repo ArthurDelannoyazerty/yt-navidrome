@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from datetime import UTC, datetime
@@ -180,6 +181,37 @@ class ApprovalPrefetch:
                     jobs.append(self._job(kind, identity, {"id": identity}, priority))
         return self._enqueue_rows(jobs)
 
+    def enqueue_releases(self, recordings=(), *, page=1, priority=12):
+        if type(page) is not int or not 1 <= page <= 20:
+            raise ValueError("Release page must be between 1 and 20")
+        jobs = []
+        for identity in dict.fromkeys(filter(None, (valid_id(v) for v in recordings))):
+            jobs.append(self._job("releases", f"{identity}:{page}",
+                                  {"id": identity, "page": page}, priority))
+        return self._enqueue_rows(jobs)
+
+    def cached_releases(self, recording_id, page=1):
+        identity = valid_id(recording_id)
+        if identity is None or type(page) is not int or not 1 <= page <= 20:
+            raise ValueError("Invalid MusicBrainz recording or release page")
+        key = f"{identity}:{page}"
+        with self.catalogue.db() as con:
+            value, fresh = self._cached(con, "releases", key)
+        if value is None:
+            return None
+        if not fresh and self.workers_enabled:
+            self.enqueue_releases([identity], page=page, priority=1)
+        return {**value, "cache_status": "fresh" if fresh else "stale"}
+
+    def enqueue_pseudo_releases(self, releases, *, priority=15):
+        jobs = []
+        for release in releases:
+            if (str(release.get("status") or "").casefold() == "pseudo-release"
+                    and (identity := valid_id(release.get("id")))):
+                jobs.append(self._job("pseudo_release", identity,
+                                      {"id": identity}, priority))
+        return self._enqueue_rows(jobs)
+
     def enqueue_search(self, entity, title, artist, artist_id=None, page=1, *, priority=0):
         # Always enforce the same search validation and no broader Lucene input
         # than the normal interactive endpoint.
@@ -233,7 +265,8 @@ class ApprovalPrefetch:
                 recordings.append(item.get("id"))
                 artists.extend(credit.get("id") for credit in item.get("artists") or []
                                if isinstance(credit, dict))
-        return self.enqueue_names(recordings, artists, priority=priority)
+        names = self.enqueue_names(recordings, artists, priority=priority)
+        return names + self.enqueue_releases(recordings, priority=priority + 12)
 
     def _store(self, kind, key, payload, ttl, *, expected_job=False):
         now = time.time()
@@ -326,16 +359,17 @@ class ApprovalPrefetch:
                     pending_a.append(identity)
         if self.workers_enabled:
             self.enqueue_names(missing_r, missing_a, priority=0)
+            self.enqueue_releases(rids, priority=8)
         return {"recordings": result_r, "artists": result_a,
                 "pending_recordings": pending_r, "pending_artists": pending_a,
                 "cached": len(result_r) + len(result_a),
                 "remaining": len(pending_r) + len(pending_a)}
 
     def schedule_context(self, context, *, priority=0):
-        self.enqueue_names(
-            [item.get("mbid") for item in context.get("choices") or [] if isinstance(item, dict)],
-            priority=priority,
-        )
+        identities = [item.get("mbid") for item in context.get("choices") or []
+                      if isinstance(item, dict)]
+        self.enqueue_names(identities, priority=priority)
+        self.enqueue_releases(identities, priority=priority + 6)
         hints = context.get("search_hints") or {}
         try:
             return self.enqueue_search("recording", hints.get("title") or "",
@@ -377,6 +411,8 @@ class ApprovalPrefetch:
                 for item in choices:
                     if isinstance(item, dict) and (mid := valid_id(item.get("mbid"))):
                         seeds.append(self._job("recording", mid, {"id": mid}, 20))
+                        seeds.append(self._job("releases", f"{mid}:1",
+                                               {"id": mid, "page": 1}, 32))
                 if not row["origin_id"]:
                     continue
                 origin = {"id": row["origin_id"], "title": row["origin_title"],
