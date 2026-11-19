@@ -30,8 +30,18 @@ Independently toggle **Recordings**, **Artists**, **Releases**, **Album families
 **Works**; all unchecked means an empty visualization. Artist-only and
 release-only views can still reach their nodes through hidden recording nodes.
 Filter by a name, or focus on one MusicBrainz MBID to expand nearby relationships.
-Results are bounded to protect the browser, and public catalogue nodes do not
-imply ownership. Downloaded views cannot reveal another library user's music.
+Results are bounded (180, 400 or 800 nodes) to protect the browser, and public
+catalogue nodes do not imply ownership. Downloaded views cannot reveal another
+library user's music.
+
+The Graph tab uses a locally vendored 2D Canvas renderer (force-graph 1.51.4,
+MIT). **Free physics** is an unconstrained spring layout; **Soft layers** pull
+nodes toward breadth-first graph distances within each connected component,
+not fixed entity-type columns. Both modes support wheel/pinch zoom, dragging,
+panning, fit-to-view, focus selection, and progressive labels. The simulation
+cools automatically, and pauses while the tab is hidden. The node selector
+provides keyboard-accessible navigation and still opens the existing Catalogue
+and neighborhood-expansion actions.
 
 ## Album organization
 

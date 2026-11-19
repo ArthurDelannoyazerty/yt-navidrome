@@ -26,7 +26,7 @@ from musicbrainz_search import API_ROOT, USER_AGENT, terms, valid_id
 ENTITY_KINDS = frozenset({"artist", "work", "recording", "release", "release-group"})
 BROWSE = frozenset({"release-group", "recording", "work", "release"})
 TTL_DAYS = {"artist": 90, "work": 90, "recording": 90, "release": 90, "release-group": 30}
-MAX_GRAPH_NODES = 180
+MAX_GRAPH_NODES = 800
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entities (
@@ -695,7 +695,9 @@ class Catalogue:
             nodes = [{"id": f"{kind}:{identity}", "kind": kind,
                       "label": names.get((kind, identity)) or owned.get(identity, {}).get("matched_title") or identity,
                       "owned": kind == "recording" and identity in owned} for kind, identity in sorted(seen)]
-            graph_edges = [{"source": f"{a}:{ai}", "target": f"{b}:{bi}", "relation": relation}
-                           for a, ai, b, bi, relation in edges if (a, ai) in seen and (b, bi) in seen][:700]
-            return {"nodes": nodes, "edges": graph_edges, "truncated": bool(frontier),
+            visible_edges = [{"source": f"{a}:{ai}", "target": f"{b}:{bi}", "relation": relation}
+                             for a, ai, b, bi, relation in edges if (a, ai) in seen and (b, bi) in seen]
+            edge_limit = min(4000, max(700, limit * 4))
+            graph_edges = visible_edges[:edge_limit]
+            return {"nodes": nodes, "edges": graph_edges, "truncated": bool(frontier) or len(visible_edges) > edge_limit,
                     "owned_recording_count": len(owned), "limit": limit}

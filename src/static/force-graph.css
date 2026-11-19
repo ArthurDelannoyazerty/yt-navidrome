@@ -1,0 +1,37 @@
+/* Externalized CSS from force-graph 1.51.4. Kept separate for strict style-src 'self' CSP. */
+
+.force-graph-container canvas {
+  display: block;
+  user-select: none;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.force-graph-container .clickable {
+  cursor: pointer;
+}
+
+.force-graph-container .grabbable {
+  cursor: move;
+  cursor: grab;
+  cursor: -moz-grab;
+  cursor: -webkit-grab;
+}
+
+.force-graph-container .grabbable:active {
+  cursor: grabbing;
+  cursor: -moz-grabbing;
+  cursor: -webkit-grabbing;
+}
+
+.float-tooltip-kap {
+  position: absolute;
+  width: max-content; /* prevent shrinking near right edge */
+  max-width: max(50%, 150px);
+  padding: 3px 5px;
+  border-radius: 3px;
+  font: 12px sans-serif;
+  color: #eee;
+  background: rgba(0,0,0,0.6);
+  pointer-events: none;
+}
