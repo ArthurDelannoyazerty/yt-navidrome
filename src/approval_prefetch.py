@@ -301,6 +301,72 @@ class ApprovalPrefetch:
         return {"id": identity, "name": native,
                 "preferred_name": english if english != native else None}, fresh or full_catalogue
 
+    @staticmethod
+    def _valid_pseudo_title(title, canonical):
+        """Do not mistake romanization or an unchanged track name for an English alias."""
+        title = str(title or "").strip()[:1000]
+        return (bool(re.search(r"[A-Za-z]", title))
+                and not bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", title))
+                and title.casefold() != str(canonical or "").casefold())
+
+    def _pseudo_title(self, con, identity, canonical):
+        value, _ = self._cached(con, "pseudo_title", identity)
+        if (value and self._valid_pseudo_title(value.get("title"), canonical)
+                and valid_id(value.get("release_id"))):
+            return value
+        # Reuse exact recording/track/release relationships already indexed by
+        # Catalogue before doing any new remote lookups.
+        rows = con.execute(
+            """SELECT t.title,t.release_id,r.data FROM release_tracks AS t
+               JOIN entities AS r ON r.kind='release' AND r.id=t.release_id
+               WHERE t.recording_id=? ORDER BY t.release_id LIMIT 100""",
+            (identity,),
+        ).fetchall()
+        for row in rows:
+            try:
+                release = json.loads(row["data"])
+                if str(release.get("status") or "").casefold() != "pseudo-release":
+                    continue
+                if not self._valid_pseudo_title(row["title"], canonical):
+                    continue
+                lang = str((release.get("text-representation") or {}).get("language") or "").lower()
+                return {"title": row["title"], "release_id": row["release_id"],
+                        "language": lang, "source": "pseudo_release"}
+            except (ValueError, TypeError):
+                continue
+        return None
+
+    def _pending_pseudo(self, con, identity):
+        """Keep the UI polling while a verified alternative track title is loading."""
+        page = con.execute(
+            "SELECT 1 FROM approval_prefetch_jobs WHERE kind='releases' AND cache_key LIKE ? LIMIT 1",
+            (identity + ":%",),
+        ).fetchone()
+        if page:
+            return True
+        pages = con.execute(
+            "SELECT payload FROM approval_prefetch_cache "
+            "WHERE kind='releases' AND cache_key LIKE ?", (identity + ":%",)
+        )
+        for item in pages:
+            try:
+                releases = json.loads(item["payload"]).get("releases") or []
+            except (TypeError, ValueError):
+                continue
+            pseudo = [valid_id(r.get("id")) for r in releases
+                      if str(r.get("status") or "").casefold() == "pseudo-release"]
+            if not pseudo:
+                continue
+            keys = [rid for rid in pseudo if rid]
+            for batch in self._chunks(keys):
+                marks = ",".join("?" for _ in batch)
+                if con.execute(
+                    "SELECT 1 FROM approval_prefetch_jobs "
+                    f"WHERE kind='pseudo_release' AND cache_key IN ({marks}) LIMIT 1", batch
+                ).fetchone():
+                    return True
+        return False
+
     def _recording(self, con, identity):
         exact, fresh = self._cached(con, "recording", identity)
         full_catalogue = self._catalogue_complete(con, "recording", identity)
@@ -314,6 +380,15 @@ class ApprovalPrefetch:
             # spinner or requeue an ID MusicBrainz explicitly cannot resolve.
             return None, fresh if unavailable else full_catalogue, []
         item = dict(item)
+        native = item.get("title") or ""
+        has_alias = bool(item.get("preferred_title"))
+        if not has_alias and (pseudo := self._pseudo_title(con, identity, native)):
+            item["preferred_title"] = pseudo["title"]
+            item["preferred_title_source"] = "pseudo_release"
+            item["preferred_title_release_id"] = pseudo["release_id"]
+            item["preferred_title_language"] = pseudo.get("language") or ""
+        elif has_alias:
+            item["preferred_title_source"] = "recording_alias"
         credits = item.get("artist_credits") or []
         english = []
         has_alias = False
@@ -328,8 +403,12 @@ class ApprovalPrefetch:
             english.append((alias or piece.get("name") or "") + str(piece.get("joinphrase") or ""))
         item["preferred_artist"] = "".join(english)[:1000] if has_alias else None
         item.pop("artist_credits", None)  # Internal wiring, not additional public metadata.
+        title_wait = (not item.get("preferred_title") and
+                      bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", native)) and
+                      self._pending_pseudo(con, identity))
         return (item,
-                ((fresh or full_catalogue) and not need_artists) or (unavailable and fresh),
+                (((fresh or full_catalogue) and not need_artists and not title_wait)
+                 or (unavailable and fresh)),
                 need_artists)
 
     def names_batch(self, recordings=(), artists=()):
