@@ -88,14 +88,15 @@ def test_library_seed_queues_every_beets_candidate_and_one_exact_search(db, trac
         prefetch = app.state.approval_prefetch
         result = prefetch.seed_pending_approvals()
         assert result["tracks"] == 1
-        assert result["new_jobs"] == 3
+        assert result["new_jobs"] == 5
         jobs = app.state.catalogue
         with jobs.db() as con:
             pending = [dict(row) for row in con.execute(
                 "SELECT kind,cache_key,state FROM approval_prefetch_jobs ORDER BY requested_at"
             )]
-        assert [job["kind"] for job in pending] == ["recording", "recording", "search"]
-        assert {item["cache_key"] for item in pending[:2]} == {RECORDING, OTHER}
+        assert [job["kind"] for job in pending] == ["recording", "releases", "recording", "releases", "search"]
+        assert {item["cache_key"] for item in pending if item["kind"] == "recording"} == {RECORDING, OTHER}
+        assert {item["cache_key"] for item in pending if item["kind"] == "releases"} == {RECORDING + ":1", OTHER + ":1"}
         assert prefetch.seed_pending_approvals()["new_jobs"] == 0
         claimed = prefetch.claim()
         assert claimed["state"] == "PENDING"
