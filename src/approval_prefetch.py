@@ -590,6 +590,43 @@ class ApprovalPrefetch:
                 if self._store(kind, args["id"], value, NAME_TTL, expected_job=True):
                     self.enqueue_names(artists=[v["id"] for v in value.get("artist_credits") or []
                                                 if v.get("id")], priority=15)
+        elif kind == "releases":
+            value = await asyncio.to_thread(
+                self.searcher.request_releases, args["id"], args["page"])
+            if value["recording_id"] != args["id"] or value["page"] != args["page"]:
+                raise ValueError("MusicBrainz returned an unrelated release list")
+            with self._cleanup_lock:
+                if self._store(kind, job["cache_key"], value, NAME_TTL, expected_job=True):
+                    self.enqueue_pseudo_releases(value["releases"], priority=14)
+                    if args["page"] < 20 and args["page"] * 100 < value["total"]:
+                        self.enqueue_releases([args["id"]], page=args["page"] + 1, priority=28)
+        elif kind == "pseudo_release":
+            value = await asyncio.to_thread(
+                self.searcher.request_pseudo_release_titles, args["id"])
+            if value.get("id") != args["id"]:
+                raise ValueError("MusicBrainz returned an unrelated pseudo-release")
+            with self._cleanup_lock:
+                if self._store(kind, job["cache_key"], value, NAME_TTL, expected_job=True):
+                    for title in value.get("titles") or []:
+                        identity = valid_id(title.get("recording_id"))
+                        candidate = {"title": title.get("title"),
+                                     "release_id": args["id"],
+                                     "language": title.get("language") or "",
+                                     "source": "pseudo_release"}
+                        if not identity:
+                            continue
+                        with self.catalogue.db() as con:
+                            previous, _ = self._cached(con, "pseudo_title", identity)
+                        if not self._valid_pseudo_title(candidate["title"],
+                                                         previous.get("title") if previous else None):
+                            continue
+                        # Prefer verified English pseudo-releases over ones
+                        # with unspecified tracklist language. Stable tie-break.
+                        rank = lambda d: (d.get("language") in {"eng", "en"},
+                                          str(d.get("release_id") or ""))
+                        if previous and rank(previous) >= rank(candidate):
+                            continue
+                        self._store("pseudo_title", identity, candidate, NAME_TTL)
         elif kind == "artist":
             value = await asyncio.to_thread(self.searcher.request_artist, args["id"])
             if value["id"] != args["id"]:
