@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from fastapi import Query
 
 from album_management import AlbumManager
-from catalogue import Catalogue, ENTITY_KINDS
+from catalogue import Catalogue, ENTITY_KINDS, MAX_GRAPH_NODES
 from language_jobs import (preview as language_preview, queue as queue_languages,
                            preview_progress, queue_progress, canary_status, verify_canary,
                            review_state, batch_status, name_changes,
@@ -212,7 +212,7 @@ def install_catalogue_routes(app, store, pipeline):
     @app.get("/api/catalogue/graph")
     def graph(user_id: str, view: str = "downloaded", kinds: str = "artist,recording,release,release-group,work",
               q: str = Query("", max_length=100), focus_id: str | None = None,
-              limit: int = Query(180, ge=1, le=800)):
+              limit: int = Query(180, ge=1, le=MAX_GRAPH_NODES)):
         requested = kinds.split(",") if kinds else []
         if any(kind not in ENTITY_KINDS for kind in requested):
             raise ValueError("Invalid graph node type")

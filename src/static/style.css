@@ -348,6 +348,23 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 .graph-filters { border: 1px solid var(--border, #334155); border-radius: .65rem; padding: .75rem 1rem; align-items: center; }
 .graph-filters legend { padding: 0 .4rem; font-weight: 600; }
 .graph-filters label { display: inline-flex; align-items: center; gap: .3rem; }
+.graph-controls #graphLimit { width: 125px; max-width: 100%; }
+.graph-controls small { display: block; font-size: .75rem; max-width: 240px; }
+.graph-legend { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; margin: -.2rem 0 1rem; font-size: .87rem; }
+.graph-legend-item { display: inline-flex; align-items: center; gap: .4rem; }
+.graph-dot { width: 12px; height: 12px; flex: none; border-radius: 50%; background: #a6b3c6; border: 1px solid #e2e8f0; }
+.graph-dot-artist { background: #8b5cf6; }
+.graph-dot-recording { background: #10b981; }
+.graph-dot-release { background: #f59e0b; }
+.graph-dot-release-group { background: #ef4444; }
+.graph-dot-work { background: #38bdf8; }
+.graph-dot-owned { background: #10b981; border: 3px solid #f9d66e; }
+.graph-forces { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: .6rem 1rem; border: 1px solid var(--border, #334155); border-radius: .65rem; padding: .75rem 1rem; margin: .7rem 0 1rem; }
+.graph-forces legend { padding: 0 .4rem; font-weight: 600; }
+.graph-force-control { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .2rem .4rem; font-size: .85rem; }
+.graph-force-control output { font-variant-numeric: tabular-nums; color: var(--muted, #a8b2c1); }
+.graph-force-control input { grid-column: 1 / -1; width: 100%; accent-color: #38bdf8; }
+
 .graph-stage { width: 100%; background: var(--surface, #101824); border: 1px solid var(--border, #334155); border-radius: .8rem; overflow: hidden; }
 .graph-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: .7rem; margin: 1rem 0; }
 .graph-toolbar label { display: grid; gap: .3rem; min-width: min(100%, 190px); }

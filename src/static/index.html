@@ -385,8 +385,8 @@
         <option value="catalogue">Entire cached catalogue</option></select></label>
       <label>Filter artist or music<input id="graphQuery" type="search" placeholder="Artist, song, or album"></label>
       <label>Focus MusicBrainz ID (optional)<input id="graphFocus" type="text" placeholder="UUID"></label>
-      <label>Graph size<select id="graphLimit"><option value="180" selected>180 nodes (fast)</option>
-        <option value="400">400 nodes</option><option value="800">800 nodes</option></select></label>
+      <label>Nodes to display<input id="graphLimit" type="number" inputmode="numeric" min="1" max="10000" step="1" value="180" required>
+        <small id="graphTotal" class="hint" role="status" aria-live="polite">Available in this neighborhood: calculating…</small></label>
       <button type="submit">Explore</button>
     </form>
     <fieldset class="graph-filters"><legend>Visible node types</legend>
@@ -396,16 +396,32 @@
       <label><input type="checkbox" class="graph-type" value="release-group" checked> Album families</label>
       <label><input type="checkbox" class="graph-type" value="work" checked> Compositions</label>
     </fieldset>
+    <div class="graph-legend" role="group" aria-label="Graph node colors">
+      <span class="graph-legend-item"><i class="graph-dot graph-dot-artist" aria-hidden="true"></i> Artists</span>
+      <span class="graph-legend-item"><i class="graph-dot graph-dot-recording" aria-hidden="true"></i> Recordings</span>
+      <span class="graph-legend-item"><i class="graph-dot graph-dot-release" aria-hidden="true"></i> Releases</span>
+      <span class="graph-legend-item"><i class="graph-dot graph-dot-release-group" aria-hidden="true"></i> Album families</span>
+      <span class="graph-legend-item"><i class="graph-dot graph-dot-work" aria-hidden="true"></i> Compositions</span>
+      <span class="graph-legend-item"><i class="graph-dot graph-dot-owned" aria-hidden="true"></i> Gold ring = downloaded</span>
+    </div>
+    <fieldset class="graph-forces"><legend>Forces (Obsidian-style)</legend>
+      <label class="graph-force-control">Center force <output id="graphCenterValue" for="graphCenterForce">0.35</output>
+        <input id="graphCenterForce" type="range" min="0" max="1" step="0.05" value="0.35"></label>
+      <label class="graph-force-control">Repel force <output id="graphRepelValue" for="graphRepelForce">7.5</output>
+        <input id="graphRepelForce" type="range" min="0" max="20" step="0.5" value="7.5"></label>
+      <label class="graph-force-control">Link force <output id="graphLinkValue" for="graphLinkForce">0.30</output>
+        <input id="graphLinkForce" type="range" min="0" max="1" step="0.05" value="0.30"></label>
+      <label class="graph-force-control">Link distance <output id="graphDistanceValue" for="graphLinkDistance">90</output>
+        <input id="graphLinkDistance" type="range" min="0" max="500" step="5" value="90"></label>
+    </fieldset>
     <div class="row graph-toolbar">
       <label>Layout<select id="graphLayout"><option value="free">Free physics</option>
         <option value="layers">Soft layers (by graph distance)</option></select></label>
       <label>Find node<select id="graphNodeSelect" aria-label="Jump to a graph node">
         <option value="">Jump to a node…</option></select></label>
-      <button id="graphZoomIn" class="secondary" type="button" aria-label="Zoom in">Zoom +</button>
-      <button id="graphZoomOut" class="secondary" type="button" aria-label="Zoom out">Zoom −</button>
       <button id="graphZoomReset" class="secondary" type="button">Fit graph</button>
     </div>
-    <p class="hint">Scroll over the graph to zoom, drag the background to pan, or drag a node to reposition it. Use the node picker for keyboard access. Focus the graph and press +, − or 0 to zoom or fit.</p>
+    <p class="hint">Scroll or pinch to zoom; drag the background to pan or nodes to reposition them. Focus the graph and press +, − or 0 to zoom or fit. The last graph, positions and settings are saved locally for this browser and library; Explore reloads live catalogue data.</p>
     <p id="graphStatus" class="hint" role="status" aria-live="polite"></p>
     <div class="graph-stage">
       <div id="graphCanvas" role="region" aria-label="Interactive artist, recording and album graph" tabindex="0"></div>

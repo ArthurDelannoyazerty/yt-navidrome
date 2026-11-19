@@ -504,7 +504,8 @@ explores the same typed artist, work, recording, release and release-group
 relationships with independent node-type filters and a downloaded-only view.
 Its locally bundled Canvas graph supports draggable spring physics, soft
 connectivity-based layers, mouse-wheel zoom, node lookup, and bounded views up
-to 800 nodes.
+to the available neighborhood count (with a 10,000-node safety ceiling). The last
+view and Obsidian-style force settings persist locally per browser and user.
 
 Album candidate comparison uses confirmed recording IDs and locally cached
 release relationships. Release selection is distinct from recording approval;

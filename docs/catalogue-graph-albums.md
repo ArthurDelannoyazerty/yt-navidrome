@@ -30,18 +30,29 @@ Independently toggle **Recordings**, **Artists**, **Releases**, **Album families
 **Works**; all unchecked means an empty visualization. Artist-only and
 release-only views can still reach their nodes through hidden recording nodes.
 Filter by a name, or focus on one MusicBrainz MBID to expand nearby relationships.
-Results are bounded (180, 400 or 800 nodes) to protect the browser, and public
-catalogue nodes do not imply ownership. Downloaded views cannot reveal another
-library user's music.
+The graph reports the total selectable nodes in the *current bounded-depth
+neighborhood*, independently of the display limit. Enter an integer from 1 to
+that total (up to a 10,000-node server safety ceiling); the input is clamped
+when the current view or filters change. The number is not the total count of
+all MusicBrainz entities in the database. Public catalogue nodes do not imply
+ownership, and downloaded views cannot reveal another library user's music.
 
 The Graph tab uses a locally vendored 2D Canvas renderer (force-graph 1.51.4,
 MIT). **Free physics** is an unconstrained spring layout; **Soft layers** pull
 nodes toward breadth-first graph distances within each connected component,
-not fixed entity-type columns. Both modes support wheel/pinch zoom, dragging,
-panning, fit-to-view, focus selection, and progressive labels. The simulation
-cools automatically, and pauses while the tab is hidden. The node selector
-provides keyboard-accessible navigation and still opens the existing Catalogue
-and neighborhood-expansion actions.
+not fixed entity-type columns. Five high-contrast node colors, with an explicit
+legend, distinguish entity types; a gold ring marks downloaded recordings.
+Both modes support wheel/pinch zoom, dragging, panning, fit-to-view, focus
+selection, and progressive labels. The Obsidian-style force controls are Center
+force, Repel force, Link force and Link distance; they update D3-based forces
+live. The simulation cools automatically, and pauses while the tab is hidden.
+A browser-local snapshot saves the most recent graph, positions, viewport and
+controls per library user (IndexedDB with localStorage fallback). Reloading the
+page reuses it without re-fetching; **Explore** explicitly refreshes catalogue
+data. Browser storage is local to the current origin and may be cleared by the
+browser; it never changes the server catalogue. The node selector provides
+keyboard-accessible navigation and retains the Catalogue and neighborhood
+expansion actions.
 
 ## Album organization
 
