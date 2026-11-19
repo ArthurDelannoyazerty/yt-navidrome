@@ -1087,3 +1087,51 @@ test("real browser: prefetch metrics remain available with no waiting approvals 
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheClean').disabled"),false);
   assert.deepEqual(chrome.errors,[]);
 });
+
+
+test("real browser: Japanese official title shows verified pseudo-release English line and delayed albums appear", {timeout:60000},async t=>{
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures();
+  const rid="b6173a0d-5ec7-44aa-bfe6-475d5fd5d9c2";
+  const release="bedbc15a-1e5c-4aa6-ae90-24c0b78c1f3a";
+  data.tracks[0].title="運命に囚われし者たち";
+  data.tracks[0].choices=[{...data.tracks[0].choices[0],
+    mbid:rid,title:"運命に囚われし者たち",artist:"Yasunori Mitsuda & Millennial Fair"}];
+  data.recordingNames={[rid]:{
+    id:rid,title:"運命に囚われし者たち",preferred_title:"Bound by Fate",
+    preferred_title_source:"pseudo_release",preferred_title_release_id:release,
+    preferred_title_language:"eng",artist:"Yasunori Mitsuda & Millennial Fair",
+  }};
+  data.searchResults=[{id:rid,title:"運命に囚われし者たち",
+    artist:"Yasunori Mitsuda & Millennial Fair",length_ms:212000,releases:[]}];
+  data.releasePending={[rid]:true};
+  data.releaseResults={[rid]:{
+    recording_id:rid,releases:[
+      {id:release,title:"CHRONO CROSS 20th Anniversary Live Tour",
+        status:"Pseudo-Release",date:"2020-06-24"},
+    ],page:1,total:1,
+  }};
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias')");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name a').textContent"),
+    "運命に囚われし者たち");
+  assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias').textContent"),
+    /English \(pseudo-release\): Bound by Fate/);
+  assert.ok((await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias a').href")).endsWith("/release/"+release));
+  await chrome.until("document.querySelector('#mbResults .approval-search-recording-name .approval-english-alias')");
+  assert.match(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-name .approval-english-alias').textContent"),
+    /English \(pseudo-release\): Bound by Fate/);
+  await chrome.until("document.querySelector('#metadataSuggestions .approval-edition-picker p')?.textContent.includes('background')");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-edition-picker p').textContent.includes('No release options cached yet')"),false);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions button').disabled"),false);
+  data.releasePending[rid]=false;
+  await chrome.until("document.querySelector('#metadataSuggestions .approval-edition-picker summary')?.textContent.includes('(1)')");
+  assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-edition-picker').textContent"),/CHRONO CROSS 20th Anniversary/);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions button').disabled"),false);
+  assert.ok(data.reads.filter(s=>s.startsWith("/api/musicbrainz/releases?")&&s.includes(rid)).length>=2);
+  assert.deepEqual(chrome.errors,[]);
+});
