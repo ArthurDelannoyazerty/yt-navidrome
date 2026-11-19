@@ -3,7 +3,8 @@
 window.CatalogueUI = (() => {
   const byId = id => document.getElementById(id);
   const ui = { user: null, detail: null, results: [], recommendations: [], preview: null,
-    busy: false, serial: 0, prefetchTimer: null, cacheActionPending: false };
+    busy: false, serial: 0, prefetchTimer: null, cacheActionPending: false,
+    failedLoading: false, failedSerial: 0, failedTotal: null, failedVisible: 0 };
   const current = (user, serial) => user === state.user && serial === ui.serial;
   const element = (tag, text, cls) => {
     const e = document.createElement(tag);
@@ -24,12 +25,19 @@ window.CatalogueUI = (() => {
   }
   function leave() {
     clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
+    ui.failedSerial++; ui.failedLoading = false;
     byId("approvalCacheConfirm").hidden = true;
   }
   function reset() {
     leave();
     ui.user = null; ui.detail = null; ui.results = []; ui.recommendations = [];
     ui.preview = null; ui.serial++;
+    ui.failedTotal = null; ui.failedVisible = 0;
+    byId("approvalFailedSection").open = false;
+    byId("approvalFailedList").replaceChildren();
+    byId("approvalFailedMore").hidden = true;
+    byId("approvalFailedCount").textContent = "0";
+    byId("approvalFailedNotice").textContent = "";
     for (const id of ["catalogueResults", "catalogueRecommendations", "cataloguePreview", "catalogueHistory"]) byId(id).replaceChildren();
     byId("catalogueResults").append(element("p", "Search to find cached MusicBrainz entries.", "hint"));
     byId("catalogueDetail").replaceChildren(element("p", "Select an entry on the left to browse its discography or tracklist.", "hint"));
@@ -43,6 +51,64 @@ window.CatalogueUI = (() => {
     if (amount < 1048576) return (amount / 1024).toFixed(1) + " KiB";
     return (amount / 1048576).toFixed(1) + " MiB";
   }
+  function failedEntry(item) {
+    const row = element("article", null, "approval-failed-row");
+    const info = element("div", null, "approval-failed-info");
+    info.append(
+      element("strong", item.label || "MusicBrainz request"),
+      element("small", item.kind + " · " + num(item.attempts) + " failed executions"),
+      element("p", item.last_error || "No error detail available.", "hint")
+    );
+    const retry = element("button", "Retry 3 times", "secondary");
+    retry.type = "button";
+    retry.addEventListener("click", async () => {
+      const user = ui.user;
+      if (!user || state.tab !== "catalogue" || retry.disabled) return;
+      retry.disabled = true;
+      try {
+        await api("/api/musicbrainz/approval-prefetch-retry", {
+          user_id: user, job_id: item.job_id
+        });
+        if (ui.user !== user || state.tab !== "catalogue") return;
+        message("Request requeued at low priority for 3 more attempts.",
+          false, "approvalFailedNotice");
+        await refreshFailedJobs(true);
+        void refreshPrefetchStatus();
+      } catch (error) {
+        if (ui.user === user && state.tab === "catalogue") {
+          retry.disabled = false;
+          message(error.message || String(error), true, "approvalFailedNotice");
+        }
+      }
+    });
+    row.append(info, retry);
+    return row;
+  }
+  async function refreshFailedJobs(reset = true) {
+    if (!ui.user || state.tab !== "catalogue" ||
+        !byId("approvalFailedSection").open || ui.failedLoading) return;
+    const user = ui.user, serial = ++ui.failedSerial, offset = reset ? 0 : ui.failedVisible;
+    ui.failedLoading = true;
+    try {
+      const result = await api("/api/musicbrainz/approval-prefetch-failures?" +
+        new URLSearchParams({user_id: user, limit: "50", offset: String(offset)}));
+      if (serial !== ui.failedSerial || user !== ui.user ||
+          state.tab !== "catalogue" || !byId("approvalFailedSection").open) return;
+      const list = byId("approvalFailedList");
+      if (reset) list.replaceChildren();
+      for (const item of result.items || []) list.append(failedEntry(item));
+      ui.failedVisible = offset + (result.items || []).length;
+      ui.failedTotal = Number(result.total || 0);
+      byId("approvalFailedCount").textContent = num(ui.failedTotal);
+      byId("approvalFailedMore").hidden = ui.failedVisible >= ui.failedTotal;
+      if (!ui.failedTotal) list.append(element("p", "No disabled requests.", "hint"));
+    } catch (error) {
+      if (serial === ui.failedSerial && user === ui.user && state.tab === "catalogue")
+        message(error.message || String(error), true, "approvalFailedNotice");
+    } finally {
+      if (serial === ui.failedSerial) ui.failedLoading = false;
+    }
+  }
   async function refreshPrefetchStatus() {
     if (!(ui.user && state.tab === "catalogue")) return;
     const user = ui.user;
@@ -53,6 +119,10 @@ window.CatalogueUI = (() => {
       if (!(ui.user && state.tab === "catalogue") || user !== ui.user || !response.ok) return;
       const done = Number(data.completed || 0), total = Number(data.total || 0);
       const queued = Number(data.queued || 0), retrying = Number(data.deferred || 0);
+      const failed = Number(data.failed || 0), atTail = Number(data.tail_queued || 0);
+      byId("approvalFailedCount").textContent = num(failed);
+      if (byId("approvalFailedSection").open && ui.failedTotal !== failed)
+        void refreshFailedJobs(true);
       byId("approvalCacheCompleted").textContent = num(done) + " / " + num(total);
       byId("approvalCacheQueue").textContent = num(queued) + " / " + num(total);
       byId("approvalCacheDeferred").textContent = num(retrying);
@@ -66,10 +136,13 @@ window.CatalogueUI = (() => {
           ? "MusicBrainz cooldown: prefetch paused for " + cooldown + "s. Approval remains usable."
           : queued > 0
             ? "Preparing metadata for " + num(data.waiting_tracks) + " waiting tracks in the background."
-            : "Background prefetch is caught up with currently discovered work.";
+            : failed > 0
+              ? num(failed) + " requests disabled after repeated failures. Expand Failed searches below to retry."
+              : "Background prefetch is caught up with currently discovered work.";
       byId("approvalCacheDetail").textContent =
         num(data.cache_entries) + " saved entries (" + num(data.cached) + " fresh); " +
-        num(data.due) + " ready to fetch, " + num(data.running) + " running. " +
+        num(data.due) + " ready to fetch, " + num(data.running) + " running; " +
+        num(atTail) + " at the queue tail, " + num(failed) + " disabled. " +
         "Shared Catalogue database: " + bytes(data.catalogue_db_bytes) + " on disk. " +
         "Total grows as new candidates are discovered.";
     } catch (_) {
@@ -394,6 +467,12 @@ window.CatalogueUI = (() => {
     byId("catalogueResults").style.maxHeight = `${value}px`;
     byId("catalogueResultsHeightValue").textContent = `${value} px`;
   }
+  byId("approvalFailedSection").addEventListener("toggle", () => {
+    if (byId("approvalFailedSection").open) void refreshFailedJobs(true);
+  });
+  byId("approvalFailedMore").addEventListener("click", () => {
+    void refreshFailedJobs(false);
+  });
   byId("approvalCacheClean").addEventListener("click", prepareCacheCleanup);
   byId("approvalCacheConfirmButton").addEventListener("click", performCacheCleanup);
   byId("approvalCacheCancel").addEventListener("click", cancelCacheCleanup);
