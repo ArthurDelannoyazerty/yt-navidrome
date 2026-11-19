@@ -803,7 +803,7 @@ def test_failed_search_labels_do_not_expose_unowned_library_queries(db):
         with catalogue.db() as con:
             con.execute(
                 "UPDATE approval_prefetch_jobs SET state='FAILED',attempts=6,"
-                "last_error='MusicBrainz search returned HTTP 404' WHERE kind='search'")
+                "last_error='MusicBrainz search returned HTTP 404: Private video title' WHERE kind='search'")
         admin = client.get("/api/musicbrainz/approval-prefetch-failures",
                            params={"user_id": "admin"}).json()
         guest = client.get("/api/musicbrainz/approval-prefetch-failures",

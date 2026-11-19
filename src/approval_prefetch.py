@@ -694,9 +694,16 @@ class ApprovalPrefetch:
                         pass
             else:
                 label = kind.replace("_", " ").title() + " · " + key[:100]
+            error = (row["last_error"] or "")[:250]
+            if kind == "search" and key not in own_searches:
+                # Network failures can contain the full URL/query string.
+                # A shared-cache job must not reveal another user's searches.
+                status_code = re.search(r"\\bHTTP\\s+[0-9]{3}\\b", error, re.IGNORECASE)
+                error = ("MusicBrainz " + status_code.group(0).upper()
+                         if status_code else "Search failure; details private to its library.")
             items.append({
                 "job_id": identity, "kind": kind, "label": label,
-                "attempts": row["attempts"], "last_error": (row["last_error"] or "")[:250],
+                "attempts": row["attempts"], "last_error": error,
             })
         return {"total": total, "offset": offset, "limit": limit, "items": items}
 
