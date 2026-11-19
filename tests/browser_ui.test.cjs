@@ -1149,7 +1149,7 @@ test("real browser: Graph canvas loads with strict CSP, switches layers and supp
       {source:"artist:a",target:"recording:r",relation:"artist-credit"},
       {source:"recording:r",target:"artist:b",relation:"artist-credit"},
     ],
-    owned_recording_count:1,truncated:false
+    owned_recording_count:1,total_nodes:5,max_selectable_nodes:5,truncated:true
   };
   const origin = await fixtureServer(t,data);
   await chrome.send("Page.addScriptToEvaluateOnNewDocument",{source:
@@ -1167,8 +1167,24 @@ test("real browser: Graph canvas loads with strict CSP, switches layers and supp
   await chrome.evaluate("document.querySelector('#graphLayout').value='layers';document.querySelector('#graphLayout').dispatchEvent(new Event('change'))");
   await chrome.evaluate("const picker=document.querySelector('#graphNodeSelect');picker.value='artist:b';picker.dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelector('#graphDetails').textContent.includes('Artist B')");
-  await chrome.evaluate("document.querySelector('#graphZoomIn').click();document.querySelector('#graphZoomReset').click()");
+  assert.equal(await chrome.evaluate("document.querySelector('#graphLimit').max"),"5");
+  assert.equal(await chrome.evaluate("document.querySelector('#graphLimit').value"),"5");
+  assert.match(await chrome.evaluate("document.querySelector('#graphTotal').textContent"),/5 available/);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.graph-legend-item').length"),6);
+  assert.equal(await chrome.evaluate("document.querySelector('#graphZoomIn,#graphZoomOut')"),null);
+  await chrome.evaluate("document.querySelector('#graphRepelForce').value='11';document.querySelector('#graphRepelForce').dispatchEvent(new Event('input'))");
+  assert.equal(await chrome.evaluate("document.querySelector('#graphRepelValue').textContent"),"11.0");
+  await chrome.evaluate("document.querySelector('#graphZoomReset').click()");
   await chrome.screenshot("graph-physics-canvas");
+  const count=data.reads.filter(path=>path.startsWith("/api/catalogue/graph?")).length;
+  await chrome.send("Page.reload",{ignoreCache:true});
+  await chrome.until("document.querySelector('#user').value==='admin'");
+  await chrome.evaluate("document.querySelector('[data-tab=graph]').click()");
+  await chrome.until("document.querySelector('#graphStatus').textContent.includes('Restored from this browser')");
+  assert.equal(data.reads.filter(path=>path.startsWith("/api/catalogue/graph?")).length,count);
+  assert.equal(await chrome.evaluate("document.querySelector('#graphRepelForce').value"),"11");
+  assert.equal(await chrome.evaluate("document.querySelector('#graphLayout').value"),"layers");
+  assert.equal(await chrome.evaluate("document.querySelector('#graphNodeSelect').value"),"artist:b");
   assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
   assert.deepEqual(chrome.errors,[]);
 });

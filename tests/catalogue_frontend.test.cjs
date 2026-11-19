@@ -267,5 +267,5 @@ test("Graph legend and four force sliders match node colors without zoom buttons
     assert(css.includes(".graph-dot-"+kind+" {"));
   }
   assert.doesNotMatch(html,/id="graphZoomIn"|id="graphZoomOut"/);
-  assert.doesNotMatch(js,/get\\("graphZoomIn"\\)|get\\("graphZoomOut"\\)/);
+  assert(!js.includes('get("graphZoomIn")') && !js.includes('get("graphZoomOut")'));
 });
