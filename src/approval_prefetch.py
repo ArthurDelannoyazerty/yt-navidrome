@@ -698,7 +698,7 @@ class ApprovalPrefetch:
             if kind == "search" and key not in own_searches:
                 # Network failures can contain the full URL/query string.
                 # A shared-cache job must not reveal another user's searches.
-                status_code = re.search(r"\\bHTTP\\s+[0-9]{3}\\b", error, re.IGNORECASE)
+                status_code = re.search(r"\bHTTP\s+[0-9]{3}\b", error, re.IGNORECASE)
                 error = ("MusicBrainz " + status_code.group(0).upper()
                          if status_code else "Search failure; details private to its library.")
             items.append({
