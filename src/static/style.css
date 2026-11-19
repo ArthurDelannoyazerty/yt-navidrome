@@ -573,3 +573,20 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 /* Cache metrics and cleanup are part of Catalogue's Cache synchronization card. */
 .catalogue-details .catalogue-prefetch-merged { background: transparent; border: 0; border-top: 1px solid var(--border); border-radius: 0; margin: 17px 0 0; padding: 14px 0 0; }
 .catalogue-details .catalogue-prefetch-merged .approval-cache-heading h3 { font-size: 14px; }
+
+/* Disabled MusicBrainz prefetch jobs: accessible expandable list. */
+.approval-cache-failures { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 10px; }
+.approval-cache-failures > summary { font-size: 13px; font-weight: 600; padding: 4px 0; }
+.approval-cache-failures > .hint { font-size: 12px; line-height: 1.45; }
+.approval-failed-list { display: grid; gap: 8px; max-height: 380px; overflow-y: auto; }
+.approval-failed-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-width: 0; border: 1px solid var(--border); border-radius: 7px; padding: 10px; }
+.approval-failed-info { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.approval-failed-info strong { font-size: 12px; }
+.approval-failed-info small { color: var(--muted); font-size: 11px; }
+.approval-failed-info p { font-size: 11px; margin: 0; overflow-wrap: anywhere; }
+.approval-failed-row button { flex-shrink: 0; white-space: nowrap; font-size: 12px; }
+#approvalFailedMore { margin-top: 10px; font-size: 12px; }
+@media (max-width: 600px) {
+  .approval-failed-row { align-items: flex-start; flex-direction: column; }
+}
