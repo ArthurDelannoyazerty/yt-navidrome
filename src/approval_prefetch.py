@@ -519,6 +519,26 @@ class ApprovalPrefetch:
                            "artist_id": aid, "page": 1}
                 seeds.append(self._job("search", search_key("recording", title, artist, aid, 1),
                                        payload, 20))
+        # Existing search pages may have been cached before the release/pseudo
+        # resolver was installed. Backfill *every* result of pending reviews,
+        # without re-fetching their already cached MusicBrainz search.
+        search_keys = {key for kind, key, _, _ in seeds if kind == "search"}
+        with self.catalogue.db() as con:
+            for batch in self._chunks(tuple(search_keys)):
+                marks = ",".join("?" for _ in batch)
+                for row in con.execute(
+                    "SELECT payload FROM approval_prefetch_cache WHERE kind='search' "
+                    f"AND cache_key IN ({marks})", batch
+                ):
+                    try:
+                        result = json.loads(row["payload"])
+                        for item in result.get("items") or []:
+                            if (result.get("entity") == "recording" and
+                                    (rid := valid_id(item.get("id")))):
+                                seeds.append(self._job("releases", f"{rid}:1",
+                                                       {"id": rid, "page": 1}, 35))
+                    except (ValueError, TypeError, AttributeError):
+                        continue
         scheduled = self._enqueue_rows(seeds)
         self.last_seed_at = time.time()
         self.last_seed_count = tracks
@@ -807,6 +827,46 @@ class ApprovalPrefetch:
             ):
                 if aid := valid_id(row["source_id"]):
                     retain["artist"].add(aid)
+        # Release-list snapshots and pseudo-title provenance are retained
+        # alongside their exact recording identity. Do not throw away a
+        # translation just because it was discovered on a pseudo-release.
+        retained_rec = retain["recording"]
+        retain["pseudo_title"] = set(retained_rec)
+        all_lists = cache_con.execute(
+            """SELECT kind,cache_key,payload FROM approval_prefetch_cache
+               WHERE kind IN ('releases','pseudo_release')"""
+        ).fetchall()
+        all_jobs = cache_con.execute(
+            """SELECT kind,cache_key FROM approval_prefetch_jobs
+               WHERE kind IN ('releases','pseudo_release')"""
+        ).fetchall()
+        pseudo_releases = set()
+        for row in all_lists:
+            if row["kind"] == "releases":
+                rid = valid_id(row["cache_key"].split(":")[0])
+                if rid not in retained_rec:
+                    continue
+                retain.setdefault("releases", set()).add(row["cache_key"])
+                try:
+                    for rel in json.loads(row["payload"]).get("releases") or []:
+                        if (str(rel.get("status") or "").casefold() == "pseudo-release"
+                                and (release_id := valid_id(rel.get("id")))):
+                            pseudo_releases.add(release_id)
+                except (ValueError, TypeError):
+                    continue
+            else:
+                try:
+                    ids = {valid_id(x.get("recording_id")) for x in
+                           (json.loads(row["payload"]).get("titles") or [])}
+                    if ids.intersection(retained_rec):
+                        pseudo_releases.add(row["cache_key"])
+                except (ValueError, TypeError):
+                    continue
+        for row in all_jobs:
+            if row["kind"] == "releases":
+                if valid_id(row["cache_key"].split(":")[0]) in retained_rec:
+                    retain.setdefault("releases", set()).add(row["cache_key"])
+        retain["pseudo_release"] = pseudo_releases
         return retain, waiting
 
     @staticmethod
