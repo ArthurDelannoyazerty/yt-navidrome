@@ -33,7 +33,7 @@ from state_machines import MACHINES, SOURCE_INACTIVE, SERVICE
 STATIC_ROOT = ROOT / "static"
 INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
 _asset_digest = hashlib.sha256()
-for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js", "help-ui.js", "pele-flowchart.js", "catalogue-ui.js", "language-ui.js", "force-graph.min.js", "graph-ui.js"):
+for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js", "help-ui.js", "pele-flowchart.js", "catalogue-ui.js", "language-ui.js", "force-graph.css", "force-graph.min.js", "graph-ui.js"):
     _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 

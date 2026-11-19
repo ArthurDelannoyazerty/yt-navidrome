@@ -210,6 +210,7 @@ async function fixtureServer(t, data) {
       else if (url.pathname === "/api/sources") result = data.sources || [];
       else if (url.pathname === "/api/catalogue/sources") result = [];
       else if (url.pathname === "/api/catalogue/progress") result = {counts:{}, active:[]};
+      else if (url.pathname === "/api/catalogue/graph") result = data.graph || {nodes:[], edges:[], owned_recording_count:0, truncated:false};
       else if (url.pathname === "/api/catalogue/language-preview") result = data.languagePreview || {
         eligible:0, skipped:{already_localized:0,manual_or_busy:0,invalid_or_missing:0}, sample:[]};
       else if (url.pathname === "/api/catalogue/language-progress") result = {state:"complete", processed:12, total:12, eligible:12};
@@ -1132,5 +1133,42 @@ test("real browser: Japanese official title shows verified pseudo-release Englis
   assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-edition-picker').textContent"),/CHRONO CROSS 20th Anniversary/);
   assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions button').disabled"),false);
   assert.ok(data.reads.filter(s=>s.startsWith("/api/musicbrainz/releases?")&&s.includes(rid)).length>=2);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+test("real browser: Graph canvas loads with strict CSP, switches layers and supports node selection", {timeout:60000}, async t => {
+  const chrome = await browser(t); if (!chrome) return;
+  const data = fixtures(); data.strictCsp = true;
+  data.graph = {
+    nodes: [
+      {id:"artist:a",kind:"artist",label:"Artist A",owned:false},
+      {id:"recording:r",kind:"recording",label:"Recording R",owned:true},
+      {id:"artist:b",kind:"artist",label:"Artist B",owned:false},
+    ],
+    edges: [
+      {source:"artist:a",target:"recording:r",relation:"artist-credit"},
+      {source:"recording:r",target:"artist:b",relation:"artist-credit"},
+    ],
+    owned_recording_count:1,truncated:false
+  };
+  const origin = await fixtureServer(t,data);
+  await chrome.send("Page.addScriptToEvaluateOnNewDocument",{source:
+    "window.styleViolations=[];document.addEventListener('securitypolicyviolation',event=>{if(event.effectiveDirective.startsWith('style-src'))window.styleViolations.push(event.violatedDirective);});"});
+  await chrome.send("Emulation.setDeviceMetricsOverride",{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1");
+  await chrome.evaluate("document.querySelector('[data-tab=graph]').click()");
+  await chrome.until("document.querySelector('#graphCanvas canvas') && document.querySelector('#graphStatus').textContent.includes('3 nodes')");
+  assert.equal(await chrome.evaluate("typeof window.ForceGraph"),"function");
+  assert.equal(await chrome.evaluate("document.querySelector('#graphCanvas').getBoundingClientRect().width>300"),true);
+  assert.equal(await chrome.evaluate("Array.from(document.styleSheets).some(sheet=>sheet.href?.includes('force-graph.css'))"),true);
+  await chrome.evaluate("document.querySelector('#graphLayout').value='layers';document.querySelector('#graphLayout').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("const picker=document.querySelector('#graphNodeSelect');picker.value='artist:b';picker.dispatchEvent(new Event('change'))");
+  await chrome.until("document.querySelector('#graphDetails').textContent.includes('Artist B')");
+  await chrome.evaluate("document.querySelector('#graphZoomIn').click();document.querySelector('#graphZoomReset').click()");
+  await chrome.screenshot("graph-physics-canvas");
+  assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
   assert.deepEqual(chrome.errors,[]);
 });

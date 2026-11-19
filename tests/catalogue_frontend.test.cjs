@@ -148,3 +148,13 @@ test("Graph uses requested bounded limit and clears old canvas", async () => {
   assert(renderer.paused);
   assert.equal(b.get("graphDetails").children.length,0);
 });
+
+test("Force graph styles are external to preserve the strict CSP", () => {
+  const source = readFileSync(require.resolve("../src/static/force-graph.min.js"), "utf8");
+  const css = readFileSync(require.resolve("../src/static/force-graph.css"), "utf8");
+  const html = readFileSync(require.resolve("../src/static/index.html"), "utf8");
+  assert.doesNotMatch(source, /document\.createElement\("style"\)/);
+  assert.match(css, /\.force-graph-container canvas/);
+  assert.match(css, /\.float-tooltip-kap/);
+  assert.match(html, /\/static\/force-graph\.css\?v=__STATIC_VERSION__/);
+});
