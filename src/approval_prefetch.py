@@ -10,6 +10,7 @@ same HttpPolicy MusicBrainz portal/cooldown as interactive search and Beets.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -29,6 +30,16 @@ SEARCH_TTL = 7 * 86400
 NEGATIVE_TTL = 7 * 86400
 SWEEP_INTERVAL = 300
 MAX_BATCH_IDS = 200
+NORMAL_FAILURE_BUDGET = 3
+TAIL_FAILURE_BUDGET = 3
+MAX_PREFETCH_FAILURES = NORMAL_FAILURE_BUDGET + TAIL_FAILURE_BUDGET
+TAIL_QUEUE_PRIORITY = 1000
+
+
+def failed_job_id(kind, key):
+    """Stable opaque ID for failed jobs; do not expose private search keys."""
+    return hashlib.sha256(_json([kind, key]).encode("utf-8")).hexdigest()[:32]
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS approval_prefetch_cache (
@@ -94,6 +105,18 @@ class ApprovalPrefetch:
         with self.catalogue.db() as con:
             con.executescript(SCHEMA)
             con.execute("UPDATE approval_prefetch_jobs SET state='PENDING' WHERE state='RUNNING'")
+            # Older workers incremented attempts even while waiting for a
+            # shared limiter. Such waits must not exhaust the new budget.
+            con.execute("""UPDATE approval_prefetch_jobs SET attempts=0
+                           WHERE state='PENDING' AND
+                           last_error LIKE 'musicbrainz.org: waiting for shared provider cooldown%'""")
+            con.execute("""UPDATE approval_prefetch_jobs
+                           SET state='FAILED', retry_at=0
+                           WHERE state='PENDING' AND attempts>=?""",
+                        (MAX_PREFETCH_FAILURES,))
+            con.execute("""UPDATE approval_prefetch_jobs SET priority=?
+                           WHERE state='PENDING' AND attempts>=?""",
+                        (TAIL_QUEUE_PRIORITY, NORMAL_FAILURE_BUDGET))
 
     @staticmethod
     def _cached(con, kind, key):
@@ -164,8 +187,13 @@ class ApprovalPrefetch:
                     """INSERT INTO approval_prefetch_jobs
                        (kind,cache_key,payload,priority,requested_at) VALUES (?,?,?,?,?)
                        ON CONFLICT(kind,cache_key) DO UPDATE SET
-                       priority=MIN(approval_prefetch_jobs.priority,excluded.priority)""",
-                    (kind, key, payload, priority, now + index * 0.0001),
+                       priority=CASE
+                         WHEN approval_prefetch_jobs.attempts>=?
+                           OR approval_prefetch_jobs.state='FAILED'
+                         THEN approval_prefetch_jobs.priority
+                         ELSE MIN(approval_prefetch_jobs.priority,excluded.priority)
+                       END""",
+                    (kind, key, payload, priority, now + index * 0.0001, NORMAL_FAILURE_BUDGET),
                 )
                 inserted += not bool(previous)
         return inserted
@@ -571,22 +599,49 @@ class ApprovalPrefetch:
             return dict(row) if row else None
 
     def defer(self, job, exc):
-        attempt = int(job["attempts"]) + 1
+        """After three failures, move to tail; after six, disable the item.
+
+        Shared slot waits do not consume the retry budget. Only provider-wide
+        cooldowns pause all requests; a bad release lookup must not do so.
+        """
+        now = time.time()
+        error = str(exc)[:400]
         provider_wait = isinstance(exc, ApiDeferred)
-        if provider_wait:
-            when = max(time.time() + 2, float(exc.retry_at or time.time() + 30))
-        else:
-            when = time.time() + min(1800, 10 * 2 ** min(attempt, 7))
+        global_pause = provider_wait and error.startswith("musicbrainz.org:")
+        clock_wait = global_pause and "waiting for shared provider cooldown" in error
+        attempt = int(job["attempts"]) + (0 if clock_wait else 1)
+        tail = attempt >= NORMAL_FAILURE_BUDGET
+        disabled = attempt >= MAX_PREFETCH_FAILURES
+        when = (max(now + 2, float(exc.retry_at or now + 30)) if provider_wait else
+                now + min(1800, 10 * 2 ** min(attempt, 7)))
         with self.catalogue.db() as con:
-            con.execute(
-                """UPDATE approval_prefetch_jobs SET state='PENDING',attempts=?,
-                   retry_at=?,last_error=? WHERE kind=? AND cache_key=?""",
-                (attempt, when, str(exc)[:400], job["kind"], job["cache_key"]),
+            updated = con.execute(
+                """UPDATE approval_prefetch_jobs
+                   SET state=?,attempts=?,priority=?,requested_at=?,retry_at=?,last_error=?
+                   WHERE kind=? AND cache_key=? AND state='RUNNING'""",
+                ("FAILED" if disabled else "PENDING", attempt,
+                 max(TAIL_QUEUE_PRIORITY, int(job["priority"])) if tail else int(job["priority"]),
+                 now if tail and int(job["attempts"]) < NORMAL_FAILURE_BUDGET else job["requested_at"],
+                 0 if disabled else when, error, job["kind"], job["cache_key"]),
+            ).rowcount
+        if not updated:
+            return  # The job was removed while its HTTP request was in flight.
+        if disabled:
+            self.store.event(
+                "WARNING", f"Approval prefetch disabled one {job['kind']} request "
+                f"after {MAX_PREFETCH_FAILURES} failed executions. Retry it manually in Catalogue.",
+                target="approval-prefetch",
             )
-        if provider_wait:
-            # A provider cooldown is GLOBAL. Without this pause the worker
-            # would claim thousands of unrelated jobs while MusicBrainz is
-            # throttled, flooding Activity with identical deferrals.
+        elif attempt == NORMAL_FAILURE_BUDGET:
+            self.store.event(
+                "WARNING", f"Approval prefetch moved one {job['kind']} request to the back "
+                f"of the queue after {NORMAL_FAILURE_BUDGET} failures.",
+                target="approval-prefetch",
+            )
+        elif not provider_wait and attempt in {1, 4}:
+            logging.warning("Approval prefetch %s failed (%s): %s",
+                            job["kind"], attempt, error[:180])
+        if global_pause:
             previous = self.pause_until
             self.pause_until = max(previous, when)
             if previous < time.time() and self.pause_until > time.time() + 3:
@@ -596,11 +651,77 @@ class ApprovalPrefetch:
                     f"({int(self.pause_until - time.time())} s). Queued jobs are retained.",
                     target="approval-prefetch",
                 )
-        elif attempt in {1, 5, 15}:
-            logging.warning(
-                "Approval MusicBrainz prefetch %s deferred (attempt %s): %s",
-                job["kind"], attempt, str(exc)[:180],
+
+    def failed_jobs(self, user_id, *, limit=50, offset=0):
+        """Paginated failures, with private search terms masked across users."""
+        self.store.require_user(user_id)
+        limit, offset = max(1, min(100, int(limit))), max(0, int(offset))
+        with self.catalogue.db() as con:
+            total = con.execute(
+                "SELECT COUNT(*) FROM approval_prefetch_jobs WHERE state='FAILED'"
+            ).fetchone()[0]
+            rows = con.execute(
+                """SELECT kind,cache_key,payload,attempts,last_error
+                   FROM approval_prefetch_jobs WHERE state='FAILED'
+                   ORDER BY requested_at,kind,cache_key LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+            search_keys = [row["cache_key"] for row in rows if row["kind"] == "search"]
+            refs = []
+            if search_keys:
+                marks = ",".join("?" for _ in search_keys)
+                refs = con.execute(
+                    "SELECT cache_key,track_id FROM approval_prefetch_search_refs "
+                    f"WHERE cache_key IN ({marks})", search_keys,
+                ).fetchall()
+        own_tracks = {row["id"] for row in self.store.rows(
+            "SELECT id FROM tracks WHERE user_id=?", (user_id,)
+        )} if refs else set()
+        own_searches = {row["cache_key"] for row in refs if row["track_id"] in own_tracks}
+        items = []
+        for row in rows:
+            kind, key = row["kind"], row["cache_key"]
+            identity = failed_job_id(kind, key)
+            if kind == "search":
+                label = "Search request #" + identity[:10]
+                if key in own_searches:
+                    try:
+                        payload = json.loads(row["payload"])
+                        label = (str(payload.get("title") or "Search")[:110] +
+                                 (" — " + str(payload["artist"])[:90]
+                                  if payload.get("artist") else ""))
+                    except (ValueError, TypeError, AttributeError, KeyError):
+                        pass
+            else:
+                label = kind.replace("_", " ").title() + " · " + key[:100]
+            items.append({
+                "job_id": identity, "kind": kind, "label": label,
+                "attempts": row["attempts"], "last_error": (row["last_error"] or "")[:250],
+            })
+        return {"total": total, "offset": offset, "limit": limit, "items": items}
+
+    def retry_failed(self, user_id, job_id):
+        """Manually give one disabled item three more low-priority attempts."""
+        self.store.require_user(user_id)
+        with self.catalogue.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            match = next(
+                (row for row in con.execute(
+                    "SELECT kind,cache_key FROM approval_prefetch_jobs WHERE state='FAILED'"
+                ) if failed_job_id(row["kind"], row["cache_key"]) == job_id),
+                None,
             )
+            if match is None:
+                return False
+            updated = con.execute(
+                """UPDATE approval_prefetch_jobs
+                   SET state='PENDING',attempts=?,priority=?,requested_at=?,
+                       retry_at=0,last_error=NULL
+                   WHERE kind=? AND cache_key=? AND state='FAILED'""",
+                (NORMAL_FAILURE_BUDGET, TAIL_QUEUE_PRIORITY, time.time(),
+                 match["kind"], match["cache_key"]),
+            ).rowcount
+        return bool(updated)
 
     async def process(self, job):
         kind = job["kind"]
@@ -987,7 +1108,13 @@ class ApprovalPrefetch:
             by_kind = {row["kind"]: row["n"] for row in con.execute(
                 "SELECT kind,COUNT(*) AS n FROM approval_prefetch_jobs GROUP BY kind"
             )}
-            total = completed + queued
+            failed = counts.get("FAILED", 0)
+            tail_queued = con.execute(
+                "SELECT COUNT(*) FROM approval_prefetch_jobs "
+                "WHERE state IN ('PENDING','RUNNING') AND attempts>=?",
+                (NORMAL_FAILURE_BUDGET,),
+            ).fetchone()[0]
+            total = completed + queued + failed
             page_count = con.execute("PRAGMA page_count").fetchone()[0]
             page_size = con.execute("PRAGMA page_size").fetchone()[0]
         return {
@@ -998,9 +1125,10 @@ class ApprovalPrefetch:
             "catalogue_db_bytes": page_count * page_size,
             "completed": completed, "total": total,
             "queued": queued, "queued_by_kind": by_kind,
+            "failed": failed, "tail_queued": tail_queued,
             "due": max(0, due), "deferred": delayed,
             "running": counts.get("RUNNING", 0),
             "cooldown_seconds": max(0, int(self.pause_until - now + 0.999)),
             "background": self.workers_enabled,
-            "note": "Total counts distinct cached/queued tasks and grows as searches discover recordings.",
+            "note": "Total counts distinct cached/queued/disabled tasks; disabled requests require manual retry.",
         }

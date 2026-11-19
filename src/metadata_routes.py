@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from fastapi import BackgroundTasks, Query
+from fastapi import BackgroundTasks, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,11 @@ class CandidateRejectionInput(BaseModel):
 class PrefetchCleanupInput(BaseModel):
     user_id: str = Field(min_length=1, max_length=64)
     confirmed: Literal[True]
+
+
+class PrefetchRetryInput(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
 def review_origin(track, origins):
@@ -197,6 +202,21 @@ def install_metadata_routes(app, store):
     def approval_prefetch_status(user_id: str):
         store.require_user(user_id)
         return JSONResponse(app.state.approval_prefetch.status(),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/musicbrainz/approval-prefetch-failures")
+    def approval_prefetch_failures(user_id: str, limit: int = Query(50, ge=1, le=100),
+                                   offset: int = Query(0, ge=0)):
+        store.require_user(user_id)
+        return JSONResponse(app.state.approval_prefetch.failed_jobs(
+            user_id, limit=limit, offset=offset), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/musicbrainz/approval-prefetch-retry")
+    def approval_prefetch_retry(data: PrefetchRetryInput):
+        store.require_user(data.user_id)
+        if not app.state.approval_prefetch.retry_failed(data.user_id, data.job_id):
+            raise HTTPException(status_code=404, detail="Disabled prefetch job not found")
+        return JSONResponse({"requeued": True, "attempts_remaining": 3},
                             headers={"Cache-Control": "no-store"})
 
     @app.get("/api/musicbrainz/approval-prefetch-clean-preview")
