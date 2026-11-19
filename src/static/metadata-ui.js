@@ -13,10 +13,10 @@ window.MetadataUI = (() => {
     timer: null, filterTimer: null, pickerTimer: null, page: 1, maxPage: 1, artistId: null, effectiveQuery: null,
     retryUntil: 0, pickerPage: 1, submitted: new Set(), manualOriginal: {},
     actions: {base: [], search: []}, audioKey: null, audioSerial: 0,
-    releaseCache: new Map(), searchItems: [], searchEntity: "recording",
+    releaseCache: new Map(), releaseTimers: new Map(), searchItems: [], searchEntity: "recording",
     beetsNameCache: new Map(), artistNameCache: new Map(),
     namesController: null, namesSerial: 0, namesTimer: null,
-    prefetchTimer: null, cacheActionPending: false};
+  };
   const manualFields = {artist: "metadataManualArtist", title: "metadataManualTitle", album: "metadataManualAlbum",
     mbid: "metadataManualMbid", release_id: "metadataManualRelease"};
   const list = value => Array.isArray(value) ? value.join("; ") : value || "";
@@ -46,18 +46,22 @@ window.MetadataUI = (() => {
     const audio = $("metadataAudio");
     audio.pause?.(); audio.removeAttribute("src"); audio.load?.();
   }
+  function stopReleasePolling() {
+    for (const timer of ui.releaseTimers.values()) clearTimeout(timer);
+    ui.releaseTimers.clear();
+  }
   function stopNamePolling() {
     ui.namesSerial += 1;
     clearTimeout(ui.namesTimer); ui.namesTimer = null;
     ui.namesController?.abort(); ui.namesController = null;
   }
   function leave() {
-    stopNamePolling(); clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
+    stopReleasePolling();
+    stopNamePolling();
     invalidateSearch(); ui.contextController?.abort(); ui.contextController = null;
     clearTimeout(ui.filterTimer); clearTimeout(ui.pickerTimer);
     ui.loadSerial += 1; ui.queueSerial += 1;
     flow.detail.finish(); flow.queue.finish(); flow.mutation.finish();
-    $("approvalCacheConfirm").hidden = true;
     stopAudio(); $("approvalPicker").open = false; updateButtons();
   }
   function reset() {
@@ -131,12 +135,16 @@ window.MetadataUI = (() => {
     const link = node("a", text); link.href = `https://musicbrainz.org/${kind}/${encodeURIComponent(id)}`;
     link.target = "_blank"; link.rel = "noopener noreferrer"; return link;
   }
-  function bilingualName(container, kind, id, canonical, english, note = "", aliasLabel = "English") {
+  function bilingualName(container, kind, id, canonical, english, note = "", aliasLabel = "English", sourceRelease = null) {
     container.replaceChildren();
     const original = canonical || english || "Unknown";
     container.append(id ? mbLink(kind, id, original) : node("strong", original));
     if (english && english !== canonical) {
-      container.append(node("small", aliasLabel + ": " + english, "approval-english-alias"));
+      const alias = node("small", aliasLabel + ": " + english, "approval-english-alias");
+      if (sourceRelease) {
+        alias.append(" · ", mbLink("release", sourceRelease, "MusicBrainz edition"));
+      }
+      container.append(alias);
     } else if (note) {
       container.append(node("small", note, "approval-name-note"));
     }
@@ -147,10 +155,14 @@ window.MetadataUI = (() => {
     const artist = row.querySelector(".approval-recording-artist");
     if (!title || !artist) return;
     if (names) {
+      const pseudo = names.preferred_title_source === "pseudo_release";
+      const label = pseudo ? (["eng", "en"].includes(names.preferred_title_language)
+        ? "English (pseudo-release)" : "Pseudo-release title") : "English";
       bilingualName(title, "recording", item.mbid, names.title,
                     names.preferred_title ||
                     (item.title !== names.title ? item.title : null), "",
-                    names.preferred_title ? "English" : "Beets");
+                    names.preferred_title ? label : "Beets",
+                    pseudo ? names.preferred_title_release_id : null);
       bilingualName(artist, "artist", null, names.artist || item.artist,
                     names.preferred_artist ||
                     (item.artist !== names.artist ? item.artist : null), "",
@@ -174,8 +186,14 @@ window.MetadataUI = (() => {
     } else {
       const title = row.querySelector(".approval-search-recording-name");
       const artist = row.querySelector(".approval-search-recording-artist");
-      if (title) bilingualName(title, "recording", item.id, names.title || item.title,
-                                names.preferred_title || item.preferred_title);
+      if (title) {
+        const pseudo = names.preferred_title_source === "pseudo_release";
+        bilingualName(title, "recording", item.id, names.title || item.title,
+                      names.preferred_title || item.preferred_title, "",
+                      pseudo ? (["eng", "en"].includes(names.preferred_title_language)
+                        ? "English (pseudo-release)" : "Pseudo-release title") : "English",
+                      pseudo ? names.preferred_title_release_id : null);
+      }
       if (artist) bilingualName(artist, "artist", null, names.artist || item.artist,
                                  names.preferred_artist || item.preferred_artist);
     }
@@ -247,121 +265,6 @@ window.MetadataUI = (() => {
       }
     }
   }
-  const num = value => Number(value || 0).toLocaleString();
-  function bytes(value) {
-    const amount = Math.max(0, Number(value) || 0);
-    if (amount < 1024) return amount + " B";
-    if (amount < 1048576) return (amount / 1024).toFixed(1) + " KiB";
-    return (amount / 1048576).toFixed(1) + " MiB";
-  }
-  async function refreshPrefetchStatus() {
-    if (!active()) return;
-    const user = ui.user;
-    try {
-      const response = await fetch("/api/musicbrainz/approval-prefetch-status?user_id=" +
-        encodeURIComponent(user), {cache:"no-store"});
-      const data = await response.json();
-      if (!active() || user !== ui.user || !response.ok) return;
-      const done = Number(data.completed || 0), total = Number(data.total || 0);
-      const queued = Number(data.queued || 0), retrying = Number(data.deferred || 0);
-      $("approvalCacheCompleted").textContent = num(done) + " / " + num(total);
-      $("approvalCacheQueue").textContent = num(queued) + " / " + num(total);
-      $("approvalCacheDeferred").textContent = num(retrying);
-      $("approvalCacheSize").textContent = bytes(data.cache_bytes);
-      $("approvalCacheProgress").max = Math.max(1, total);
-      $("approvalCacheProgress").value = Math.min(done, Math.max(1, total));
-      const cooldown = Number(data.cooldown_seconds || 0);
-      $("approvalPrefetchStatus").textContent = !data.background
-        ? "Background prefetch is stopped. Saved names remain available."
-        : cooldown > 0
-          ? "MusicBrainz cooldown: prefetch paused for " + cooldown + "s. Approval remains usable."
-          : queued > 0
-            ? "Preparing metadata for " + num(data.waiting_tracks) + " waiting tracks in the background."
-            : "Background prefetch is caught up with currently discovered work.";
-      $("approvalCacheDetail").textContent =
-        num(data.cache_entries) + " saved entries (" + num(data.cached) + " fresh); " +
-        num(data.due) + " ready to fetch, " + num(data.running) + " running. " +
-        "Shared Catalogue database: " + bytes(data.catalogue_db_bytes) + " on disk. " +
-        "Total grows as new candidates are discovered.";
-    } catch (_) {
-      if (active()) $("approvalPrefetchStatus").textContent =
-        "Could not read cache progress. Approval is still available.";
-    }
-    if (active() && user === ui.user) {
-      clearTimeout(ui.prefetchTimer);
-      ui.prefetchTimer = setTimeout(refreshPrefetchStatus, 10000);
-    }
-  }
-  function cacheCleanupNotice(message, error = false) {
-    $("approvalCacheNotice").textContent = message;
-    $("approvalCacheNotice").className = error ? "error-text" : "hint";
-  }
-  function cancelCacheCleanup() {
-    $("approvalCacheConfirm").hidden = true;
-    if (!ui.cacheActionPending) cacheCleanupNotice();
-  }
-  async function prepareCacheCleanup() {
-    if (!active() || ui.cacheActionPending) return;
-    const user = ui.user; ui.cacheActionPending = true;
-    $("approvalCacheClean").disabled = true;
-    $("approvalCacheConfirm").hidden = true;
-    cacheCleanupNotice("Calculating which cache items are safe to remove…");
-    try {
-      const response = await fetch("/api/musicbrainz/approval-prefetch-clean-preview?user_id=" +
-        encodeURIComponent(user), {cache:"no-store"});
-      const plan = await response.json();
-      if (!response.ok || plan.error) throw Error(plan.error || "Cleanup preview unavailable");
-      if (!active() || user !== ui.user) return;
-      $("approvalCacheImpact").textContent =
-        "Remove " + num(plan.remove_entries) + " unused cached items (" +
-        bytes(plan.reclaim_bytes) + ") and " + num(plan.remove_queued) + " obsolete jobs. " +
-        "Keep " + num(plan.keep_entries) + " cached items and " +
-        num(plan.keep_queued) + " jobs, protecting " +
-        num(plan.protected_recordings) + " recordings, " +
-        num(plan.protected_artists) + " artists and " +
-        num(plan.protected_searches) +
-        " searches for downloaded or waiting music. Shared Catalogue data and audio are untouched.";
-      $("approvalCacheConfirm").hidden = false;
-      cacheCleanupNotice("Review the numbers and confirm, or cancel.");
-    } catch (error) {
-      if (active() && user === ui.user)
-        cacheCleanupNotice(error.message || String(error), true);
-    } finally {
-      ui.cacheActionPending = false;
-      $("approvalCacheClean").disabled = false;
-    }
-  }
-  async function performCacheCleanup() {
-    if (!active() || ui.cacheActionPending || $("approvalCacheConfirm").hidden) return;
-    const user = ui.user; ui.cacheActionPending = true;
-    $("approvalCacheConfirmButton").disabled = true;
-    $("approvalCacheClean").disabled = true;
-    cacheCleanupNotice("Removing unused cache data and obsolete jobs…");
-    try {
-      const response = await fetch("/api/musicbrainz/approval-prefetch-clean", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({user_id:user,confirmed:true}), cache:"no-store"
-      });
-      const result = await response.json();
-      if (!response.ok || result.error) throw Error(result.error || "Cleanup failed");
-      if (!active() || user !== ui.user) return;
-      $("approvalCacheConfirm").hidden = true;
-      ui.beetsNameCache.clear(); ui.artistNameCache.clear();
-      cacheCleanupNotice("Removed " + num(result.remove_entries) + " cached items (" +
-        bytes(result.reclaim_bytes) + ") and " + num(result.remove_queued) +
-        " queued jobs. Local and pending music metadata was retained.");
-      clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
-      void refreshPrefetchStatus();
-      if (ui.context) void hydrateApprovalNames(ui.context);
-    } catch (error) {
-      if (active() && user === ui.user)
-        cacheCleanupNotice(error.message || String(error), true);
-    } finally {
-      ui.cacheActionPending = false;
-      $("approvalCacheConfirmButton").disabled = false;
-      $("approvalCacheClean").disabled = false;
-    }
-  }
   function aliasNames(item) {
     const names = new Set();
     for (const value of [item, ...(item.artists || [])]) {
@@ -416,16 +319,27 @@ window.MetadataUI = (() => {
     const count = cached?.releases?.length || 0;
     if (cached?.page && count >= cached.total) return null;
     if (cached?.page >= 20) return null;
-    const label = cached?.request?.pending ? "Finding albums..." : cached?.error ? "Retry albums" : "More albums";
+    const label = cached?.request?.pending || cached?.waiting
+      ? "Finding albums..." : cached?.error ? "Retry albums" : "More albums";
     return control(label, () => loadReleases(mbid, (cached?.page || 0) + 1),
-      !cached?.request?.pending && ui.context.can_correct, group);
+      !cached?.request?.pending && !cached?.waiting && ui.context.can_correct, group);
   }
   function editionPicker(mbid, releases, group, selectRelease) {
     const detail = node("details");
     detail.className = "approval-edition-picker";
     const unique = albumOptions(releases);
     detail.append(node("summary", unique.length ? `Choose album edition (${unique.length})` : "Choose album edition"));
-    if (!unique.length) detail.append(node("p", "No release options cached yet. You may approve the recording without an album.", "hint"));
+    if (!unique.length) {
+      const cached = ui.releaseCache.get(mbid);
+      const note = cached?.waiting || cached?.request?.pending
+        ? "Checking release editions in the background… You can approve without selecting an album."
+        : cached?.error
+          ? "Release lookup delayed: " + cached.error + ". Retry albums, or approve without an album."
+          : cached?.page
+            ? "MusicBrainz returned no release editions for this recording. You may approve without an album."
+            : "Release editions have not loaded yet. You may approve without an album.";
+      detail.append(node("p", note, "hint"));
+    }
     for (const release of unique) {
       const option = node("div", null, "approval-edition-option");
       option.append(control(`Use ${editionLabel(release)}`, () => selectRelease(release.id), ui.context.can_correct, group));
@@ -456,7 +370,9 @@ window.MetadataUI = (() => {
       const score = node("td", item.match_score ?? item.similarity ?? "—", "approval-score");
       const album = node("td", item.album || "Album not selected", "approval-album");
       if (item.mbid) {
-        album.append(editionPicker(item.mbid, ui.releaseCache.get(item.mbid)?.releases, "base", id => useChoice(item, id)));
+        album.append(editionPicker(item.mbid,
+          ui.releaseCache.get(item.mbid)?.releases || item.releases,
+          "base", id => useChoice(item, id)));
         if (!ui.releaseCache.has(item.mbid)) loadReleases(item.mbid);
       }
       row.append(action, title, artist, album, durationCell, score);
@@ -477,7 +393,7 @@ window.MetadataUI = (() => {
   async function loadReleases(mbid, page = 1) {
     if (!mbid) return;
     const existing = ui.releaseCache.get(mbid);
-    if (existing?.request?.pending || (page === 1 && existing?.page)) return;
+    if (existing?.request?.pending || existing?.waiting || (page === 1 && existing?.page)) return;
     const context = ui.context, user = ui.user;
     const request = existing?.request || new IngestorUI.AsyncState(`releases:${mbid}`);
     const token = request.start();
@@ -489,8 +405,23 @@ window.MetadataUI = (() => {
       if (!response.ok) throw new Error(data.error || "Release lookup unavailable");
       if (context !== ui.context || user !== ui.user) return;
       request.finish(token);
-      ui.releaseCache.set(mbid, {...data, request,
-        releases: albumOptions([...(existing?.releases || []), ...data.releases])});
+      if (data.pending) {
+        ui.releaseCache.set(mbid, {...existing, request, waiting: true,
+          releases: existing?.releases || [], error: null});
+        clearTimeout(ui.releaseTimers.get(mbid));
+        ui.releaseTimers.set(mbid, setTimeout(() => {
+          ui.releaseTimers.delete(mbid);
+          if (context !== ui.context || user !== ui.user || !active()) return;
+          const latest = ui.releaseCache.get(mbid);
+          ui.releaseCache.set(mbid, {...latest, waiting: false});
+          void loadReleases(mbid, page);
+        }, Math.max(2500, (Number(data.retry_after) || 4) * 1000)));
+      } else {
+        clearTimeout(ui.releaseTimers.get(mbid));
+        ui.releaseTimers.delete(mbid);
+        ui.releaseCache.set(mbid, {...data, request, waiting: false,
+          releases: albumOptions([...(existing?.releases || []), ...data.releases])});
+      }
     } catch (error) {
       if (context !== ui.context || user !== ui.user) return;
       request.fail(token);
@@ -567,10 +498,9 @@ window.MetadataUI = (() => {
     for (const [field, id] of Object.entries(manualFields)) $(id).value = ui.manualOriginal[field];
     syncAudio(data); renderSuggestions(); renderDecisions(); updateButtons();
     void hydrateApprovalNames(data);
-    clearTimeout(ui.prefetchTimer);
-    void refreshPrefetchStatus();
   }
   async function loadTrack(track, initialPane = "") {
+    stopReleasePolling();
     stopNamePolling(); clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
     ui.searchItems = []; ui.searchEntity = "recording";
     invalidateSearch(); ui.contextController?.abort(); stopAudio();
@@ -601,7 +531,6 @@ window.MetadataUI = (() => {
     if (!state.user || flow.mutation.pending) return;
     invalidateSearch(); ui.contextController?.abort(); stopAudio(); ui.loadSerial += 1;
     ui.user = state.user; const user = ui.user, serial = ++ui.queueSerial;
-    clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
     ui.scope = scope(); const requestedScope = ui.scope;
     flow.queue.start(); flow.detail.finish(); ui.context = null; ui.track = null;
     ui.tracks = []; ui.index = -1; $("approvalPickerList").replaceChildren();
@@ -625,8 +554,7 @@ window.MetadataUI = (() => {
       } else {
         feedback(); $("approvalEmpty").hidden = false;
         $("approvalEmpty").textContent = data.excluded ? "No reviewable music in this view." : "No music in this view.";
-        void refreshPrefetchStatus();
-      }
+          }
     } catch (error) { if (valid()) { flow.queue.fail(); feedback(error.message || String(error), true); updateButtons(); } }
   }
   async function enter() {
@@ -826,9 +754,6 @@ window.MetadataUI = (() => {
     finally { if (valid()) { flow.mutation.finish(); updateButtons(); } }
   }
 
-  $("approvalCacheClean").addEventListener("click", prepareCacheCleanup);
-  $("approvalCacheConfirmButton").addEventListener("click", performCacheCleanup);
-  $("approvalCacheCancel").addEventListener("click", cancelCacheCleanup);
   $("approvalPrevious").addEventListener("click", () => navigate(ui.index - 1));
   $("approvalNext").addEventListener("click", () => navigate(ui.index + 1));
   $("approvalRefresh").addEventListener("click", () => refreshQueue(ui.tracks[ui.index]?.id));

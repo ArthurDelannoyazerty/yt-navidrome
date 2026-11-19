@@ -335,3 +335,57 @@ def test_artist_names_endpoint_fetches_verified_english_pseudonym(db, monkeypatc
     assert "/artist/" + ID in requests_seen[0].url
 
 
+
+
+def test_pseudo_release_lookup_extracts_exact_recording_track_title(db, monkeypatch):
+    """A pseudo-release track title is not a recording-level alias."""
+    release = "bedbc15a-1e5c-4aa6-ae90-24c0b78c1f3a"
+    recording = "b6173a0d-5ec7-44aa-bfe6-475d5fd5d9c2"
+    calls = []
+
+    def send(self, original, session, prepared, **kwargs):
+        calls.append(prepared)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({
+            "id": release, "status": "Pseudo-Release",
+            "text-representation": {"language": "eng", "script": "Latn"},
+            "media": [{"position": 1, "tracks": [
+                {"title": "Bound by Fate", "recording": {
+                    "id": recording, "title": "運命に囚われし者たち"}},
+                {"title": "Unrelated Song", "recording": {
+                    "id": "44444444-4444-4444-8444-444444444444", "title": "別の歌"}},
+                {"recording": {"id": RID, "title": "No translated track title"}},
+            ]}],
+        }).encode()
+        return response
+
+    monkeypatch.setattr(HttpPolicy, "send", send)
+    result = MusicBrainzSearch(db).request_pseudo_release_titles(release)
+    assert result == {
+        "id": release, "status": "pseudo-release",
+        "titles": [
+            {"recording_id": recording, "title": "Bound by Fate", "language": "eng"},
+            {"recording_id": "44444444-4444-4444-8444-444444444444",
+             "title": "Unrelated Song", "language": "eng"},
+        ],
+    }
+    assert len(calls) == 1
+    assert "/release/" + release in calls[0].url
+    assert "inc=recordings" in calls[0].url
+
+
+def test_official_release_is_not_mistaken_for_english_pseudo_tracklist(db, monkeypatch):
+    release = "bedbc15a-1e5c-4aa6-ae90-24c0b78c1f3a"
+    def send(self, original, session, prepared, **kwargs):
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({
+            "id": release, "status": "Official",
+            "media": [{"tracks": [{"title": "Bound by Fate",
+                                  "recording": {"id": RID}}]}],
+        }).encode()
+        return response
+    monkeypatch.setattr(HttpPolicy, "send", send)
+    value = MusicBrainzSearch(db).request_pseudo_release_titles(release)
+    assert value == {"id": release, "status": "not-pseudo", "titles": []}

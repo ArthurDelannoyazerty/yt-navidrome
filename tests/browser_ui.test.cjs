@@ -266,6 +266,16 @@ async function fixtureServer(t, data) {
           completed:120,queued:1800,total:1920,deferred:77,due:1723,running:0,
           cache_bytes:1048576,catalogue_db_bytes:8388608,cooldown_seconds:0,
         };
+      else if (url.pathname === "/api/musicbrainz/releases") {
+        const rid = url.searchParams.get("recording_id");
+        if (data.releasePending?.[rid]) {
+          response.statusCode = 202;
+          result = {pending:true,recording_id:rid,page:1,retry_after:1,
+            message:"Release editions queued"};
+        } else {
+          result = data.releaseResults?.[rid] || {recording_id:rid,releases:[],page:1,total:0};
+        }
+      }
       else if (url.pathname === "/api/musicbrainz/approval-prefetch-clean-preview")
         result = data.cleanPreview || {
           remove_entries:42,remove_queued:18,reclaim_bytes:81920,
@@ -996,7 +1006,8 @@ test("real browser: all twenty search candidates hydrate with one local request 
   assert.ok(requests.some(x=>x.includes(identity(19))),"The last candidate must be hydrated");
   assert.equal(data.reads.filter(x=>x.startsWith("/api/musicbrainz/recording-names?")||
                                      x.startsWith("/api/musicbrainz/artist-names?")).length,0);
-  assert.match(await chrome.evaluate("document.querySelector('#approvalCacheCompleted').textContent"),/120 \/ 1,920/);
+  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
+  await chrome.until("document.querySelector('#approvalCacheCompleted').textContent.includes('120 / 1,920')");
   assert.match(await chrome.evaluate("document.querySelector('#approvalPrefetchStatus').textContent"),/624 waiting tracks/);
   assert.deepEqual(chrome.errors,[]);
 });
@@ -1022,14 +1033,14 @@ test("real browser: queued searches resolve asynchronously without blocking Beet
 });
 
 
-test("real browser: Approval displays cache progress and confirms safe cleanup without affecting approval", {timeout:60000}, async t => {
+test("real browser: Catalogue cache synchronization shows progress and safe cleanup", {timeout:60000}, async t => {
   const chrome=await browser(t); if(!chrome)return;
   const data=fixtures(), origin=await fixtureServer(t,data);
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:1200,height:900,deviceScaleFactor:1,mobile:false});
   await chrome.send("Page.navigate",{url:origin});
   await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
   await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
-  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
   await chrome.until("document.querySelector('#approvalCacheQueue').textContent.includes('1,800 / 1,920')");
   assert.match(await chrome.evaluate("document.querySelector('#approvalCacheCompleted').textContent"),/120 \/ 1,920/);
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheDeferred').textContent"),"77");
@@ -1037,7 +1048,7 @@ test("real browser: Approval displays cache progress and confirms safe cleanup w
   assert.match(await chrome.evaluate("document.querySelector('#approvalCacheDetail').textContent"),/8\.0 MiB/);
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheProgress').value"),120);
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheProgress').max"),1920);
-  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions > tr button').disabled"),false);
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheClean').disabled"),false);
   await chrome.evaluate("document.querySelector('#approvalCacheClean').click()");
   await chrome.until("!document.querySelector('#approvalCacheConfirm').hidden");
   assert.match(await chrome.evaluate("document.querySelector('#approvalCacheImpact').textContent"),/42 unused cached items/);
@@ -1052,7 +1063,7 @@ test("real browser: Approval displays cache progress and confirms safe cleanup w
   assert.deepEqual(data.writes.find(x=>x.path==="/api/musicbrainz/approval-prefetch-clean").body,
     {user_id:"admin",confirmed:true});
   await chrome.until("document.querySelector('#approvalCacheQueue').textContent.includes('1,782 / 1,860')");
-  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions > tr button').disabled"),false);
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheClean').disabled"),false);
   assert.deepEqual(chrome.errors,[]);
 });
 
@@ -1068,10 +1079,58 @@ test("real browser: prefetch metrics remain available with no waiting approvals 
   await chrome.send("Page.navigate",{url:origin});
   await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
   await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
-  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
   await chrome.until("document.querySelector('#approvalCacheQueue').textContent.includes('30 / 42')");
   assert.match(await chrome.evaluate("document.querySelector('#approvalPrefetchStatus').textContent"),/paused for 52s/);
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheSize').textContent"),"2.0 MiB");
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheClean').disabled"),false);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: Japanese official title shows verified pseudo-release English line and delayed albums appear", {timeout:60000},async t=>{
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures();
+  const rid="b6173a0d-5ec7-44aa-bfe6-475d5fd5d9c2";
+  const release="bedbc15a-1e5c-4aa6-ae90-24c0b78c1f3a";
+  data.tracks[0].title="運命に囚われし者たち";
+  data.tracks[0].choices=[{...data.tracks[0].choices[0],
+    mbid:rid,title:"運命に囚われし者たち",artist:"Yasunori Mitsuda & Millennial Fair"}];
+  data.recordingNames={[rid]:{
+    id:rid,title:"運命に囚われし者たち",preferred_title:"Bound by Fate",
+    preferred_title_source:"pseudo_release",preferred_title_release_id:release,
+    preferred_title_language:"eng",artist:"Yasunori Mitsuda & Millennial Fair",
+  }};
+  data.searchResults=[{id:rid,title:"運命に囚われし者たち",
+    artist:"Yasunori Mitsuda & Millennial Fair",length_ms:212000,releases:[]}];
+  data.releasePending={[rid]:true};
+  data.releaseResults={[rid]:{
+    recording_id:rid,releases:[
+      {id:release,title:"CHRONO CROSS 20th Anniversary Live Tour",
+        status:"Pseudo-Release",date:"2020-06-24"},
+    ],page:1,total:1,
+  }};
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias')");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name a').textContent"),
+    "運命に囚われし者たち");
+  assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias').textContent"),
+    /English \(pseudo-release\): Bound by Fate/);
+  assert.ok((await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias a').href")).endsWith("/release/"+release));
+  await chrome.until("document.querySelector('#mbResults .approval-search-recording-name .approval-english-alias')");
+  assert.match(await chrome.evaluate("document.querySelector('#mbResults .approval-search-recording-name .approval-english-alias').textContent"),
+    /English \(pseudo-release\): Bound by Fate/);
+  await chrome.until("document.querySelector('#metadataSuggestions .approval-edition-picker p')?.textContent.includes('background')");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-edition-picker p').textContent.includes('No release options cached yet')"),false);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions button').disabled"),false);
+  data.releasePending[rid]=false;
+  await chrome.until("document.querySelector('#metadataSuggestions .approval-edition-picker summary')?.textContent.includes('(1)')");
+  assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-edition-picker').textContent"),/CHRONO CROSS 20th Anniversary/);
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions button').disabled"),false);
+  assert.ok(data.reads.filter(s=>s.startsWith("/api/musicbrainz/releases?")&&s.includes(rid)).length>=2);
   assert.deepEqual(chrome.errors,[]);
 });

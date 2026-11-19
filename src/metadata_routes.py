@@ -230,6 +230,19 @@ def install_metadata_routes(app, store):
                        page: int = Query(1, ge=1, le=20)):
         store.require_user(user_id)
         try:
+            prefetch = app.state.approval_prefetch
+            # Always serve persistent saved editions, even when background
+            # workers are disabled (restart, maintenance, tests or shutdown).
+            cached = await asyncio.to_thread(prefetch.cached_releases, recording_id, page)
+            if cached is not None:
+                return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+            if prefetch.workers_enabled:
+                await asyncio.to_thread(
+                    prefetch.enqueue_releases, [recording_id], page=page, priority=0)
+                return JSONResponse(
+                    {"pending": True, "recording_id": recording_id, "page": page,
+                     "retry_after": 4, "message": "Release editions are being fetched in background."},
+                    status_code=202, headers={"Cache-Control": "no-store", "Retry-After": "4"})
             result = await searcher.releases(recording_id, page)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except ApiDeferred as exc:

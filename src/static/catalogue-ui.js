@@ -2,7 +2,8 @@
 "use strict";
 window.CatalogueUI = (() => {
   const byId = id => document.getElementById(id);
-  const ui = { user: null, detail: null, results: [], recommendations: [], preview: null, busy: false, serial: 0 };
+  const ui = { user: null, detail: null, results: [], recommendations: [], preview: null,
+    busy: false, serial: 0, prefetchTimer: null, cacheActionPending: false };
   const current = (user, serial) => user === state.user && serial === ui.serial;
   const element = (tag, text, cls) => {
     const e = document.createElement(tag);
@@ -21,7 +22,12 @@ window.CatalogueUI = (() => {
     target.textContent = value;
     target.className = error ? "error-text" : "hint";
   }
+  function leave() {
+    clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
+    byId("approvalCacheConfirm").hidden = true;
+  }
   function reset() {
+    leave();
     ui.user = null; ui.detail = null; ui.results = []; ui.recommendations = [];
     ui.preview = null; ui.serial++;
     for (const id of ["catalogueResults", "catalogueRecommendations", "cataloguePreview", "catalogueHistory"]) byId(id).replaceChildren();
@@ -29,6 +35,119 @@ window.CatalogueUI = (() => {
     byId("catalogueDetail").replaceChildren(element("p", "Select an entry on the left to browse its discography or tracklist.", "hint"));
     for (const id of ["catalogueStatus", "catalogueAlbumStatus", "catalogueProgress"]) byId(id).textContent = "";
     byId("catalogueSources").replaceChildren();
+  }
+  const num = value => Number(value || 0).toLocaleString();
+  function bytes(value) {
+    const amount = Math.max(0, Number(value) || 0);
+    if (amount < 1024) return amount + " B";
+    if (amount < 1048576) return (amount / 1024).toFixed(1) + " KiB";
+    return (amount / 1048576).toFixed(1) + " MiB";
+  }
+  async function refreshPrefetchStatus() {
+    if (!(ui.user && state.tab === "catalogue")) return;
+    const user = ui.user;
+    try {
+      const response = await fetch("/api/musicbrainz/approval-prefetch-status?user_id=" +
+        encodeURIComponent(user), {cache:"no-store"});
+      const data = await response.json();
+      if (!(ui.user && state.tab === "catalogue") || user !== ui.user || !response.ok) return;
+      const done = Number(data.completed || 0), total = Number(data.total || 0);
+      const queued = Number(data.queued || 0), retrying = Number(data.deferred || 0);
+      byId("approvalCacheCompleted").textContent = num(done) + " / " + num(total);
+      byId("approvalCacheQueue").textContent = num(queued) + " / " + num(total);
+      byId("approvalCacheDeferred").textContent = num(retrying);
+      byId("approvalCacheSize").textContent = bytes(data.cache_bytes);
+      byId("approvalCacheProgress").max = Math.max(1, total);
+      byId("approvalCacheProgress").value = Math.min(done, Math.max(1, total));
+      const cooldown = Number(data.cooldown_seconds || 0);
+      byId("approvalPrefetchStatus").textContent = !data.background
+        ? "Background prefetch is stopped. Saved names remain available."
+        : cooldown > 0
+          ? "MusicBrainz cooldown: prefetch paused for " + cooldown + "s. Approval remains usable."
+          : queued > 0
+            ? "Preparing metadata for " + num(data.waiting_tracks) + " waiting tracks in the background."
+            : "Background prefetch is caught up with currently discovered work.";
+      byId("approvalCacheDetail").textContent =
+        num(data.cache_entries) + " saved entries (" + num(data.cached) + " fresh); " +
+        num(data.due) + " ready to fetch, " + num(data.running) + " running. " +
+        "Shared Catalogue database: " + bytes(data.catalogue_db_bytes) + " on disk. " +
+        "Total grows as new candidates are discovered.";
+    } catch (_) {
+      if ((ui.user && state.tab === "catalogue")) byId("approvalPrefetchStatus").textContent =
+        "Could not read cache progress. Approval is still available.";
+    }
+    if ((ui.user && state.tab === "catalogue") && user === ui.user) {
+      clearTimeout(ui.prefetchTimer);
+      ui.prefetchTimer = setTimeout(refreshPrefetchStatus, 10000);
+    }
+  }
+  function cacheCleanupNotice(message, error = false) {
+    byId("approvalCacheNotice").textContent = message;
+    byId("approvalCacheNotice").className = error ? "error-text" : "hint";
+  }
+  function cancelCacheCleanup() {
+    byId("approvalCacheConfirm").hidden = true;
+    if (!ui.cacheActionPending) cacheCleanupNotice();
+  }
+  async function prepareCacheCleanup() {
+    if (!(ui.user && state.tab === "catalogue") || ui.cacheActionPending) return;
+    const user = ui.user; ui.cacheActionPending = true;
+    byId("approvalCacheClean").disabled = true;
+    byId("approvalCacheConfirm").hidden = true;
+    cacheCleanupNotice("Calculating which cache items are safe to remove…");
+    try {
+      const response = await fetch("/api/musicbrainz/approval-prefetch-clean-preview?user_id=" +
+        encodeURIComponent(user), {cache:"no-store"});
+      const plan = await response.json();
+      if (!response.ok || plan.error) throw Error(plan.error || "Cleanup preview unavailable");
+      if (!(ui.user && state.tab === "catalogue") || user !== ui.user) return;
+      byId("approvalCacheImpact").textContent =
+        "Remove " + num(plan.remove_entries) + " unused cached items (" +
+        bytes(plan.reclaim_bytes) + ") and " + num(plan.remove_queued) + " obsolete jobs. " +
+        "Keep " + num(plan.keep_entries) + " cached items and " +
+        num(plan.keep_queued) + " jobs, protecting " +
+        num(plan.protected_recordings) + " recordings, " +
+        num(plan.protected_artists) + " artists and " +
+        num(plan.protected_searches) +
+        " searches for downloaded or waiting music. Shared Catalogue data and audio are untouched.";
+      byId("approvalCacheConfirm").hidden = false;
+      cacheCleanupNotice("Review the numbers and confirm, or cancel.");
+    } catch (error) {
+      if ((ui.user && state.tab === "catalogue") && user === ui.user)
+        cacheCleanupNotice(error.message || String(error), true);
+    } finally {
+      ui.cacheActionPending = false;
+      byId("approvalCacheClean").disabled = false;
+    }
+  }
+  async function performCacheCleanup() {
+    if (!(ui.user && state.tab === "catalogue") || ui.cacheActionPending || byId("approvalCacheConfirm").hidden) return;
+    const user = ui.user; ui.cacheActionPending = true;
+    byId("approvalCacheConfirmButton").disabled = true;
+    byId("approvalCacheClean").disabled = true;
+    cacheCleanupNotice("Removing unused cache data and obsolete jobs…");
+    try {
+      const response = await fetch("/api/musicbrainz/approval-prefetch-clean", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({user_id:user,confirmed:true}), cache:"no-store"
+      });
+      const result = await response.json();
+      if (!response.ok || result.error) throw Error(result.error || "Cleanup failed");
+      if (!(ui.user && state.tab === "catalogue") || user !== ui.user) return;
+      byId("approvalCacheConfirm").hidden = true;
+      cacheCleanupNotice("Removed " + num(result.remove_entries) + " cached items (" +
+        bytes(result.reclaim_bytes) + ") and " + num(result.remove_queued) +
+        " queued jobs. Local and pending music metadata was retained.");
+      clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
+      void refreshPrefetchStatus();
+    } catch (error) {
+      if ((ui.user && state.tab === "catalogue") && user === ui.user)
+        cacheCleanupNotice(error.message || String(error), true);
+    } finally {
+      ui.cacheActionPending = false;
+      byId("approvalCacheConfirmButton").disabled = false;
+      byId("approvalCacheClean").disabled = false;
+    }
   }
   function selectedSources() {
     return [...byId("catalogueSources").selectedOptions].map(option => option.value);
@@ -38,9 +157,13 @@ window.CatalogueUI = (() => {
   }
   async function enter() {
     if (!state.user) return;
-    if (ui.user === state.user) return;
+    if (ui.user === state.user) {
+      void refreshPrefetchStatus();
+      return;
+    }
     reset();
     ui.user = state.user;
+    void refreshPrefetchStatus();
     const user = ui.user, serial = ui.serial;
     try {
       const [sources, progress, history] = await Promise.all([
@@ -271,6 +394,9 @@ window.CatalogueUI = (() => {
     byId("catalogueResults").style.maxHeight = `${value}px`;
     byId("catalogueResultsHeightValue").textContent = `${value} px`;
   }
+  byId("approvalCacheClean").addEventListener("click", prepareCacheCleanup);
+  byId("approvalCacheConfirmButton").addEventListener("click", performCacheCleanup);
+  byId("approvalCacheCancel").addEventListener("click", cancelCacheCleanup);
   byId("catalogueResultsHeight").addEventListener("input", setResultsHeight);
   setResultsHeight();
   byId("catalogueLocalOnly").addEventListener("change", () => {
@@ -292,5 +418,5 @@ window.CatalogueUI = (() => {
       await refreshProgress();
     } catch (error) { message(error.message, true); }
   });
-  return {enter, reset, openEntity, refreshProgress};
+  return {enter, leave, reset, openEntity, refreshProgress};
 })();

@@ -44,7 +44,12 @@ def test_approval_reuses_catalogue_and_persists_verified_names_across_restarts(d
         prefetch.workers_enabled = True
         assert client.get("/api/musicbrainz/approval-names", params=params).json()["remaining"] == 0
         with catalogue.db() as con:
-            assert not list(con.execute("SELECT * FROM approval_prefetch_jobs"))
+            assert not list(con.execute(
+                "SELECT * FROM approval_prefetch_jobs WHERE kind IN ('recording','artist')")), (
+                "Complete Catalogue names should not be refetched")
+            assert con.execute(
+                "SELECT COUNT(*) FROM approval_prefetch_jobs WHERE kind='releases'"
+            ).fetchone()[0] == 1, "Album editions are independently prefetched"
         prefetch.workers_enabled = False
 
         prefetch._store("recording", RECORDING, {
@@ -88,14 +93,15 @@ def test_library_seed_queues_every_beets_candidate_and_one_exact_search(db, trac
         prefetch = app.state.approval_prefetch
         result = prefetch.seed_pending_approvals()
         assert result["tracks"] == 1
-        assert result["new_jobs"] == 3
+        assert result["new_jobs"] == 5
         jobs = app.state.catalogue
         with jobs.db() as con:
             pending = [dict(row) for row in con.execute(
                 "SELECT kind,cache_key,state FROM approval_prefetch_jobs ORDER BY requested_at"
             )]
-        assert [job["kind"] for job in pending] == ["recording", "recording", "search"]
-        assert {item["cache_key"] for item in pending[:2]} == {RECORDING, OTHER}
+        assert [job["kind"] for job in pending] == ["recording", "releases", "recording", "releases", "search"]
+        assert {item["cache_key"] for item in pending if item["kind"] == "recording"} == {RECORDING, OTHER}
+        assert {item["cache_key"] for item in pending if item["kind"] == "releases"} == {RECORDING + ":1", OTHER + ":1"}
         assert prefetch.seed_pending_approvals()["new_jobs"] == 0
         claimed = prefetch.claim()
         assert claimed["state"] == "PENDING"
@@ -419,3 +425,203 @@ def test_provider_cooldown_pauses_the_entire_prefetch_worker(db):
         asyncio.run(run())
         assert seen == [], "No second provider request must start during a cooldown"
         assert prefetch.status()["queued"] == 2
+
+
+JAPANESE_RECORDING = "b6173a0d-5ec7-44aa-bfe6-475d5fd5d9c2"
+JAPANESE_ALIAS_RECORDING = "cc9a68ea-f7ba-41c6-9162-ad4aba7ea270"
+PSEUDO_RELEASE = "bedbc15a-1e5c-4aa6-ae90-24c0b78c1f3a"
+OFFICIAL_RELEASE = "99999999-9999-4999-8999-999999999999"
+JAPANESE_TITLE = "運命に囚われし者たち"
+
+
+def test_exact_pseudo_release_name_is_persisted_below_native_recording(db, monkeypatch):
+    app = create_app(db, start_workers=False)
+    with TestClient(app) as client:
+        prefetch = app.state.approval_prefetch
+        prefetch.workers_enabled = True
+        prefetch._store("recording", JAPANESE_RECORDING, {
+            "id": JAPANESE_RECORDING, "title": JAPANESE_TITLE,
+            "preferred_title": None, "artist": "Yasunori Mitsuda & Millennial Fair",
+            "artist_credits": [],
+        }, NAME_TTL)
+        first = prefetch.names_batch([JAPANESE_RECORDING])
+        assert first["recordings"][JAPANESE_RECORDING]["preferred_title"] is None
+        assert first["pending_recordings"] == [JAPANESE_RECORDING]
+        seen = []
+        def fake_releases(rid, page):
+            seen.append(("release-list", rid, page))
+            return {"recording_id": rid, "page": page, "total": 2,
+                    "releases": [
+                        {"id": OFFICIAL_RELEASE, "title": "Official CD", "status": "Official"},
+                        {"id": PSEUDO_RELEASE, "title": "Live English tracklist",
+                         "status": "Pseudo-Release", "date": "2020-06-24"},
+                    ]}
+        def fake_pseudo(rid):
+            seen.append(("pseudo-release", rid))
+            return {"id": rid, "status": "pseudo-release",
+                    "titles": [{"recording_id": JAPANESE_RECORDING,
+                                "title": "Bound by Fate", "language": "eng"}]}
+        monkeypatch.setattr(app.state.musicbrainz_search, "request_releases", fake_releases)
+        monkeypatch.setattr(app.state.musicbrainz_search, "request_pseudo_release_titles", fake_pseudo)
+        job = prefetch.claim()
+        assert job["kind"] == "releases"
+        asyncio.run(prefetch.process(job))
+        waiting = prefetch.names_batch([JAPANESE_RECORDING])
+        assert waiting["pending_recordings"] == [JAPANESE_RECORDING], (
+            "The UI should keep checking until pseudo-release titles arrive")
+        pseudo_job = prefetch.claim()
+        assert pseudo_job["kind"] == "pseudo_release" and pseudo_job["cache_key"] == PSEUDO_RELEASE
+        asyncio.run(prefetch.process(pseudo_job))
+        data = client.get("/api/musicbrainz/approval-names",
+                          params={"user_id": "admin", "recording_ids": JAPANESE_RECORDING}).json()
+        resolved = data["recordings"][JAPANESE_RECORDING]
+        assert resolved["title"] == JAPANESE_TITLE
+        assert resolved["preferred_title"] == "Bound by Fate"
+        assert resolved["preferred_title_source"] == "pseudo_release"
+        assert resolved["preferred_title_release_id"] == PSEUDO_RELEASE
+        assert resolved["preferred_title_language"] == "eng"
+        assert data["pending_recordings"] == []
+        assert seen == [("release-list", JAPANESE_RECORDING, 1),
+                        ("pseudo-release", PSEUDO_RELEASE)]
+        assert client.get("/api/musicbrainz/releases", params={
+            "user_id": "admin", "recording_id": JAPANESE_RECORDING}).json()["releases"][1]["id"] == PSEUDO_RELEASE
+
+    # Neither the English title nor the album lookup should need new network
+    # requests after restart.
+    app2 = create_app(db, start_workers=False)
+    with TestClient(app2) as client:
+        data = client.get("/api/musicbrainz/approval-names", params={
+            "user_id": "admin", "recording_ids": JAPANESE_RECORDING}).json()
+        assert data["recordings"][JAPANESE_RECORDING]["preferred_title"] == "Bound by Fate"
+        assert client.get("/api/musicbrainz/releases", params={
+            "user_id": "admin", "recording_id": JAPANESE_RECORDING}).json()["total"] == 2
+
+
+def test_recording_level_alias_has_priority_over_other_pseudo_release_titles(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch = app.state.approval_prefetch
+        prefetch._store("recording", JAPANESE_ALIAS_RECORDING, {
+            "id": JAPANESE_ALIAS_RECORDING, "title": JAPANESE_TITLE,
+            "preferred_title": "Bound by Fate", "artist": "光田康典",
+            "artist_credits": [],
+        }, NAME_TTL)
+        prefetch._store("pseudo_title", JAPANESE_ALIAS_RECORDING, {
+            "title": "Different Pseudo-release Edition",
+            "release_id": PSEUDO_RELEASE, "language": "eng",
+            "source": "pseudo_release",
+        }, NAME_TTL)
+        label = prefetch.names_batch([JAPANESE_ALIAS_RECORDING])["recordings"][JAPANESE_ALIAS_RECORDING]
+        assert label["title"] == JAPANESE_TITLE
+        assert label["preferred_title"] == "Bound by Fate"
+        assert label["preferred_title_source"] == "recording_alias"
+
+
+def test_album_edition_list_is_queued_cached_and_stale_revalidated(db, monkeypatch):
+    app = create_app(db, start_workers=False)
+    with TestClient(app) as client:
+        prefetch = app.state.approval_prefetch
+        prefetch.workers_enabled = True
+        args = {"user_id": "admin", "recording_id": JAPANESE_RECORDING}
+        first = client.get("/api/musicbrainz/releases", params=args)
+        assert first.status_code == 202 and first.json()["pending"]
+        with app.state.catalogue.db() as con:
+            assert con.execute("SELECT 1 FROM approval_prefetch_jobs WHERE kind='releases'").fetchone()
+        seen = []
+        def fake_releases(recording, page):
+            seen.append((recording, page))
+            return {"recording_id": recording, "page": page, "total": 1,
+                    "releases": [{"id": OFFICIAL_RELEASE, "title": "Chrono Cross Orchestral Arrangement",
+                                  "status": "Official"}]}
+        monkeypatch.setattr(app.state.musicbrainz_search, "request_releases", fake_releases)
+        asyncio.run(prefetch.process(prefetch.claim()))
+        done = client.get("/api/musicbrainz/releases", params=args)
+        assert done.status_code == 200
+        assert done.json()["releases"][0]["id"] == OFFICIAL_RELEASE
+        assert done.json()["cache_status"] == "fresh"
+        assert len(seen) == 1
+        assert client.get("/api/musicbrainz/releases", params=args).status_code == 200
+        assert len(seen) == 1
+        with app.state.catalogue.db() as con:
+            con.execute("UPDATE approval_prefetch_cache SET expires_at=0 WHERE kind='releases'")
+        stale = client.get("/api/musicbrainz/releases", params=args)
+        assert stale.status_code == 200 and stale.json()["cache_status"] == "stale"
+        with app.state.catalogue.db() as con:
+            assert con.execute("SELECT 1 FROM approval_prefetch_jobs WHERE kind='releases'").fetchone()
+
+
+def test_pseudo_title_can_be_reused_from_existing_catalogue_release_tracks(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch, catalogue = app.state.approval_prefetch, app.state.catalogue
+        with catalogue.db() as con:
+            catalogue.ingest(con, "release", {
+                "id": PSEUDO_RELEASE, "title": "CHRONO CROSS live",
+                "status": "Pseudo-Release", "text-representation": {"language": "eng"},
+            })
+            catalogue._store_release_tracks(con, {"id": PSEUDO_RELEASE, "media": [{
+                "position": 1,
+                "tracks": [{"position": 18, "id": str(uuid.uuid4()),
+                            "title": "Bound by Fate",
+                            "recording": {"id": JAPANESE_RECORDING,
+                                          "title": JAPANESE_TITLE}}],
+            }]})
+            catalogue.ingest(con, "recording", {
+                "id": JAPANESE_RECORDING, "title": JAPANESE_TITLE,
+                "artist-credit": [], "aliases": [],
+            })
+        label = prefetch.names_batch([JAPANESE_RECORDING])["recordings"][JAPANESE_RECORDING]
+        assert label["preferred_title"] == "Bound by Fate"
+        assert label["preferred_title_source"] == "pseudo_release"
+        assert label["preferred_title_release_id"] == PSEUDO_RELEASE
+
+
+def test_selective_cleanup_retains_new_album_and_pseudo_title_cache_for_local_music(db, track):
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch = app.state.approval_prefetch
+        db.execute("UPDATE tracks SET mbid=? WHERE id=?", (JAPANESE_RECORDING, track["id"]))
+        prefetch._store("recording", JAPANESE_RECORDING, {
+            "id": JAPANESE_RECORDING, "title": JAPANESE_TITLE, "artist_credits": [],
+        }, NAME_TTL)
+        prefetch._store("releases", JAPANESE_RECORDING + ":1", {
+            "recording_id": JAPANESE_RECORDING, "page": 1, "total": 1,
+            "releases": [{"id": PSEUDO_RELEASE, "status": "Pseudo-Release"}],
+        }, NAME_TTL)
+        prefetch._store("pseudo_release", PSEUDO_RELEASE, {
+            "id": PSEUDO_RELEASE, "titles": [
+                {"recording_id": JAPANESE_RECORDING, "title": "Bound by Fate"}],
+        }, NAME_TTL)
+        prefetch._store("pseudo_title", JAPANESE_RECORDING, {
+            "title": "Bound by Fate", "release_id": PSEUDO_RELEASE, "language": "eng",
+        }, NAME_TTL)
+        orphan = str(uuid.uuid4())
+        prefetch._store("releases", orphan + ":1", {
+            "recording_id": orphan, "page": 1, "releases": [],
+        }, NAME_TTL)
+        prefetch.cleanup_unused()
+        with app.state.catalogue.db() as con:
+            kinds = {(x["kind"], x["cache_key"]) for x in con.execute(
+                "SELECT kind,cache_key FROM approval_prefetch_cache")}
+        assert ("releases", JAPANESE_RECORDING + ":1") in kinds
+        assert ("pseudo_release", PSEUDO_RELEASE) in kinds
+        assert ("pseudo_title", JAPANESE_RECORDING) in kinds
+        assert ("releases", orphan + ":1") not in kinds
+
+
+def test_existing_cached_searches_backfill_all_release_metadata_jobs(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch = app.state.approval_prefetch
+        _create_waiting_review(db, title="Japanese Pending Track", artist="Composer")
+        ids = [str(uuid.uuid4()) for _ in range(20)]
+        key = search_key("recording", "Japanese Pending Track", "Composer", None, 1)
+        prefetch._store("search", key, {
+            "entity": "recording", "page": 1, "total": 20,
+            "items": [{"id": rid, "title": JAPANESE_TITLE} for rid in ids],
+        }, SEARCH_TTL)
+        prefetch.seed_pending_approvals()
+        with app.state.catalogue.db() as con:
+            release_keys = {row["cache_key"] for row in con.execute(
+                "SELECT cache_key FROM approval_prefetch_jobs WHERE kind='releases'")}
+        assert {rid + ":1" for rid in ids}.issubset(release_keys)

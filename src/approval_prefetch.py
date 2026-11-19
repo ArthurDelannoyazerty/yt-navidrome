@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from datetime import UTC, datetime
@@ -180,6 +181,37 @@ class ApprovalPrefetch:
                     jobs.append(self._job(kind, identity, {"id": identity}, priority))
         return self._enqueue_rows(jobs)
 
+    def enqueue_releases(self, recordings=(), *, page=1, priority=12):
+        if type(page) is not int or not 1 <= page <= 20:
+            raise ValueError("Release page must be between 1 and 20")
+        jobs = []
+        for identity in dict.fromkeys(filter(None, (valid_id(v) for v in recordings))):
+            jobs.append(self._job("releases", f"{identity}:{page}",
+                                  {"id": identity, "page": page}, priority))
+        return self._enqueue_rows(jobs)
+
+    def cached_releases(self, recording_id, page=1):
+        identity = valid_id(recording_id)
+        if identity is None or type(page) is not int or not 1 <= page <= 20:
+            raise ValueError("Invalid MusicBrainz recording or release page")
+        key = f"{identity}:{page}"
+        with self.catalogue.db() as con:
+            value, fresh = self._cached(con, "releases", key)
+        if value is None:
+            return None
+        if not fresh and self.workers_enabled:
+            self.enqueue_releases([identity], page=page, priority=1)
+        return {**value, "cache_status": "fresh" if fresh else "stale"}
+
+    def enqueue_pseudo_releases(self, releases, *, priority=15):
+        jobs = []
+        for release in releases:
+            if (str(release.get("status") or "").casefold() == "pseudo-release"
+                    and (identity := valid_id(release.get("id")))):
+                jobs.append(self._job("pseudo_release", identity,
+                                      {"id": identity}, priority))
+        return self._enqueue_rows(jobs)
+
     def enqueue_search(self, entity, title, artist, artist_id=None, page=1, *, priority=0):
         # Always enforce the same search validation and no broader Lucene input
         # than the normal interactive endpoint.
@@ -233,7 +265,8 @@ class ApprovalPrefetch:
                 recordings.append(item.get("id"))
                 artists.extend(credit.get("id") for credit in item.get("artists") or []
                                if isinstance(credit, dict))
-        return self.enqueue_names(recordings, artists, priority=priority)
+        names = self.enqueue_names(recordings, artists, priority=priority)
+        return names + self.enqueue_releases(recordings, priority=priority + 12)
 
     def _store(self, kind, key, payload, ttl, *, expected_job=False):
         now = time.time()
@@ -268,6 +301,72 @@ class ApprovalPrefetch:
         return {"id": identity, "name": native,
                 "preferred_name": english if english != native else None}, fresh or full_catalogue
 
+    @staticmethod
+    def _valid_pseudo_title(title, canonical):
+        """Do not mistake romanization or an unchanged track name for an English alias."""
+        title = str(title or "").strip()[:1000]
+        return (bool(re.search(r"[A-Za-z]", title))
+                and not bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", title))
+                and title.casefold() != str(canonical or "").casefold())
+
+    def _pseudo_title(self, con, identity, canonical):
+        value, _ = self._cached(con, "pseudo_title", identity)
+        if (value and self._valid_pseudo_title(value.get("title"), canonical)
+                and valid_id(value.get("release_id"))):
+            return value
+        # Reuse exact recording/track/release relationships already indexed by
+        # Catalogue before doing any new remote lookups.
+        rows = con.execute(
+            """SELECT t.title,t.release_id,r.data FROM release_tracks AS t
+               JOIN entities AS r ON r.kind='release' AND r.id=t.release_id
+               WHERE t.recording_id=? ORDER BY t.release_id LIMIT 100""",
+            (identity,),
+        ).fetchall()
+        for row in rows:
+            try:
+                release = json.loads(row["data"])
+                if str(release.get("status") or "").casefold() != "pseudo-release":
+                    continue
+                if not self._valid_pseudo_title(row["title"], canonical):
+                    continue
+                lang = str((release.get("text-representation") or {}).get("language") or "").lower()
+                return {"title": row["title"], "release_id": row["release_id"],
+                        "language": lang, "source": "pseudo_release"}
+            except (ValueError, TypeError):
+                continue
+        return None
+
+    def _pending_pseudo(self, con, identity):
+        """Keep the UI polling while a verified alternative track title is loading."""
+        page = con.execute(
+            "SELECT 1 FROM approval_prefetch_jobs WHERE kind='releases' AND cache_key LIKE ? LIMIT 1",
+            (identity + ":%",),
+        ).fetchone()
+        if page:
+            return True
+        pages = con.execute(
+            "SELECT payload FROM approval_prefetch_cache "
+            "WHERE kind='releases' AND cache_key LIKE ?", (identity + ":%",)
+        )
+        for item in pages:
+            try:
+                releases = json.loads(item["payload"]).get("releases") or []
+            except (TypeError, ValueError):
+                continue
+            pseudo = [valid_id(r.get("id")) for r in releases
+                      if str(r.get("status") or "").casefold() == "pseudo-release"]
+            if not pseudo:
+                continue
+            keys = [rid for rid in pseudo if rid]
+            for batch in self._chunks(keys):
+                marks = ",".join("?" for _ in batch)
+                if con.execute(
+                    "SELECT 1 FROM approval_prefetch_jobs "
+                    f"WHERE kind='pseudo_release' AND cache_key IN ({marks}) LIMIT 1", batch
+                ).fetchone():
+                    return True
+        return False
+
     def _recording(self, con, identity):
         exact, fresh = self._cached(con, "recording", identity)
         full_catalogue = self._catalogue_complete(con, "recording", identity)
@@ -281,6 +380,15 @@ class ApprovalPrefetch:
             # spinner or requeue an ID MusicBrainz explicitly cannot resolve.
             return None, fresh if unavailable else full_catalogue, []
         item = dict(item)
+        native = item.get("title") or ""
+        has_alias = bool(item.get("preferred_title"))
+        if not has_alias and (pseudo := self._pseudo_title(con, identity, native)):
+            item["preferred_title"] = pseudo["title"]
+            item["preferred_title_source"] = "pseudo_release"
+            item["preferred_title_release_id"] = pseudo["release_id"]
+            item["preferred_title_language"] = pseudo.get("language") or ""
+        elif has_alias:
+            item["preferred_title_source"] = "recording_alias"
         credits = item.get("artist_credits") or []
         english = []
         has_alias = False
@@ -295,8 +403,12 @@ class ApprovalPrefetch:
             english.append((alias or piece.get("name") or "") + str(piece.get("joinphrase") or ""))
         item["preferred_artist"] = "".join(english)[:1000] if has_alias else None
         item.pop("artist_credits", None)  # Internal wiring, not additional public metadata.
+        title_wait = (not item.get("preferred_title") and
+                      bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", native)) and
+                      self._pending_pseudo(con, identity))
         return (item,
-                ((fresh or full_catalogue) and not need_artists) or (unavailable and fresh),
+                (((fresh or full_catalogue) and not need_artists and not title_wait)
+                 or (unavailable and fresh)),
                 need_artists)
 
     def names_batch(self, recordings=(), artists=()):
@@ -307,6 +419,10 @@ class ApprovalPrefetch:
             raise ValueError("Too many MusicBrainz IDs in a single batch")
         result_r, result_a, pending_r, pending_a = {}, {}, [], []
         missing_r, missing_a = [], list(aids)
+        # Schedule first so the same read sees a pending release lookup and
+        # keeps polling until the possible pseudo-release English title arrives.
+        if self.workers_enabled:
+            self.enqueue_releases(rids, priority=8)
         with self.catalogue.db() as con:
             for identity in rids:
                 label, complete, credited = self._recording(con, identity)
@@ -332,10 +448,10 @@ class ApprovalPrefetch:
                 "remaining": len(pending_r) + len(pending_a)}
 
     def schedule_context(self, context, *, priority=0):
-        self.enqueue_names(
-            [item.get("mbid") for item in context.get("choices") or [] if isinstance(item, dict)],
-            priority=priority,
-        )
+        identities = [item.get("mbid") for item in context.get("choices") or []
+                      if isinstance(item, dict)]
+        self.enqueue_names(identities, priority=priority)
+        self.enqueue_releases(identities, priority=priority + 6)
         hints = context.get("search_hints") or {}
         try:
             return self.enqueue_search("recording", hints.get("title") or "",
@@ -377,6 +493,8 @@ class ApprovalPrefetch:
                 for item in choices:
                     if isinstance(item, dict) and (mid := valid_id(item.get("mbid"))):
                         seeds.append(self._job("recording", mid, {"id": mid}, 20))
+                        seeds.append(self._job("releases", f"{mid}:1",
+                                               {"id": mid, "page": 1}, 32))
                 if not row["origin_id"]:
                     continue
                 origin = {"id": row["origin_id"], "title": row["origin_title"],
@@ -404,6 +522,26 @@ class ApprovalPrefetch:
                            "artist_id": aid, "page": 1}
                 seeds.append(self._job("search", search_key("recording", title, artist, aid, 1),
                                        payload, 20))
+        # Existing search pages may have been cached before the release/pseudo
+        # resolver was installed. Backfill *every* result of pending reviews,
+        # without re-fetching their already cached MusicBrainz search.
+        search_keys = {key for kind, key, _, _ in seeds if kind == "search"}
+        with self.catalogue.db() as con:
+            for batch in self._chunks(tuple(search_keys)):
+                marks = ",".join("?" for _ in batch)
+                for row in con.execute(
+                    "SELECT payload FROM approval_prefetch_cache WHERE kind='search' "
+                    f"AND cache_key IN ({marks})", batch
+                ):
+                    try:
+                        result = json.loads(row["payload"])
+                        for item in result.get("items") or []:
+                            if (result.get("entity") == "recording" and
+                                    (rid := valid_id(item.get("id")))):
+                                seeds.append(self._job("releases", f"{rid}:1",
+                                                       {"id": rid, "page": 1}, 35))
+                    except (ValueError, TypeError, AttributeError):
+                        continue
         scheduled = self._enqueue_rows(seeds)
         self.last_seed_at = time.time()
         self.last_seed_count = tracks
@@ -475,6 +613,42 @@ class ApprovalPrefetch:
                 if self._store(kind, args["id"], value, NAME_TTL, expected_job=True):
                     self.enqueue_names(artists=[v["id"] for v in value.get("artist_credits") or []
                                                 if v.get("id")], priority=15)
+        elif kind == "releases":
+            value = await asyncio.to_thread(
+                self.searcher.request_releases, args["id"], args["page"])
+            if value["recording_id"] != args["id"] or value["page"] != args["page"]:
+                raise ValueError("MusicBrainz returned an unrelated release list")
+            with self._cleanup_lock:
+                if self._store(kind, job["cache_key"], value, NAME_TTL, expected_job=True):
+                    self.enqueue_pseudo_releases(value["releases"], priority=14)
+                    if args["page"] < 20 and args["page"] * 100 < value["total"]:
+                        self.enqueue_releases([args["id"]], page=args["page"] + 1, priority=28)
+        elif kind == "pseudo_release":
+            value = await asyncio.to_thread(
+                self.searcher.request_pseudo_release_titles, args["id"])
+            if value.get("id") != args["id"]:
+                raise ValueError("MusicBrainz returned an unrelated pseudo-release")
+            with self._cleanup_lock:
+                if self._store(kind, job["cache_key"], value, NAME_TTL, expected_job=True):
+                    for title in value.get("titles") or []:
+                        identity = valid_id(title.get("recording_id"))
+                        candidate = {"title": title.get("title"),
+                                     "release_id": args["id"],
+                                     "language": title.get("language") or "",
+                                     "source": "pseudo_release"}
+                        if not identity:
+                            continue
+                        with self.catalogue.db() as con:
+                            previous, _ = self._cached(con, "pseudo_title", identity)
+                        if not self._valid_pseudo_title(candidate["title"], None):
+                            continue
+                        # Prefer verified English pseudo-releases over ones
+                        # with unspecified tracklist language. Stable tie-break.
+                        rank = lambda d: (d.get("language") in {"eng", "en"},
+                                          str(d.get("release_id") or ""))
+                        if previous and rank(previous) >= rank(candidate):
+                            continue
+                        self._store("pseudo_title", identity, candidate, NAME_TTL)
         elif kind == "artist":
             value = await asyncio.to_thread(self.searcher.request_artist, args["id"])
             if value["id"] != args["id"]:
@@ -655,6 +829,46 @@ class ApprovalPrefetch:
             ):
                 if aid := valid_id(row["source_id"]):
                     retain["artist"].add(aid)
+        # Release-list snapshots and pseudo-title provenance are retained
+        # alongside their exact recording identity. Do not throw away a
+        # translation just because it was discovered on a pseudo-release.
+        retained_rec = retain["recording"]
+        retain["pseudo_title"] = set(retained_rec)
+        all_lists = cache_con.execute(
+            """SELECT kind,cache_key,payload FROM approval_prefetch_cache
+               WHERE kind IN ('releases','pseudo_release')"""
+        ).fetchall()
+        all_jobs = cache_con.execute(
+            """SELECT kind,cache_key FROM approval_prefetch_jobs
+               WHERE kind IN ('releases','pseudo_release')"""
+        ).fetchall()
+        pseudo_releases = set()
+        for row in all_lists:
+            if row["kind"] == "releases":
+                rid = valid_id(row["cache_key"].split(":")[0])
+                if rid not in retained_rec:
+                    continue
+                retain.setdefault("releases", set()).add(row["cache_key"])
+                try:
+                    for rel in json.loads(row["payload"]).get("releases") or []:
+                        if (str(rel.get("status") or "").casefold() == "pseudo-release"
+                                and (release_id := valid_id(rel.get("id")))):
+                            pseudo_releases.add(release_id)
+                except (ValueError, TypeError):
+                    continue
+            else:
+                try:
+                    ids = {valid_id(x.get("recording_id")) for x in
+                           (json.loads(row["payload"]).get("titles") or [])}
+                    if ids.intersection(retained_rec):
+                        pseudo_releases.add(row["cache_key"])
+                except (ValueError, TypeError):
+                    continue
+        for row in all_jobs:
+            if row["kind"] == "releases":
+                if valid_id(row["cache_key"].split(":")[0]) in retained_rec:
+                    retain.setdefault("releases", set()).add(row["cache_key"])
+        retain["pseudo_release"] = pseudo_releases
         return retain, waiting
 
     @staticmethod

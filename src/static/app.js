@@ -229,6 +229,7 @@ function updateKeyedChildren(container, items, {key, signature, render, backgrou
 
 function setTab(name, activateApproval = true) {
   if (state.tab === "approval" && name !== "approval") window.MetadataUI?.leave();
+  if (state.tab === "catalogue" && name !== "catalogue") window.CatalogueUI?.leave();
   state.tab = name;
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("active", tab.dataset.tab === name);
