@@ -625,3 +625,192 @@ def test_existing_cached_searches_backfill_all_release_metadata_jobs(db):
             release_keys = {row["cache_key"] for row in con.execute(
                 "SELECT cache_key FROM approval_prefetch_jobs WHERE kind='releases'")}
         assert {rid + ":1" for rid in ids}.issubset(release_keys)
+
+
+def test_failed_prefetch_moves_to_queue_tail_after_three_errors_then_disables(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch = app.state.approval_prefetch
+        catalogue = app.state.catalogue
+        assert prefetch.enqueue_names(recordings=[RECORDING]) == 1
+        for attempt in range(1, 4):
+            job = prefetch.claim()
+            assert job["cache_key"] == RECORDING
+            prefetch.defer(job, ValueError("Repeated invalid response"))
+            with catalogue.db() as con:
+                row = con.execute(
+                    "SELECT state,priority,attempts FROM approval_prefetch_jobs WHERE cache_key=?",
+                    (RECORDING,),
+                ).fetchone()
+                assert row["attempts"] == attempt
+                assert row["state"] == "PENDING"
+                if attempt == 3:
+                    assert row["priority"] == 1000
+                con.execute("UPDATE approval_prefetch_jobs SET retry_at=0 WHERE cache_key=?",
+                            (RECORDING,))
+        # Scheduled discovery is not allowed to promote this failing request.
+        assert prefetch.enqueue_names(recordings=[RECORDING], priority=0) == 0
+        with catalogue.db() as con:
+            row = con.execute(
+                "SELECT priority FROM approval_prefetch_jobs WHERE cache_key=?",
+                (RECORDING,),
+            ).fetchone()
+            assert row["priority"] == 1000
+
+        assert prefetch.enqueue_names(recordings=[OTHER], priority=20) == 1
+        other = prefetch.claim()
+        assert other["cache_key"] == OTHER, "The normal queue must outrank a failed item"
+        assert prefetch._store("recording", OTHER, {"id": OTHER, "title": "Other"},
+                               NAME_TTL, expected_job=True)
+        for attempt in range(4, 7):
+            job = prefetch.claim()
+            assert job["cache_key"] == RECORDING
+            prefetch.defer(job, ValueError("Repeated invalid response"))
+            with catalogue.db() as con:
+                row = con.execute(
+                    "SELECT state,priority,attempts FROM approval_prefetch_jobs WHERE cache_key=?",
+                    (RECORDING,),
+                ).fetchone()
+                assert row["attempts"] == attempt
+                assert row["priority"] == 1000
+                assert row["state"] == ("FAILED" if attempt == 6 else "PENDING")
+                if attempt < 6:
+                    con.execute(
+                        "UPDATE approval_prefetch_jobs SET retry_at=0 WHERE cache_key=?",
+                        (RECORDING,))
+        assert prefetch.claim() is None
+        assert prefetch.enqueue_names(recordings=[RECORDING]) == 0, (
+            "Periodic reseeding must not restart a disabled request")
+        status = prefetch.status()
+        assert status["failed"] == 1
+        assert status["queued"] == 0
+        assert status["total"] == status["completed"] + status["failed"]
+
+
+def test_manual_failed_prefetch_retry_allows_exactly_three_tail_attempts(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app) as client:
+        prefetch, catalogue = app.state.approval_prefetch, app.state.catalogue
+        prefetch.enqueue_releases([RECORDING])
+        with catalogue.db() as con:
+            con.execute(
+                """UPDATE approval_prefetch_jobs SET state='FAILED',attempts=6,
+                   priority=1000,last_error='MusicBrainz releases returned HTTP 404'
+                   WHERE kind='releases'""",
+            )
+        failures = client.get("/api/musicbrainz/approval-prefetch-failures",
+                              params={"user_id": "admin"}).json()
+        assert failures["total"] == 1
+        item = failures["items"][0]
+        assert item["kind"] == "releases"
+        assert RECORDING in item["label"]
+        assert item["attempts"] == 6
+        assert "404" in item["last_error"]
+        assert len(item["job_id"]) == 32
+        assert "cache_key" not in item
+        assert client.get("/api/musicbrainz/approval-prefetch-failures",
+                          params={"user_id": "invalid"}).status_code == 400
+        assert client.post("/api/musicbrainz/approval-prefetch-retry",
+                           json={"user_id": "invalid", "job_id": item["job_id"]}).status_code == 400
+        assert client.post("/api/musicbrainz/approval-prefetch-retry",
+                           json={"user_id": "admin", "job_id": "not-a-job"}).status_code == 422
+        bad = client.post("/api/musicbrainz/approval-prefetch-retry",
+                          json={"user_id": "admin", "job_id": "0" * 32})
+        assert bad.status_code == 404
+        response = client.post("/api/musicbrainz/approval-prefetch-retry",
+                               json={"user_id": "admin", "job_id": item["job_id"]})
+        assert response.status_code == 200
+        assert response.json()["attempts_remaining"] == 3
+        assert client.get("/api/musicbrainz/approval-prefetch-failures",
+                          params={"user_id": "admin"}).json()["total"] == 0
+        assert client.post("/api/musicbrainz/approval-prefetch-retry",
+                           json={"user_id": "admin", "job_id": item["job_id"]}).status_code == 404
+        with catalogue.db() as con:
+            row = con.execute(
+                "SELECT state,attempts,priority,retry_at,last_error FROM approval_prefetch_jobs"
+            ).fetchone()
+            assert dict(row) == {
+                "state": "PENDING", "attempts": 3, "priority": 1000,
+                "retry_at": 0, "last_error": None,
+            }
+        for attempt in (4, 5, 6):
+            job = prefetch.claim()
+            assert job["kind"] == "releases"
+            prefetch.defer(job, ValueError("Still unavailable"))
+            if attempt < 6:
+                with catalogue.db() as con:
+                    con.execute("UPDATE approval_prefetch_jobs SET retry_at=0")
+        assert prefetch.status()["failed"] == 1
+
+
+def test_single_bad_lookup_does_not_pause_other_jobs_or_exhaust_shared_slot_budget(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch, catalogue = app.state.approval_prefetch, app.state.catalogue
+        from http_policy import ApiDeferred
+        prefetch.enqueue_releases([RECORDING, OTHER])
+        first = prefetch.claim()
+        prefetch.defer(first, ApiDeferred("MusicBrainz releases returned HTTP 404",
+                                         retry_at=time.time() + 60))
+        assert prefetch.pause_until == 0, "An individual 404 must not pause the worker"
+        assert prefetch.claim()["cache_key"].startswith(OTHER)
+        with catalogue.db() as con:
+            con.execute("UPDATE approval_prefetch_jobs SET state='PENDING' WHERE state='RUNNING'")
+        after = prefetch.claim()
+        # The second job is claimed again; it hits only the shared provider clock.
+        prefetch.defer(after, ApiDeferred(
+            "musicbrainz.org: waiting for shared provider cooldown",
+            retry_at=time.time() + 15))
+        with catalogue.db() as con:
+            row = con.execute(
+                "SELECT attempts FROM approval_prefetch_jobs WHERE cache_key=?",
+                (after["cache_key"],),
+            ).fetchone()
+        assert row["attempts"] == 0, "A shared clock wait is not a failed execution"
+        assert prefetch.pause_until > time.time()
+
+
+def test_prefetch_upgrade_disables_legacy_endlessly_retried_jobs(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch, catalogue = app.state.approval_prefetch, app.state.catalogue
+        prefetch.enqueue_releases([RECORDING])
+        prefetch.enqueue_releases([OTHER])
+        with catalogue.db() as con:
+            con.execute(
+                """UPDATE approval_prefetch_jobs SET attempts=72,
+                   last_error='MusicBrainz releases returned HTTP 404',
+                   state='PENDING' WHERE cache_key=?""", (RECORDING + ":1",))
+            con.execute(
+                """UPDATE approval_prefetch_jobs SET attempts=72,
+                   last_error='musicbrainz.org: waiting for shared provider cooldown',
+                   state='PENDING' WHERE cache_key=?""", (OTHER + ":1",))
+        prefetch.init()
+        with catalogue.db() as con:
+            rows = {r["cache_key"]: dict(r) for r in con.execute(
+                "SELECT cache_key,state,attempts,priority FROM approval_prefetch_jobs")}
+        assert rows[RECORDING + ":1"]["state"] == "FAILED"
+        assert rows[RECORDING + ":1"]["attempts"] == 72
+        assert rows[OTHER + ":1"]["state"] == "PENDING"
+        assert rows[OTHER + ":1"]["attempts"] == 0
+
+
+def test_failed_search_labels_do_not_expose_unowned_library_queries(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app) as client:
+        prefetch, catalogue = app.state.approval_prefetch, app.state.catalogue
+        assert prefetch.enqueue_search("recording", "Private video title", "Artist Name") == 1
+        with catalogue.db() as con:
+            con.execute(
+                "UPDATE approval_prefetch_jobs SET state='FAILED',attempts=6,"
+                "last_error='MusicBrainz search returned HTTP 404' WHERE kind='search'")
+        admin = client.get("/api/musicbrainz/approval-prefetch-failures",
+                           params={"user_id": "admin"}).json()
+        guest = client.get("/api/musicbrainz/approval-prefetch-failures",
+                           params={"user_id": "guest"}).json()
+        assert admin["total"] == guest["total"] == 1
+        assert admin["items"][0]["job_id"] == guest["items"][0]["job_id"]
+        assert "Private video title" not in str(admin)
+        assert "Private video title" not in str(guest)
+        assert admin["items"][0]["label"].startswith("Search request #")
+        assert guest["items"][0]["label"].startswith("Search request #")
