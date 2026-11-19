@@ -212,7 +212,7 @@ def install_catalogue_routes(app, store, pipeline):
     @app.get("/api/catalogue/graph")
     def graph(user_id: str, view: str = "downloaded", kinds: str = "artist,recording,release,release-group,work",
               q: str = Query("", max_length=100), focus_id: str | None = None,
-              limit: int = Query(180, ge=1, le=180)):
+              limit: int = Query(180, ge=1, le=800)):
         requested = kinds.split(",") if kinds else []
         if any(kind not in ENTITY_KINDS for kind in requested):
             raise ValueError("Invalid graph node type")

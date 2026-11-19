@@ -502,6 +502,9 @@ The **Catalogue** tab searches and refreshes an incrementally cached, public
 MusicBrainz discography (including recordings you do not own). The **Graph** tab
 explores the same typed artist, work, recording, release and release-group
 relationships with independent node-type filters and a downloaded-only view.
+Its locally bundled Canvas graph supports draggable spring physics, soft
+connectivity-based layers, mouse-wheel zoom, node lookup, and bounded views up
+to 800 nodes.
 
 Album candidate comparison uses confirmed recording IDs and locally cached
 release relationships. Release selection is distinct from recording approval;
