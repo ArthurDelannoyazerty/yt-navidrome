@@ -26,7 +26,7 @@ from musicbrainz_search import API_ROOT, USER_AGENT, terms, valid_id
 ENTITY_KINDS = frozenset({"artist", "work", "recording", "release", "release-group"})
 BROWSE = frozenset({"release-group", "recording", "work", "release"})
 TTL_DAYS = {"artist": 90, "work": 90, "recording": 90, "release": 90, "release-group": 30}
-MAX_GRAPH_NODES = 800
+MAX_GRAPH_NODES = 10000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entities (
@@ -628,7 +628,8 @@ class Catalogue:
             raise ValueError("Unknown graph view")
         kinds = set(ENTITY_KINDS if kinds is None else kinds) & ENTITY_KINDS
         if not kinds:
-            return {"nodes": [], "edges": [], "truncated": False}
+            return {"nodes": [], "edges": [], "truncated": False, "total_nodes": 0,
+                    "max_selectable_nodes": 0, "owned_recording_count": 0, "limit": 0}
         limit = max(1, min(int(limit), MAX_GRAPH_NODES))
         owned = {row["mbid"]: row for row in self.store.rows(
             "SELECT id,mbid,matched_title FROM tracks WHERE user_id=? AND mbid IS NOT NULL", (user_id,))}
@@ -677,27 +678,36 @@ class Catalogue:
             # Traverse through hidden node types, then project onto the types
             # selected by the user. An artist-only or release-only graph must
             # still be reachable through an owned recording that is hidden.
-            seen, traversed = set(), set()
+            # Count the entire bounded-depth neighborhood independently of the
+            # requested display limit. Otherwise the UI cannot report an honest
+            # maximum: the old traversal stopped as soon as limit was reached.
+            visible, selected, traversed = set(), set(), set()
             frontier = deque((key, 0) for key in seed)
             depth_limit = 3 if focus else 2
-            while frontier and len(seen) < limit and len(traversed) < max(1000, limit * 20):
+            while frontier:
                 key, depth = frontier.popleft()
                 if key in traversed:
                     continue
                 traversed.add(key)
                 if key[0] in kinds:
-                    seen.add(key)
+                    visible.add(key)
+                    if len(selected) < limit:
+                        selected.add(key)
                 if depth < depth_limit:
                     for adjacent in adjacency.get(key, []):
                         if (view == "catalogue" or adjacent[0] != "recording"
                                 or adjacent[1] in owned):
                             frontier.append((adjacent, depth + 1))
+            total_nodes = len(visible)
+            max_selectable_nodes = min(total_nodes, MAX_GRAPH_NODES)
             nodes = [{"id": f"{kind}:{identity}", "kind": kind,
                       "label": names.get((kind, identity)) or owned.get(identity, {}).get("matched_title") or identity,
-                      "owned": kind == "recording" and identity in owned} for kind, identity in sorted(seen)]
+                      "owned": kind == "recording" and identity in owned} for kind, identity in sorted(selected)]
             visible_edges = [{"source": f"{a}:{ai}", "target": f"{b}:{bi}", "relation": relation}
-                             for a, ai, b, bi, relation in edges if (a, ai) in seen and (b, bi) in seen]
-            edge_limit = min(4000, max(700, limit * 4))
+                             for a, ai, b, bi, relation in edges if (a, ai) in selected and (b, bi) in selected]
+            edge_limit = min(30000, max(700, limit * 5))
             graph_edges = visible_edges[:edge_limit]
-            return {"nodes": nodes, "edges": graph_edges, "truncated": bool(frontier) or len(visible_edges) > edge_limit,
-                    "owned_recording_count": len(owned), "limit": limit}
+            return {"nodes": nodes, "edges": graph_edges,
+                    "truncated": total_nodes > len(selected) or len(visible_edges) > edge_limit,
+                    "total_nodes": total_nodes, "max_selectable_nodes": max_selectable_nodes,
+                    "owned_recording_count": len(owned), "limit": min(limit, max_selectable_nodes)}

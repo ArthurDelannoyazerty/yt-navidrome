@@ -380,6 +380,26 @@ def test_graph_user_isolation_and_independent_node_filters(db, environment):
         cat.graph("missing", view="downloaded")
 
 
+
+def test_graph_node_totals_do_not_depend_on_requested_display_limit(db, environment):
+    cat, _ = setup_catalogue(db)
+    add_audio_track(db, environment, RECORDING_1)
+    tiny = cat.graph("admin", view="downloaded", kinds=["recording", "release", "artist"], limit=1)
+    full = cat.graph("admin", view="downloaded", kinds=["recording", "release", "artist"], limit=10000)
+    assert tiny["total_nodes"] == full["total_nodes"] == len(full["nodes"])
+    assert tiny["total_nodes"] > 1
+    assert tiny["limit"] == len(tiny["nodes"]) == 1
+    assert tiny["truncated"] is True
+    assert full["max_selectable_nodes"] == full["total_nodes"]
+    assert full["limit"] == full["total_nodes"]
+    assert not full["truncated"]
+    artists = cat.graph("admin", view="downloaded", kinds=["artist"], limit=1)
+    assert artists["total_nodes"] >= len(artists["nodes"])
+    assert all(node["kind"] == "artist" for node in artists["nodes"])
+    empty = cat.graph("admin", view="downloaded", kinds=[])
+    assert empty["total_nodes"] == empty["max_selectable_nodes"] == 0
+
+
 def test_catalogue_api_keeps_local_users_separate_and_tabs_available(db):
     with TestClient(create_app(db, start_workers=False)) as client:
         assert client.get("/").status_code == 200
