@@ -189,6 +189,54 @@ class MusicBrainzSearch:
             finally:
                 response.close()
 
+    def request_pseudo_release_titles(self, release_id: str) -> dict:
+        """Fetch exact recording IDs and translated track titles from one pseudo-release.
+
+        A track's name on a pseudo-release is NOT a recording alias. Use only
+        exact recording MBIDs in its tracklist, never a fuzzy title/artist match.
+        """
+        identity = valid_id(release_id)
+        if identity != release_id:
+            raise ValueError("Invalid MusicBrainz pseudo-release ID")
+        policy = HttpPolicy(self.store)
+        with requests.Session() as session:
+            prepared = session.prepare_request(requests.Request(
+                "GET", API_ROOT + "release/" + identity,
+                params={"fmt": "json", "inc": "recordings"},
+                headers={"User-Agent": os.getenv("HTTP_USER_AGENT") or USER_AGENT,
+                         "Accept": "application/json"},
+            ))
+            response = policy.send(requests.sessions.Session.send, session, prepared,
+                                   timeout=(5, 15), allow_redirects=False)
+            try:
+                if response.status_code == 404:
+                    raise ValueError("MusicBrainz pseudo-release was not found")
+                if response.status_code != 200:
+                    raise ApiDeferred(
+                        f"MusicBrainz pseudo-release lookup returned HTTP {response.status_code}",
+                        retry_at=time.time() + 60,
+                    )
+                value = response.json()
+                if valid_id(value.get("id")) != identity:
+                    raise ValueError("MusicBrainz returned a different release identity")
+                if str(value.get("status") or "").casefold() != "pseudo-release":
+                    return {"id": identity, "status": "not-pseudo", "titles": []}
+                language = str((value.get("text-representation") or {}).get("language") or "").lower()
+                titles = []
+                seen = set()
+                for medium in value.get("media") or []:
+                    for track in medium.get("tracks") or []:
+                        recording = track.get("recording") or {}
+                        rid = valid_id(recording.get("id"))
+                        title = str(track.get("title") or "")[:1000].strip()
+                        if not rid or not title or (rid, title) in seen:
+                            continue
+                        seen.add((rid, title))
+                        titles.append({"recording_id": rid, "title": title, "language": language})
+                return {"id": identity, "status": "pseudo-release", "titles": titles}
+            finally:
+                response.close()
+
     async def releases(self, recording_id: str, page: int = 1) -> dict:
         identity = valid_id(recording_id)
         if not identity:
