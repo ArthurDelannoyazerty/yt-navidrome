@@ -44,7 +44,12 @@ def test_approval_reuses_catalogue_and_persists_verified_names_across_restarts(d
         prefetch.workers_enabled = True
         assert client.get("/api/musicbrainz/approval-names", params=params).json()["remaining"] == 0
         with catalogue.db() as con:
-            assert not list(con.execute("SELECT * FROM approval_prefetch_jobs"))
+            assert not list(con.execute(
+                "SELECT * FROM approval_prefetch_jobs WHERE kind IN ('recording','artist')")), (
+                "Complete Catalogue names should not be refetched")
+            assert con.execute(
+                "SELECT COUNT(*) FROM approval_prefetch_jobs WHERE kind='releases'"
+            ).fetchone()[0] == 1, "Album editions are independently prefetched"
         prefetch.workers_enabled = False
 
         prefetch._store("recording", RECORDING, {
@@ -425,6 +430,7 @@ def test_provider_cooldown_pauses_the_entire_prefetch_worker(db):
 JAPANESE_RECORDING = "b6173a0d-5ec7-44aa-bfe6-475d5fd5d9c2"
 JAPANESE_ALIAS_RECORDING = "cc9a68ea-f7ba-41c6-9162-ad4aba7ea270"
 PSEUDO_RELEASE = "bedbc15a-1e5c-4aa6-ae90-24c0b78c1f3a"
+OFFICIAL_RELEASE = "99999999-9999-4999-8999-999999999999"
 JAPANESE_TITLE = "運命に囚われし者たち"
 
 
@@ -446,7 +452,7 @@ def test_exact_pseudo_release_name_is_persisted_below_native_recording(db, monke
             seen.append(("release-list", rid, page))
             return {"recording_id": rid, "page": page, "total": 2,
                     "releases": [
-                        {"id": RID, "title": "Official CD", "status": "Official"},
+                        {"id": OFFICIAL_RELEASE, "title": "Official CD", "status": "Official"},
                         {"id": PSEUDO_RELEASE, "title": "Live English tracklist",
                          "status": "Pseudo-Release", "date": "2020-06-24"},
                     ]}
@@ -525,13 +531,13 @@ def test_album_edition_list_is_queued_cached_and_stale_revalidated(db, monkeypat
         def fake_releases(recording, page):
             seen.append((recording, page))
             return {"recording_id": recording, "page": page, "total": 1,
-                    "releases": [{"id": RID, "title": "Chrono Cross Orchestral Arrangement",
+                    "releases": [{"id": OFFICIAL_RELEASE, "title": "Chrono Cross Orchestral Arrangement",
                                   "status": "Official"}]}
         monkeypatch.setattr(app.state.musicbrainz_search, "request_releases", fake_releases)
         asyncio.run(prefetch.process(prefetch.claim()))
         done = client.get("/api/musicbrainz/releases", params=args)
         assert done.status_code == 200
-        assert done.json()["releases"][0]["id"] == RID
+        assert done.json()["releases"][0]["id"] == OFFICIAL_RELEASE
         assert done.json()["cache_status"] == "fresh"
         assert len(seen) == 1
         assert client.get("/api/musicbrainz/releases", params=args).status_code == 200
