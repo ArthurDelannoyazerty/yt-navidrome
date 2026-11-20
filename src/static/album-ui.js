@@ -589,6 +589,7 @@ window.AlbumUI = (() => {
   el("albumRecommend").addEventListener("click",()=>suggest());
   el("albumSearchForm").addEventListener("submit",event=>{event.preventDefault();void searchRelease(false);});
   el("albumOnlineSearch").addEventListener("click",()=>searchRelease(true));
+  el("albumCompareRefresh").addEventListener("click",()=>compare());
   el("albumPlanPreview").addEventListener("click",()=>previewPlan());
   el("albumPlanApply").addEventListener("click",()=>applyPlan());
   el("albumPlanCancel").addEventListener("click",invalidatePreview);
