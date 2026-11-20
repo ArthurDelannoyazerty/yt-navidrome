@@ -16,7 +16,7 @@ window.AlbumUI = (() => {
   };
   const ui = {
     user:null, generation:0, loading:false,
-    tracks:new Map(), selected:new Set(), plan:new Map(), candidates:new Map(),
+    tracks:new Map(), knownTracks:new Map(), selected:new Set(), plan:new Map(), candidates:new Map(),
     compared:[], releases:new Map(), recommendations:[], preview:null,
     offset:0, hasMore:false, total:0, searching:false, loadSerial:0, searchTimer:null,
     preferences:[]
@@ -35,7 +35,7 @@ window.AlbumUI = (() => {
     release.complete && (release.recording_ids
       ? release.recording_ids.includes(track.recording_id)
       : release.tracks.some(item => item.recording_id === track.recording_id));
-  const allChosen = () => [...ui.tracks.values()].filter(item => ui.selected.has(item.id));
+  const allChosen = () => [...ui.selected].map(id=>ui.knownTracks.get(id)).filter(Boolean);
   function invalidatePreview() {
     ui.preview=null;
     el("albumPlanResults").replaceChildren();
@@ -45,7 +45,7 @@ window.AlbumUI = (() => {
   function planStats() {
     let move=0,newly=0,none=0;
     for (const [id,decision] of ui.plan) {
-      const item=ui.tracks.get(id);
+      const item=ui.knownTracks.get(id);
       if (decision.action === "not_found") none++;
       else if (item?.current_release_id) move++;
       else newly++;
@@ -123,7 +123,9 @@ window.AlbumUI = (() => {
     try {
       const result=await api("/api/albums/tracks?"+params);
       if (!active(user,generation) || loadId!==ui.loadSerial)return;
-      for(const item of result.items||[])ui.tracks.set(item.id,item);
+      for(const item of result.items||[]){
+        ui.tracks.set(item.id,item);ui.knownTracks.set(item.id,item);
+      }
       ui.total=result.total;ui.offset=result.offset+(result.items||[]).length;
       ui.hasMore=Boolean(result.has_more);
       renderTracks();renderMatrix();
@@ -230,6 +232,7 @@ window.AlbumUI = (() => {
       if(el("albumIncludeAssigned").checked) {
         let appended=0;
         for(const track of result.additional_assigned_matches||[]) {
+          ui.knownTracks.set(track.id,track);
           if(!ui.tracks.has(track.id)){ui.tracks.set(track.id,track);appended++;}
         }
         if(appended)renderTracks();
@@ -336,7 +339,7 @@ window.AlbumUI = (() => {
     status(count+" previously unassigned recordings added to the plan. Existing album assignments were not changed.",false,"albumPlanStatus");
   }
   function setDestination(id,value) {
-    const track=ui.tracks.get(id);
+    const track=ui.knownTracks.get(id);
     if(!track)return;
     if(!value || value==="keep" || value===track.current_release_id){
       ui.plan.delete(id);
@@ -484,7 +487,7 @@ window.AlbumUI = (() => {
     try{
       const result=await api("/api/albums/plan-apply",{user_id:user,preview_token:preview.preview_token});
       if(!active(user,generation))return;
-      ui.preview=null;ui.plan.clear();
+      ui.preview=null;ui.plan.clear();ui.selected.clear();ui.knownTracks.clear();
       el("albumPlanResults").replaceChildren();el("albumPlanConfirm").hidden=true;
       status(result.queued+" album-only changes queued · "+
         result.marked_not_found+" recordings marked No Album Found. "+
@@ -547,7 +550,7 @@ window.AlbumUI = (() => {
   function reset(){
     ui.generation++;ui.user=null;ui.loading=false;ui.loadSerial++;
     clearTimeout(ui.searchTimer);ui.searchTimer=null;
-    ui.tracks.clear();ui.selected.clear();
+    ui.tracks.clear();ui.knownTracks.clear();ui.selected.clear();
     ui.plan.clear();ui.candidates.clear();ui.compared=[];ui.releases.clear();
     ui.recommendations=[];ui.preview=null;ui.offset=0;ui.hasMore=false;ui.total=0;
     ui.preferences=[];
