@@ -590,3 +590,78 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 @media (max-width: 600px) {
   .approval-failed-row { align-items: flex-start; flex-direction: column; }
 }
+
+
+/* Full-page Album assignment workspace: scoped selection, comparisons and plan. */
+.album-panel { min-width: 0; }
+.album-workspace { display: grid; grid-template-columns: minmax(275px, .83fr) minmax(300px, 1.17fr); gap: 14px; }
+.album-workspace-card { border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+  margin-bottom: 16px; min-width: 0; background: var(--panel); }
+.album-workspace-card h3 { margin: 0 0 8px; }
+.album-workspace-card h4 { margin: 8px 0; }
+.album-card-heading { display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.album-card-heading h3, .album-card-heading p { margin: 0; }
+.album-card-heading .secondary, .album-workspace .secondary { font-size: 12px; }
+.album-workspace-card .control-field { display: grid; gap: 5px; margin-bottom: 12px; }
+.album-workspace-card .control-field select, .album-workspace-card .control-field input { width: 100%; min-width: 0; }
+.album-include { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.4; margin-bottom: 12px; }
+.album-include input { margin-top: 2px; flex-shrink: 0; }
+.album-track-list { border: 1px solid var(--border); border-radius: 8px;
+  min-height: 90px; max-height: 560px; overflow-y: auto; overscroll-behavior: contain; }
+.album-track-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px;
+  border-bottom: 1px solid var(--border); }
+.album-track-row:last-child { border-bottom: none; }
+.album-track-row:hover { background: var(--surface, rgba(105,135,165,.06)); }
+.album-track-row input[type="checkbox"] { margin-top: 4px; flex-shrink: 0; }
+.album-track-row .album-track-text { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.album-track-row strong { font-size: 12px; overflow-wrap: anywhere; }
+.album-track-row small { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.album-track-row button { padding: 5px 8px; flex-shrink: 0; font-size: 11px; }
+.album-track-assigned { border-left: 3px solid #7c94ab; }
+.album-candidate-list { display: grid; gap: 8px; min-width: 0; }
+.album-release-card { border: 1px solid var(--border); padding: 9px 11px; border-radius: 8px; min-width: 0; }
+.album-release-card strong { display: block; font-size: 13px; overflow-wrap: anywhere; }
+.album-release-card p { margin: 4px 0 8px; font-size: 11px; }
+.album-release-card .row { align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.album-family { min-width: 0; }
+.album-family h4 { font-size: 12px; font-weight: 600; padding: 5px; margin-bottom: 5px; background: var(--background); border-radius: 5px; }
+.album-extra-search { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 12px; }
+.album-extra-search .row { flex-wrap: wrap; }
+.album-compared-chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 235px), 1fr)); gap: 9px; margin-bottom: 13px; }
+.album-compared-card { border: 1px solid var(--border); border-radius: 9px; padding: 12px; min-width: 0; }
+.album-compared-card strong { overflow-wrap: anywhere; }
+.album-compared-card p { font-size: 11px; margin: 5px 0; }
+.album-compared-card details { margin-top: 10px; font-size: 12px; }
+.album-official-tracks { padding-left: 20px; margin: 6px 0; max-height: 180px; overflow-y: auto; }
+.album-official-track { font-size: 11px; margin-bottom: 4px; }
+.album-compared-card .row { flex-wrap: wrap; gap: 6px; }
+.album-matrix { width: 100%; max-height: min(75vh, 700px); overflow: auto; }
+.album-compare-table, .album-preview-table { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 650px; font-size: 12px; }
+.album-compare-table th, .album-compare-table td, .album-preview-table th, .album-preview-table td {
+  border-bottom: 1px solid var(--border); padding: 8px 9px; text-align: left; vertical-align: middle; }
+.album-compare-table th, .album-preview-table th { position: sticky; top: 0; z-index: 2; background: var(--panel);
+  font-size: 11px; white-space: nowrap; }
+.album-compare-table td:nth-child(n+3):not(:nth-last-child(-n+2)) { text-align: center; }
+.album-compare-table th:first-child, .album-compare-table td:first-child { position: sticky; left: 0;
+  z-index: 1; max-width: 210px; min-width: 115px; background: var(--panel); overflow-wrap: anywhere; }
+.album-match-yes { color: #31c99b; font-weight: 700; }
+.album-match-no { color: var(--muted); }
+.album-match-unknown { color: #f59e0b; font-weight: 700; }
+.album-compare-table select { font-size: 12px; width: min(220px, 100%); min-width: 120px; }
+.album-row-actions { min-width: 138px; }
+.album-row-actions button { display: block; width: 100%; margin: 2px 0; padding: 6px 8px; font-size: 11px; }
+.album-plan-card { scroll-margin-top: 20px; }
+.album-plan-confirm { flex-wrap: wrap; margin-top: 14px; }
+.album-history > summary { font-size: 15px; font-weight: 600; cursor: pointer; }
+.album-history-row { display: flex; gap: 10px; justify-content: space-between; align-items: center;
+  border-bottom: 1px solid var(--border); padding: 7px 2px; font-size: 12px; flex-wrap: wrap; }
+@media (max-width: 910px) {
+  .album-workspace { grid-template-columns: 1fr; }
+  .album-track-list { max-height: 280px; }
+}
+@media (max-width: 520px) {
+  .album-workspace-card { padding: 11px; }
+  .album-card-heading { align-items: flex-start; }
+  .album-compare-table th:first-child, .album-compare-table td:first-child { min-width: 105px; max-width: 135px; }
+}
