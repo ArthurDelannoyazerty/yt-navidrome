@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from fastapi import Query
 
 from album_management import AlbumManager
+from album_workspace import AlbumWorkspace
 from catalogue import Catalogue, ENTITY_KINDS, MAX_GRAPH_NODES
 from language_jobs import (preview as language_preview, queue as queue_languages,
                            preview_progress, queue_progress, canary_status, verify_canary,
@@ -28,6 +29,23 @@ class AlbumSelection(BaseModel):
     release_id: str
     source_ids: list[str] = Field(default_factory=list, max_length=20)
     track_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class AlbumCompareInput(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    release_ids: list[str] = Field(max_length=12)
+    selected_track_ids: list[str] = Field(default_factory=list, max_length=500)
+    include_assigned: bool = False
+
+
+class AlbumPlanInput(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    decisions: list[dict] = Field(min_length=1, max_length=500)
+
+
+class AlbumNotFoundClear(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    track_id: str = Field(min_length=1, max_length=64)
 
 
 class AlbumApply(BaseModel):
@@ -101,6 +119,8 @@ async def cache_worker(catalogue, stopping):
 def install_catalogue_routes(app, store, pipeline):
     catalogue = Catalogue(store)
     albums = AlbumManager(store, catalogue)
+    workspace = AlbumWorkspace(albums)
+    app.state.album_workspace = workspace
     app.state.catalogue = catalogue
     app.state.album_manager = albums
     pipeline.album_manager = albums
@@ -223,6 +243,32 @@ def install_catalogue_routes(app, store, pipeline):
     def sources(user_id: str):
         store.require_user(user_id)
         return store.rows("SELECT id,title,status,is_playlist FROM sources WHERE user_id=? ORDER BY title", (user_id,))
+
+    @app.get("/api/albums/tracks")
+    def album_tracks(user_id: str, source_id: str | None = None,
+                     include_assigned: bool = False,
+                     offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=250)):
+        return workspace.tracks(user_id, source_id=source_id,
+                                include_assigned=include_assigned,
+                                offset=offset, limit=limit)
+
+    @app.post("/api/albums/compare")
+    def album_compare(data: AlbumCompareInput):
+        return workspace.compare(data.user_id, data.release_ids,
+                                 selected_track_ids=data.selected_track_ids,
+                                 include_assigned=data.include_assigned)
+
+    @app.post("/api/albums/plan-preview")
+    def album_plan_preview(data: AlbumPlanInput):
+        return workspace.preview(data.user_id, data.decisions)
+
+    @app.post("/api/albums/plan-apply")
+    def album_plan_apply(data: AlbumApply):
+        return workspace.apply(data.user_id, data.preview_token)
+
+    @app.post("/api/albums/not-found/clear")
+    def album_clear_not_found(data: AlbumNotFoundClear):
+        return workspace.clear_not_found(data.user_id, data.track_id)
 
     @app.post("/api/catalogue/recommendations")
     def recommendations(data: AlbumSelection):
