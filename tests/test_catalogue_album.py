@@ -1084,3 +1084,201 @@ def test_reverse_rejects_external_audio_modifications_and_missing_undo(db, envir
         assert client.post("/api/catalogue/language-reverse", json=payload).status_code == 400
     assert sha256_file(path) != original_sha
     assert db.one("SELECT COUNT(*) AS n FROM jobs WHERE kind='track' AND json_extract(payload,'$.mode')='language_reverse'")["n"] == 0
+
+
+
+def test_album_workspace_scopes_user_and_finds_cross_source_assigned_matches(db, environment):
+    from album_workspace import AlbumWorkspace
+
+    catalogue, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    first, _, _ = add_audio_track(db, environment, RECORDING_1)
+    moving, _, _ = add_audio_track(db, environment, RECORDING_2)
+    new, _, _ = add_audio_track(db, environment, RECORDING_4)
+    db.execute("UPDATE tracks SET release_id=NULL WHERE id=?", (new,))
+    guest, _, _ = add_audio_track(db, environment, RECORDING_1, user="guest")
+    base = workspace.tracks("admin")
+    assert [row["id"] for row in base["items"]] == [new]
+    assert base["total"] == 1
+    entire = workspace.tracks("admin", include_assigned=True)
+    assert {row["id"] for row in entire["items"]} == {first, moving, new}
+    assert guest not in {row["id"] for row in entire["items"]}
+    assert entire["total"] == 3
+    subset = workspace.tracks("admin", include_assigned=True, limit=1)
+    assert subset["total"] == 3 and subset["has_more"]
+    next_page = workspace.tracks("admin", include_assigned=True, offset=1)
+    assert not {row["id"] for row in subset["items"]} & {row["id"] for row in next_page["items"]}
+    compared = workspace.compare("admin", [RELEASE_B], selected_track_ids=[new], include_assigned=True)
+    release = compared["releases"][0]
+    assert release["complete"] is True
+    assert release["track_count"] == 2
+    assert RECORDING_4 in release["matched_recording_ids"]
+    assert {item["id"] for item in compared["additional_assigned_matches"]} == {moving}
+    assert first not in {item["id"] for item in compared["additional_assigned_matches"]}
+    assert guest not in {item["id"] for item in compared["additional_assigned_matches"]}
+    with pytest.raises(ValueError, match="Unknown user"):
+        workspace.tracks("missing")
+    with pytest.raises(LookupError):
+        workspace.compare("admin", [RELEASE_B], selected_track_ids=[guest])
+
+
+def test_album_workspace_multi_album_plan_moves_only_explicit_tracks_and_can_undo(db, environment, monkeypatch):
+    import album_management
+    from album_workspace import AlbumWorkspace
+    monkeypatch.setattr(album_management, "LIBRARY", environment[1])
+
+    catalogue, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    stays, _, _ = add_audio_track(db, environment, RECORDING_1)
+    moves, moved_path, moved_hash = add_audio_track(db, environment, RECORDING_2)
+    new, _, _ = add_audio_track(db, environment, RECORDING_4)
+    db.execute("UPDATE tracks SET release_id=NULL WHERE id=?", (new,))
+    proposal = workspace.preview("admin", [
+        {"track_id": moves, "action": "release", "release_id": RELEASE_B},
+        {"track_id": new, "action": "release", "release_id": RELEASE_B},
+    ])
+    assert proposal["can_apply"] == 2 and proposal["can_mark"] == 0
+    assert {row["target_release_id"] for row in proposal["items"]} == {RELEASE_B}
+    assert all(row["status"] == "COMPATIBLE" for row in proposal["items"])
+    # No selected destination changes any audio until the explicit apply call.
+    assert db.one("SELECT release_id FROM tracks WHERE id=?", (moves,))["release_id"] == RELEASE_A
+    assert moved_hash == sha256_file(moved_path)
+    applied = workspace.apply("admin", proposal["preview_token"])
+    assert applied["queued"] == 2
+    changes = db.rows("SELECT * FROM album_changes WHERE group_id=?", (applied["group_id"],))
+    assert len(changes) == 2
+    assert {row["track_id"] for row in changes} == {moves, new}
+    for change in changes:
+        albums.prepare(change["id"], "admin", "apply")
+        albums.finalize(change["id"], "admin", "apply", beets_id=None)
+        db.execute("UPDATE jobs SET state='DONE' WHERE kind='album' AND target=?",
+                   (change["id"],))
+    assert db.one("SELECT release_id FROM tracks WHERE id=?", (stays,))["release_id"] == RELEASE_A
+    assert db.one("SELECT release_id FROM tracks WHERE id=?", (moves,))["release_id"] == RELEASE_B
+    assert db.one("SELECT release_id FROM tracks WHERE id=?", (new,))["release_id"] == RELEASE_B
+    with pytest.raises(ValueError, match="expired or was already applied"):
+        workspace.apply("admin", proposal["preview_token"])
+    undo = next(row for row in changes if row["track_id"] == moves)
+    assert albums.undo("admin", undo["id"])["queued"]
+    albums.prepare(undo["id"], "admin", "undo")
+    albums.finalize(undo["id"], "admin", "undo", beets_id=None)
+    assert sha256_file(moved_path) == moved_hash
+    assert db.one("SELECT release_id FROM tracks WHERE id=?", (moves,))["release_id"] == RELEASE_A
+
+
+def test_album_workspace_supports_different_releases_in_one_plan(db, environment, monkeypatch):
+    import album_management
+    from album_workspace import AlbumWorkspace
+    monkeypatch.setattr(album_management, "LIBRARY", environment[1])
+    _, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    first, _, _ = add_audio_track(db, environment, RECORDING_1)
+    second, _, _ = add_audio_track(db, environment, RECORDING_4)
+    preview = workspace.preview("admin", [
+        {"track_id": first, "action": "release", "release_id": RELEASE_A},
+        {"track_id": second, "action": "release", "release_id": RELEASE_B},
+    ])
+    assert preview["can_apply"] == 1
+    assert {r["status"] for r in preview["items"]} == {"UNCHANGED", "COMPATIBLE"}
+    assert {r["target_release_id"] for r in preview["items"]} == {RELEASE_A, RELEASE_B}
+    result = workspace.apply("admin", preview["preview_token"])
+    assert result["queued"] == 1
+    assert db.one("SELECT release_id FROM album_changes WHERE group_id=?",
+                  (result["group_id"],))["release_id"] == RELEASE_B
+    assert db.one("SELECT release_id FROM tracks WHERE id=?", (first,))["release_id"] == RELEASE_A
+
+
+def test_album_workspace_no_album_found_is_persistent_and_not_an_audio_tag(db, environment):
+    from album_workspace import AlbumWorkspace
+    catalogue, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    tid, path, digest = add_audio_track(db, environment, RECORDING_4)
+    db.execute("UPDATE tracks SET release_id=NULL WHERE id=?", (tid,))
+    proposal = workspace.preview("admin", [{"track_id": tid, "action": "not_found"}])
+    assert proposal["can_mark"] == 1 and proposal["can_apply"] == 0
+    assert proposal["items"][0]["status"] == "MARK_NOT_FOUND"
+    result = workspace.apply("admin", proposal["preview_token"])
+    assert result["queued"] == 0 and result["marked_not_found"] == 1
+    assert sha256_file(path) == digest
+    assert not db.rows("SELECT * FROM album_changes WHERE track_id=?", (tid,))
+    assert workspace.tracks("admin")["items"][0]["not_found"] is True
+    again = workspace.preview("admin", [{"track_id": tid, "action": "not_found"}])
+    assert again["items"][0]["status"] == "UNCHANGED"
+    assert workspace.clear_not_found("admin", tid)["cleared"] is True
+    assert workspace.tracks("admin")["items"][0]["not_found"] is False
+    assert workspace.clear_not_found("admin", tid)["cleared"] is False
+    # The marker never writes a fake album value into the audio itself.
+    assert sha256_file(path) == digest
+
+
+def test_album_workspace_rejects_unverified_moves_and_stale_previews(db, environment, monkeypatch):
+    import album_management
+    from album_workspace import AlbumWorkspace
+    monkeypatch.setattr(album_management, "LIBRARY", environment[1])
+    catalogue, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    tid, _, _ = add_audio_track(db, environment, RECORDING_1)
+    forbidden = workspace.preview("admin", [
+        {"track_id": tid, "action": "release", "release_id": RELEASE_B},
+    ])
+    assert forbidden["can_apply"] == 0
+    assert forbidden["items"][0]["status"] == "INCOMPATIBLE"
+    with pytest.raises(ValueError, match="Nothing eligible"):
+        workspace.apply("admin", forbidden["preview_token"])
+    no_album = workspace.preview("admin", [{"track_id": tid, "action": "not_found"}])
+    assert no_album["items"][0]["status"] == "INCOMPATIBLE"
+    with pytest.raises(ValueError, match="Nothing eligible"):
+        workspace.apply("admin", no_album["preview_token"])
+    with pytest.raises(ValueError, match="one destination"):
+        workspace.preview("admin", [
+            {"track_id": tid, "action": "release", "release_id": RELEASE_A},
+            {"track_id": tid, "action": "release", "release_id": RELEASE_B},
+        ])
+    with pytest.raises(ValueError, match="Invalid destination"):
+        workspace.preview("admin", [{"track_id": tid, "action": "release", "release_id": "bad"}])
+    valid, _, _ = add_audio_track(db, environment, RECORDING_2)
+    preview = workspace.preview("admin", [
+        {"track_id": valid, "action": "release", "release_id": RELEASE_B},
+    ])
+    db.execute("UPDATE tracks SET updated_at='2030-01-01T00:00:00Z' WHERE id=?", (valid,))
+    with pytest.raises(ValueError, match="changed since preview"):
+        workspace.apply("admin", preview["preview_token"])
+    assert not db.rows("SELECT * FROM album_changes WHERE track_id=?", (valid,))
+
+
+def test_album_workspace_http_apis_remain_user_scoped(db, environment):
+    from album_workspace import AlbumWorkspace
+    cat, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    local, _, _ = add_audio_track(db, environment, RECORDING_2)
+    guest, _, _ = add_audio_track(db, environment, RECORDING_4, user="guest")
+    with TestClient(create_app(db, start_workers=False)) as client:
+        assert 'data-tab="album"' in client.get("/").text
+        response = client.get("/api/albums/tracks", params={"user_id": "admin"})
+        assert response.status_code == 200
+        assert response.json()["total"] == 0  # currently assigned songs excluded by default
+        include = client.get("/api/albums/tracks",
+                             params={"user_id": "admin", "include_assigned": "true"})
+        assert {r["id"] for r in include.json()["items"]} == {local}
+        assert guest not in {r["id"] for r in include.json()["items"]}
+        assert client.get("/api/albums/tracks",
+                          params={"user_id": "unknown"}).status_code == 400
+        assert client.post("/api/albums/compare", json={
+            "user_id": "admin", "release_ids": [RELEASE_B],
+            "selected_track_ids": [guest]}).status_code == 400
+        assert client.post("/api/albums/plan-preview", json={
+            "user_id": "admin", "decisions": [{"track_id": guest, "action": "not_found"}]
+        }).status_code == 400
+        assert client.post("/api/albums/not-found/clear", json={
+            "user_id": "admin", "track_id": guest}).status_code == 400
+        result=client.post("/api/albums/compare", json={
+            "user_id": "admin", "release_ids": [RELEASE_B],
+            "selected_track_ids": [local]})
+        assert result.status_code == 200
+        assert result.json()["releases"][0]["complete"] is True
