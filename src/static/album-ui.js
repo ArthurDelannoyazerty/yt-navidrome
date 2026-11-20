@@ -31,7 +31,9 @@ window.AlbumUI = (() => {
   const label = track => track.title || track.id;
   const editionLabel = id => ui.releases.get(id)?.name || ui.candidates.get(id)?.album || ("Release " + id.slice(0,8));
   const hasExactMatch = (release,track) =>
-    release.complete && release.tracks.some(item => item.recording_id === track.recording_id);
+    release.complete && (release.recording_ids
+      ? release.recording_ids.includes(track.recording_id)
+      : release.tracks.some(item => item.recording_id === track.recording_id));
   const allChosen = () => [...ui.tracks.values()].filter(item => ui.selected.has(item.id));
   function invalidatePreview() {
     ui.preview=null;
