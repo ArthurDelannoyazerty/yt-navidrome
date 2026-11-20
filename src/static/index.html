@@ -351,6 +351,19 @@
       </div>
       <p id="albumPlanStatus" class="hint" role="status" aria-live="polite"></p>
     </section>
+    <details class="album-workspace-card album-history" id="albumPreferenceSection">
+      <summary>Advanced: preference for future music from a source</summary>
+      <p class="hint">Optional. Only use this when a source genuinely belongs to one exact album edition. Saving a preference does not reassign existing songs. Automatic use for future compatible recordings is off unless you explicitly enable it.</p>
+      <label class="control-field">Release edition
+        <select id="albumPreferredRelease"><option value="">Choose an edition from the comparison</option></select>
+      </label>
+      <label class="check album-include"><input id="albumPreferAuto" type="checkbox"> Automatically use this exact release for future compatible recordings from the selected source</label>
+      <div class="row">
+        <button type="button" id="albumPreferenceSave" class="secondary">Save source preference</button>
+        <button type="button" id="albumPreferenceClear" class="secondary">Clear preference</button>
+      </div>
+      <p id="albumPreferenceStatus" class="hint" role="status" aria-live="polite"></p>
+    </details>
     <details class="album-workspace-card album-history" id="albumHistorySection">
       <summary>History and undo</summary>
       <p class="hint">Completed album tag changes can be individually undone using their original audio backup.</p>

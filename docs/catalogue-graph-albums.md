@@ -179,3 +179,8 @@ That persistent, reversible review state is not written into audio tags.
 A single plan preview rechecks exact membership and file eligibility;
 submitting it queues the existing reversible per-track album jobs with one
 group identifier. Unchanged or incompatible tracks are skipped and explained.
+
+The advanced source-preference section retains the previous optional one-release
+per source rule. Auto-application to *future* compatible recordings stays off
+unless explicitly selected, and does not rearrange existing music. History
+retains individual Undo and Retry interrupted change actions.

@@ -18,7 +18,8 @@ window.AlbumUI = (() => {
     user:null, generation:0, loading:false,
     tracks:new Map(), selected:new Set(), plan:new Map(), candidates:new Map(),
     compared:[], releases:new Map(), recommendations:[], preview:null,
-    offset:0, hasMore:false, total:0, searching:false, loadSerial:0, searchTimer:null
+    offset:0, hasMore:false, total:0, searching:false, loadSerial:0, searchTimer:null,
+    preferences:[]
   };
   const active = (user, generation) =>
     ui.user === user && state.user === user && ui.generation === generation && state.tab === "album";
@@ -236,6 +237,55 @@ window.AlbumUI = (() => {
       renderCompared();renderMatrix();
     }catch(error){if(active(user,generation))status(error.message,true,"albumCompareStatus");}
   }
+  function renderPreference(){
+    const source=el("albumSource").value;
+    const select=el("albumPreferredRelease"),current=select.value;
+    const pref=ui.preferences.find(p=>p.source_id===source);
+    select.replaceChildren();
+    const initial=create("option","Choose an edition from the comparison");initial.value="";
+    select.append(initial);
+    const ids=new Set([...ui.releases.keys(),...ui.candidates.keys()]);
+    if(pref?.release_id)ids.add(pref.release_id);
+    for(const rid of ids){
+      const option=create("option",editionLabel(rid));option.value=rid;select.append(option);
+    }
+    select.value=pref?.release_id || (ids.has(current)?current:"");
+    el("albumPreferAuto").checked=Boolean(pref?.auto_apply);
+    el("albumPreferenceSave").disabled=!source;
+    el("albumPreferenceClear").disabled=!source || !pref;
+    el("albumPreferenceStatus").textContent=source ?
+      (pref ? "Current preference: "+editionLabel(pref.release_id)+
+        (pref.auto_apply ? " · automatic for future compatible music" : " · manual reuse only")
+        : "No source preference saved.") :
+      "Select a source above to manage its optional album preference.";
+  }
+  async function loadPreferences(){
+    const user=ui.user,generation=ui.generation;
+    try{
+      const values=await api("/api/catalogue/preferences?user_id="+encodeURIComponent(user));
+      if(!active(user,generation))return;
+      ui.preferences=values||[];
+      renderPreference();
+    }catch(error){if(active(user,generation))status(error.message,true,"albumPreferenceStatus");}
+  }
+  async function savePreference(clear=false){
+    const user=ui.user,generation=ui.generation,source_id=el("albumSource").value;
+    if(!source_id){status("Select a specific source first.",true,"albumPreferenceStatus");return;}
+    const release_id=el("albumPreferredRelease").value;
+    if(!clear && !release_id){status("Choose the exact release edition first.",true,"albumPreferenceStatus");return;}
+    if(!clear && el("albumPreferAuto").checked &&
+        !confirm("Automatically apply this release to future recordings from the selected source when their MusicBrainz recording ID matches its tracklist? Existing music is unchanged."))
+      return;
+    try{
+      await api("/api/catalogue/preference",{user_id:user,source_id,
+        release_id:clear?null:release_id,
+        enabled:!clear && el("albumPreferAuto").checked,clear});
+      if(!active(user,generation))return;
+      await loadPreferences();
+      status(clear?"Source preference cleared.":"Preference saved. Existing music is unchanged.",
+        false,"albumPreferenceStatus");
+    }catch(error){if(active(user,generation))status(error.message,true,"albumPreferenceStatus");}
+  }
   function renderCompared(){
     const body=el("albumCompared");body.replaceChildren();
     for(const rid of ui.compared){
@@ -271,6 +321,7 @@ window.AlbumUI = (() => {
       }
       body.append(box);
     }
+    renderPreference();
     refreshSummary();
   }
   function assignAlbumless(rid){
@@ -453,6 +504,12 @@ window.AlbumUI = (() => {
         const row=create("article",null,"album-history-row");
         row.append(create("span",change.track_id.slice(0,8)+" · "+
           editionLabel(change.release_id)+" · "+change.status));
+        if(change.error && ["QUEUED","PREPARED","UNDO_PREPARED"].includes(change.status))
+          row.append(action("Retry interrupted change",async()=>{
+            await api("/api/catalogue/album-retry",{user_id:user,change_id:change.id});
+            status("Interrupted album operation requeued. The original backup is retained.");
+            await loadHistory();
+          }));
         if(change.status==="DONE")row.append(action("Undo",async()=>{
           if(!confirm("Undo this individual album change from its backup?"))return;
           await api("/api/catalogue/album-undo",{user_id:user,change_id:change.id});
@@ -483,7 +540,7 @@ window.AlbumUI = (() => {
       for(const source of sources){
         const option=create("option",source.title);option.value=source.id;chooser.append(option);
       }
-      await Promise.all([loadTracks(true),loadHistory()]);
+      await Promise.all([loadTracks(true),loadHistory(),loadPreferences()]);
     }catch(error){if(active(user,generation))status(error.message,true);}
   }
   function leave(){ui.generation++;}
@@ -493,17 +550,22 @@ window.AlbumUI = (() => {
     ui.tracks.clear();ui.selected.clear();
     ui.plan.clear();ui.candidates.clear();ui.compared=[];ui.releases.clear();
     ui.recommendations=[];ui.preview=null;ui.offset=0;ui.hasMore=false;ui.total=0;
+    ui.preferences=[];
     for(const id of ["albumTracks","albumCandidates","albumSearchResults","albumCompared",
       "albumMatrix","albumPlanResults","albumHistory"])el(id).replaceChildren();
     for(const id of ["albumTrackCount","albumRecommendStatus","albumSearchStatus",
       "albumCompareStatus","albumPlanStatus"])el(id).textContent="";
     el("albumIncludeAssigned").checked=false;el("albumTrackSearch").value="";
     el("albumSearchQuery").value="";el("albumSource").value="";
+    el("albumPreferAuto").checked=false;el("albumPreferenceStatus").textContent="";
+    renderPreference();
     el("albumPlanConfirm").hidden=true;el("albumLoadMore").hidden=true;
     renderRecommendations();renderMatrix();refreshSummary();
   }
   el("albumRefresh").addEventListener("click",()=>loadTracks(true));
-  el("albumSource").addEventListener("change",()=>loadTracks(true));
+  el("albumSource").addEventListener("change",()=>{
+    renderPreference();void loadTracks(true);
+  });
   el("albumIncludeAssigned").addEventListener("change",()=>{
     void loadTracks(true).then(()=>compare());
   });
@@ -531,5 +593,7 @@ window.AlbumUI = (() => {
   el("albumPlanApply").addEventListener("click",()=>applyPlan());
   el("albumPlanCancel").addEventListener("click",invalidatePreview);
   el("albumHistoryRefresh").addEventListener("click",()=>loadHistory());
+  el("albumPreferenceSave").addEventListener("click",()=>savePreference(false));
+  el("albumPreferenceClear").addEventListener("click",()=>savePreference(true));
   return {enter,leave,reset};
 })();
