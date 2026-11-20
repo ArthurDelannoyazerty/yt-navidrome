@@ -1271,12 +1271,12 @@ def test_album_workspace_http_apis_remain_user_scoped(db, environment):
                           params={"user_id": "unknown"}).status_code == 400
         assert client.post("/api/albums/compare", json={
             "user_id": "admin", "release_ids": [RELEASE_B],
-            "selected_track_ids": [guest]}).status_code == 400
+            "selected_track_ids": [guest]}).status_code == 404
         assert client.post("/api/albums/plan-preview", json={
             "user_id": "admin", "decisions": [{"track_id": guest, "action": "not_found"}]
-        }).status_code == 400
+        }).status_code == 404
         assert client.post("/api/albums/not-found/clear", json={
-            "user_id": "admin", "track_id": guest}).status_code == 400
+            "user_id": "admin", "track_id": guest}).status_code == 404
         result=client.post("/api/albums/compare", json={
             "user_id": "admin", "release_ids": [RELEASE_B],
             "selected_track_ids": [local]})
