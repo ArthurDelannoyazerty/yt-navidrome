@@ -299,10 +299,34 @@ window.AlbumUI = (() => {
     }
     invalidatePreview();renderMatrix();
   }
-  function findForTrack(track){
-    el("albumSearchQuery").value=label(track);
+  async function findForTrack(track){
+    const user=ui.user,generation=ui.generation;
+    const body=el("albumSearchResults");body.replaceChildren();
+    status("Finding releases with this exact MusicBrainz recording ID…",false,"albumSearchStatus");
     el("albumSearchForm").scrollIntoView?.({block:"start",behavior:"smooth"});
-    void searchRelease(false);
+    try {
+      const result=await api("/api/catalogue/recommendations",{
+        user_id:user,release_id:"00000000-0000-4000-8000-000000000000",
+        track_ids:[track.id]});
+      if(!active(user,generation))return;
+      for(const release of result.candidates||[]){
+        ui.candidates.set(release.release_id,release);
+        body.append(releaseCard(release));
+      }
+      if(result.missing_cache?.length){
+        body.append(create("p","Recording-to-release relationships are not indexed yet.","hint"));
+        body.append(action("Sync this recording's releases",async()=>{
+          await api("/api/catalogue/sync",{
+            user_id:user,kind:"recording",id:track.recording_id,sections:["release"]});
+          status("MusicBrainz release lookup queued. Recheck this song after synchronization completes.",
+            false,"albumSearchStatus");
+        }));
+      }
+      if(!result.candidates?.length && !result.missing_cache?.length)
+        body.append(create("p","No cached releases contain this recording. You can also search by album name above.","hint"));
+      status((result.candidates||[]).length+" releases with an exact recording-ID match. "+
+        "Add one with Compare edition, or search by album name above.",false,"albumSearchStatus");
+    }catch(error){if(active(user,generation))status(error.message,true,"albumSearchStatus");}
   }
   function renderMatrix(){
     const body=el("albumMatrix");body.replaceChildren();
