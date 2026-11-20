@@ -1187,6 +1187,8 @@ def test_album_workspace_supports_different_releases_in_one_plan(db, environment
     assert preview["can_apply"] == 1
     assert {r["status"] for r in preview["items"]} == {"UNCHANGED", "COMPATIBLE"}
     assert {r["target_release_id"] for r in preview["items"]} == {RELEASE_A, RELEASE_B}
+    assert db.one("SELECT COUNT(*) AS n FROM album_previews")["n"] == 1, (
+        "Multi-release preview must not leave orphaned single-release preview tokens")
     result = workspace.apply("admin", preview["preview_token"])
     assert result["queued"] == 1
     assert db.one("SELECT release_id FROM album_changes WHERE group_id=?",

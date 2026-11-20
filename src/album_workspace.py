@@ -235,7 +235,7 @@ class AlbumWorkspace:
         for rid, track_ids in grouped.items():
             # Reuse the existing album manager's compatibility and migration
             # checks instead of inventing a weaker file-safety path.
-            preview = self.manager.preview(user_id, rid, track_ids=track_ids)
+            preview = self.manager.preview(user_id, rid, track_ids=track_ids, persist=False)
             for item in preview["items"]:
                 item = {**item, "action": "release", "target_release_id": rid,
                         "target_album": preview["album"]}
