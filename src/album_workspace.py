@@ -78,6 +78,7 @@ class AlbumWorkspace:
                 (*args, limit, offset),
             ).fetchall()
         items = [self._item(row) for row in rows]
+        self._fill_album_names(items)
         return {"total": total, "offset": offset, "limit": limit,
                 "items": items, "has_more": offset + len(items) < total}
 
@@ -90,6 +91,23 @@ class AlbumWorkspace:
                 "not_found": not values["release_id"] and
                     values.get("not_found_recording") == values["mbid"],
                 "health": values["health"], "operation_state": values["operation_state"]}
+
+    def _fill_album_names(self, items):
+        ids = sorted({item["current_release_id"] for item in items
+                      if item.get("current_release_id")})
+        if not ids:
+            return
+        names = {}
+        with self.catalogue.db() as con:
+            for start in range(0, len(ids), 400):
+                part = ids[start:start+400]
+                marks = ",".join("?" for _ in part)
+                names.update({row["id"]: row["name"] for row in con.execute(
+                    f"SELECT id,name FROM entities WHERE kind='release' AND id IN ({marks})",
+                    part,
+                )})
+        for item in items:
+            item["current_album"] = names.get(item.get("current_release_id"))
 
     def compare(self, user_id, release_ids, *, selected_track_ids=(),
                 include_assigned=False):
@@ -161,6 +179,7 @@ class AlbumWorkspace:
                             extra.append(self._item(row));excluded.add(row["id"])
                         if len(extra) >= 500: break
                     if len(extra) >= 500: break
+        self._fill_album_names(extra)
         return {"releases": output, "additional_assigned_matches": extra,
                 "note": "Only exact MusicBrainz recording IDs count as matches. "
                         "An incomplete tracklist is unknown, not a negative match."}
@@ -193,6 +212,13 @@ class AlbumWorkspace:
             else:
                 raise ValueError("Unknown album decision")
         result = []
+        if grouped:
+            with self.catalogue.db() as con:
+                for rid in grouped:
+                    if not con.execute(
+                        "SELECT 1 FROM fetched_releases WHERE release_id=?", (rid,)
+                    ).fetchone():
+                        raise ValueError("Full release tracklist is not cached; sync the edition first")
         for rid, track_ids in grouped.items():
             # Reuse the existing album manager's compatibility and migration
             # checks instead of inventing a weaker file-safety path.
@@ -231,13 +257,31 @@ class AlbumWorkspace:
         for row in result:
             row["title"] = titles.get(row["track_id"],row["track_id"])
         result.sort(key=lambda x:(x["title"].casefold(),x["track_id"]))
+        # A release-to-release move can shrink the old album without moving
+        # unrelated recordings. Show both album totals before confirmation.
+        with self.store.db() as con:
+            counts = {row["release_id"]: row["count"] for row in con.execute(
+                """SELECT release_id,COUNT(*) AS count FROM tracks
+                   WHERE user_id=? AND release_id IS NOT NULL GROUP BY release_id""",
+                (user_id,),
+            )}
+        effects = {}
+        for item in result:
+            if item["action"]!="release" or item["status"]!="COMPATIBLE":
+                continue
+            old, new = item["old_release_id"], item["target_release_id"]
+            if old:
+                effects[old] = effects.get(old,counts.get(old,0))-1
+            effects[new] = effects.get(new,counts.get(new,0))+1
+        impact = [{"release_id": rid, "before": counts.get(rid,0), "after": after}
+                  for rid,after in sorted(effects.items())]
         token = uuid.uuid4().hex
         with self.store.db() as con:
             con.execute(
                 "INSERT INTO album_previews VALUES (?,?,?,?,?,?,NULL)",
                 (token,user_id,PLAN_MARKER,json.dumps(result),utcnow(),time.time()+1200),
             )
-        return {"preview_token": token, "items": result,
+        return {"preview_token": token, "items": result, "impact": impact,
                 "can_apply": sum(row["status"]=="COMPATIBLE" for row in result),
                 "can_mark": sum(row["status"]=="MARK_NOT_FOUND" for row in result),
                 "note": "Only eligible exact-recording matches change album tags. "
@@ -286,8 +330,12 @@ class AlbumWorkspace:
                 if not self.catalogue.release_assignment(item["target_release_id"],
                                                          item["recording_id"]):
                     raise ValueError("MusicBrainz release membership changed; review again")
-                if not self.catalogue.get("release",item["target_release_id"])["tracks"]:
-                    raise ValueError("Release tracklist is not cached")
+                with self.catalogue.db() as cat_db:
+                    if not cat_db.execute(
+                        "SELECT 1 FROM fetched_releases WHERE release_id=?",
+                        (item["target_release_id"],),
+                    ).fetchone():
+                        raise ValueError("Full release tracklist is no longer cached; review again")
                 path = Path(row["path"])
                 if not path.is_file() or sha256_file(path)!=item["sha256"]:
                     raise ValueError("The audio file changed since preview; review again")
@@ -302,6 +350,15 @@ class AlbumWorkspace:
                     row["release_id"] is not None or row["updated_at"]!=item["revision"] or
                     row["operation_state"]!="IDLE" or row["health"]!="AVAILABLE"):
                     raise ValueError("A recording changed since review; review again")
+                if con.execute(
+                    """SELECT 1 FROM jobs j LEFT JOIN album_changes c
+                       ON j.kind='album' AND c.id=j.target
+                       WHERE j.state IN ('PENDING','RUNNING')
+                       AND (j.kind='track' AND j.target=?
+                            OR j.kind='album' AND c.track_id=?) LIMIT 1""",
+                    (item["track_id"],item["track_id"]),
+                ).fetchone():
+                    raise ValueError("A recording has an active operation; review again")
             if changes:
                 available = shutil.disk_usage(self.manager.backup_root.parent).free
                 if available < required_space + max(256*1024*1024,required_space//10):
