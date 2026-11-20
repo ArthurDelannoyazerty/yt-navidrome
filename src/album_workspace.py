@@ -139,11 +139,17 @@ class AlbumWorkspace:
                        WHERE release_id=? ORDER BY medium,position LIMIT 1000""",
                     (identity,),
                 ).fetchall() if fetched else []
+                # A large edition may have >1,000 entries. The compact visible
+                # tracklist is capped, but exact membership must never be capped.
+                all_ids = [row["recording_id"] for row in con.execute(
+                    "SELECT DISTINCT recording_id FROM release_tracks WHERE release_id=?",
+                    (identity,),
+                )] if fetched else []
                 all_count = con.execute("SELECT COUNT(*) FROM release_tracks WHERE release_id=?",
                                         (identity,)).fetchone()[0] if fetched else 0
                 data = json.loads(entry["data"]) if entry else {}
                 group = data.get("release-group") or {}
-                ids = {r["recording_id"] for r in tracks}
+                ids = set(all_ids)
                 candidate_recordings.update(ids)
                 output.append({
                     "id": identity, "name": entry["name"] if entry else "Unknown release",
@@ -153,6 +159,7 @@ class AlbumWorkspace:
                     "status": data.get("status"), "complete": fetched,
                     "track_count": all_count,
                     "tracks": [dict(r) for r in tracks],
+                    "recording_ids": sorted(ids),
                     "matched_recording_ids": sorted(local_ids & ids),
                 })
         extra = []
