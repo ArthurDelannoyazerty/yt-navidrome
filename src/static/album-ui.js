@@ -77,13 +77,14 @@ window.AlbumUI = (() => {
       !query || [label(t),t.recording_id,t.current_release_id].join(" ").toLocaleLowerCase().includes(query));
     body.replaceChildren();
     for (const item of rows) {
-      const row=create("label",null,"album-track-row");
+      const row=create("div",null,"album-track-row");
       const check=create("input");check.type="checkbox";check.checked=ui.selected.has(item.id);
+      check.setAttribute("aria-label","Select "+label(item));
       check.addEventListener("change",() => selectTrack(item.id,check.checked));
       const bodyText=create("span",null,"album-track-text");
       bodyText.append(create("strong",label(item)));
       let album=item.current_release_id
-        ? "Assigned · " + editionLabel(item.current_release_id)
+        ? "Assigned · " + (item.current_album || editionLabel(item.current_release_id))
         : item.not_found ? "Reviewed: No Album Found" : "No album assigned";
       const meta=create("small",album);
       bodyText.append(meta);
@@ -156,7 +157,8 @@ window.AlbumUI = (() => {
     }
     for(const [group,entries] of grouped) {
       const section=create("section",null,"album-family");
-      section.append(create("h4",entries[0].album+" · "+entries.length+" edition"+(entries.length!==1?"s":"")));
+      section.append(create("h4",(entries[0].release_group_name||entries[0].album)+
+        " · "+entries.length+" edition"+(entries.length!==1?"s":"")));
       const list=create("div",null,"album-candidate-list");
       for(const entry of entries)list.append(releaseCard(entry));
       section.append(list);body.append(section);
@@ -376,7 +378,16 @@ window.AlbumUI = (() => {
         ])row.append(create("td",value));
         table.append(row);
       }
-      el("albumPlanResults").replaceChildren(table);
+      const overview=create("div",null,"album-impact");
+      for(const item of result.impact||[]){
+        const current=ui.tracks.values();
+        const known=[...current].find(t=>t.current_release_id===item.release_id);
+        const name=ui.releases.get(item.release_id)?.name ||
+          known?.current_album || editionLabel(item.release_id);
+        overview.append(create("span",name+": "+item.before+" → "+item.after+" tracks",
+          "album-impact-item"));
+      }
+      el("albumPlanResults").replaceChildren(overview,table);
       const eligible=result.can_apply+result.can_mark;
       el("albumPlanConfirm").hidden=eligible===0;
       status(result.can_apply+" eligible album changes; "+result.can_mark+
