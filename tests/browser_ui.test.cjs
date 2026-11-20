@@ -265,7 +265,7 @@ async function fixtureServer(t, data) {
         return;
       }
       else if (url.pathname === "/api/sources") result = data.sources || [];
-      else if (url.pathname === "/api/catalogue/sources") result = [];
+      else if (url.pathname === "/api/catalogue/sources") result = data.albumSources || [];
       else if (url.pathname === "/api/albums/tracks") {
         const include = url.searchParams.get("include_assigned")==="true";
         const list = (data.albumTracks||[]).filter(t=>include || !t.current_release_id);
@@ -1306,6 +1306,7 @@ test("real browser: Album workspace compares overlapping releases without moving
   const a="55555555-5555-4555-8555-555555555555",b="66666666-6666-4666-8666-666666666666";
   const r1="11111111-1111-4111-8111-111111111111",r2="22222222-2222-4222-8222-222222222222";
   const r3="33333333-3333-4333-8333-333333333333",r4="44444444-4444-4444-8444-444444444444";
+  data.albumSources=[{id:"source-1",title:"Soundtrack source",status:"ACTIVE"}];
   data.albumTracks=[
     {id:"one",title:"Song One",recording_id:r1,current_release_id:a,not_found:false},
     {id:"two",title:"Song Two",recording_id:r2,current_release_id:null,not_found:false},
@@ -1371,6 +1372,14 @@ test("real browser: Album workspace compares overlapping releases without moving
   assert.equal(data.albumTracks[1].current_release_id,a);
   assert.equal(data.albumTracks[2].current_release_id,b);
   assert.equal(data.albumTracks[3].not_found,true);
+  await chrome.evaluate("document.querySelector('#albumSource').value='source-1';document.querySelector('#albumSource').dispatchEvent(new Event('change'));document.querySelector('#albumPreferenceSection').open=true");
+  await chrome.until("!document.querySelector('#albumPreferenceSave').disabled");
+  await chrome.evaluate("document.querySelector('#albumPreferredRelease').value='"+b+"';document.querySelector('#albumPreferenceSave').click()");
+  await chrome.until("document.querySelector('#albumPreferenceStatus').textContent.includes('Preference saved')");
+  assert.deepEqual(data.albumPreferences,[{user_id:"admin",source_id:"source-1",release_id:b,auto_apply:false}]);
+  await chrome.evaluate("document.querySelector('#albumPreferenceClear').click()");
+  await chrome.until("document.querySelector('#albumPreferenceStatus').textContent.includes('preference cleared')");
+  assert.equal(data.albumPreferences.length,0);
   assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
   assert.deepEqual(chrome.errors,[]);
   await chrome.screenshot("album-assignment-workspace");
