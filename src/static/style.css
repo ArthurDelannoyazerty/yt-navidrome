@@ -665,3 +665,8 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .album-card-heading { align-items: flex-start; }
   .album-compare-table th:first-child, .album-compare-table td:first-child { min-width: 105px; max-width: 135px; }
 }
+
+#albumPlanResults { overflow-x: auto; }
+.album-impact { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.album-impact-item { display: inline-block; border: 1px solid var(--border);
+  border-radius: 7px; padding: 7px 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
