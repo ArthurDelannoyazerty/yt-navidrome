@@ -60,8 +60,8 @@ The identity of a MusicBrainz **recording** is approved manually, independently
 of its album edition. A recording may appear on multiple editions/releases;
 no first-match heuristic is accepted as proof of the correct album.
 
-Select one or more existing **Sources** or explicitly enter track IDs in the
-Catalogue album organizer. **Compare album candidates** uses cached
+Open the dedicated **Album** tab, select local recordings (optionally including
+recordings assigned to other albums and sources), and compare releases. **Compare album candidates** uses cached
 recording-to-release links. Coverage counts show compatibility, not confidence;
 a tiny two-song set may be ambiguous and a large source may mix several albums.
 
@@ -162,3 +162,25 @@ safe for production solely by importer unit tests.
 
 Never reformat or modify album tags at the same time as the move-only scan.
 Do not enable bulk album edits until the Navidrome checkpoint is complete.
+
+### Full-page Album assignment workspace
+
+The Catalogue tab now handles browsing and cache synchronization only.
+The Album tab has a paginated, searchable local recording scope, optional
+inclusion of already assigned music, cached album-family/edition suggestions,
+a four-column exact-recording comparison, and manual search for additional
+MusicBrainz releases. Previously assigned music stays protected unless a user
+selects a new target release for that exact recording.
+
+The plan can contain different destination releases for different recordings.
+No track is silently moved to fill an album. A recording with no chosen release
+may be explicitly marked **No Album Found** (only while it is albumless).
+That persistent, reversible review state is not written into audio tags.
+A single plan preview rechecks exact membership and file eligibility;
+submitting it queues the existing reversible per-track album jobs with one
+group identifier. Unchanged or incompatible tracks are skipped and explained.
+
+The advanced source-preference section retains the previous optional one-release
+per source rule. Auto-application to *future* compatible recordings stays off
+unless explicitly selected, and does not rearrange existing music. History
+retains individual Undo and Retry interrupted change actions.

@@ -165,6 +165,53 @@ async function fixtureServer(t, data) {
             deferred:77,due:1705,running:0,cache_bytes:1048576-81920,
             catalogue_db_bytes:8388608,cooldown_seconds:0};
         }
+        if (url.pathname === "/api/catalogue/recommendations")
+          result = {candidates: data.albumCandidates || [], recording_count: 4,
+            track_count: 4, missing_cache: []};
+        if (url.pathname === "/api/albums/compare") {
+          const local = data.albumTracks || [];
+          result = {
+            releases: (payload.release_ids || []).map(id => (data.albumEditions || []).find(r=>r.id===id)),
+            additional_assigned_matches: payload.include_assigned
+              ? local.filter(t=>t.current_release_id && !payload.selected_track_ids.includes(t.id)) : []
+          };
+        }
+        if (url.pathname === "/api/albums/plan-preview") {
+          const plans = payload.decisions.map(d => {
+            const track = (data.albumTracks || []).find(t=>t.id===d.track_id);
+            const target = (data.albumEditions || []).find(r=>r.id===d.release_id);
+            const status = d.action==="not_found" ? "MARK_NOT_FOUND" :
+              d.release_id===track.current_release_id ? "UNCHANGED" : "COMPATIBLE";
+            return {...d, title:track.title, old_release_id:track.current_release_id,
+              target_album:target?.name||"No Album Found",status};
+          });
+          result = {preview_token:"plan-test-token",items:plans,
+            can_apply:plans.filter(x=>x.status==="COMPATIBLE").length,
+            can_mark:plans.filter(x=>x.status==="MARK_NOT_FOUND").length};
+        }
+        if (url.pathname === "/api/albums/plan-apply") {
+          const plans = data.writes.filter(x=>x.path==="/api/albums/plan-preview").at(-1)?.body?.decisions || [];
+          for (const plan of plans) {
+            const track = (data.albumTracks || []).find(t=>t.id===plan.track_id);
+            if (plan.action==="release")track.current_release_id=plan.release_id;
+            if (plan.action==="not_found")track.not_found=true;
+          }
+          result = {group_id:"batch-test",queued:plans.filter(x=>x.action==="release").length,
+            marked_not_found:plans.filter(x=>x.action==="not_found").length,skipped:0};
+        }
+        if (url.pathname === "/api/catalogue/preference") {
+          data.albumPreferences = (data.albumPreferences || []).filter(p=>p.source_id!==payload.source_id);
+          if(!payload.clear)data.albumPreferences.push({
+            user_id:payload.user_id,source_id:payload.source_id,
+            release_id:payload.release_id,auto_apply:payload.enabled
+          });
+          result={source_id:payload.source_id,auto_apply:payload.enabled,removed:payload.clear};
+        }
+        if (url.pathname === "/api/albums/not-found/clear") {
+          const track=(data.albumTracks||[]).find(t=>t.id===payload.track_id);
+          if(track)track.not_found=false;
+          result={cleared:true};
+        }
         if (url.pathname === "/api/musicbrainz/approval-prefetch-retry") {
           data.failedJobs = (data.failedJobs || []).filter(item => item.job_id !== payload.job_id);
           if (data.prefetchStatus) {
@@ -218,7 +265,15 @@ async function fixtureServer(t, data) {
         return;
       }
       else if (url.pathname === "/api/sources") result = data.sources || [];
-      else if (url.pathname === "/api/catalogue/sources") result = [];
+      else if (url.pathname === "/api/catalogue/sources") result = data.albumSources || [];
+      else if (url.pathname === "/api/albums/tracks") {
+        const include = url.searchParams.get("include_assigned")==="true";
+        const list = (data.albumTracks||[]).filter(t=>include || !t.current_release_id);
+        const offset = Number(url.searchParams.get("offset")||0);
+        const limit = Number(url.searchParams.get("limit")||100);
+        result = {total:list.length,offset,limit,items:list.slice(offset,offset+limit),
+          has_more:offset+limit<list.length};
+      }
       else if (url.pathname === "/api/catalogue/progress") result = {counts:{}, active:[]};
       else if (url.pathname === "/api/catalogue/graph") result = data.graph || {nodes:[], edges:[], owned_recording_count:0, truncated:false};
       else if (url.pathname === "/api/catalogue/language-preview") result = data.languagePreview || {
@@ -243,6 +298,7 @@ async function fixtureServer(t, data) {
         result = {states: data.languageJobStates || {}};
       else if (url.pathname === "/api/catalogue/language-apply-progress") result = {state:"complete",processed:12,eligible:12,queued:3};
       else if (url.pathname === "/api/catalogue/album-history") result = [];
+      else if (url.pathname === "/api/catalogue/preferences") result = data.albumPreferences || [];
       else if (url.pathname === "/api/catalogue/search") result = {items:data.catalogueSearch || [], remote:false};
       else if (url.pathname === "/api/catalogue/entity") result = data.catalogueEntity ||
         {entity:null, scopes:[], relations:[], tracks:[]};
@@ -487,7 +543,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
   assert.equal(await chrome.evaluate("!!document.querySelector('.review-toolbar,#startReview,#approveSelected,#metadataDialog')"),false);
-  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","catalogue","language","graph","sources","activity","maintenance","help"]);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","catalogue","album","language","graph","sources","activity","maintenance","help"]);
   await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
   await chrome.until("!document.querySelector('#approvalWorkspace').hidden && document.querySelectorAll('#mbResults tbody tr').length===1");
   assert.equal(await chrome.evaluate("document.querySelector('#approvalFilter').value"),"NEEDS_APPROVAL");
@@ -552,9 +608,9 @@ test("real browser: Help lazily renders the workflow with local Pele and fits na
   assert.equal(await chrome.evaluate("Array.from(document.scripts).filter(script=>script.src.includes('pele-flowchart.js')).every(script=>new URL(script.src).origin===location.origin)"),true);
   assert.equal(await chrome.evaluate("document.querySelectorAll('.transition-table tbody tr').length>=7"),true);
   assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.getAttribute('href'))"),
-    ["#help-music","#help-approval","#help-catalogue","#help-language","#help-graph",
+    ["#help-music","#help-approval","#help-catalogue","#help-album","#help-language","#help-graph",
      "#help-sources","#help-activity","#help-maintenance","#help-help"]);
-  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-topic').length"),9);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-topic').length"),10);
   await chrome.evaluate("document.querySelector('.workflow-diagram').scrollIntoView({block:'start'})");
   await chrome.screenshot("help-workflow-desktop");
   await chrome.evaluate("document.fonts.ready.then(() => {window.helpResizeBaseline=document.querySelector('#workflowDiagram svg');})");
@@ -1242,4 +1298,89 @@ test("real browser: failed MusicBrainz prefetch dropdown retries one request wit
   await chrome.screenshot("catalogue-disabled-prefetch-jobs");
   assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
   assert.deepEqual(chrome.errors,[]);
+});
+
+test("real browser: Album workspace compares overlapping releases without moving existing songs automatically", {timeout:60000}, async t => {
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures();data.strictCsp=true;
+  const a="55555555-5555-4555-8555-555555555555",b="66666666-6666-4666-8666-666666666666";
+  const r1="11111111-1111-4111-8111-111111111111",r2="22222222-2222-4222-8222-222222222222";
+  const r3="33333333-3333-4333-8333-333333333333",r4="44444444-4444-4444-8444-444444444444";
+  data.albumSources=[{id:"source-1",title:"Soundtrack source",status:"ACTIVE"}];
+  data.albumTracks=[
+    {id:"one",title:"Song One",recording_id:r1,current_release_id:a,not_found:false},
+    {id:"two",title:"Song Two",recording_id:r2,current_release_id:null,not_found:false},
+    {id:"three",title:"Song Three",recording_id:r3,current_release_id:null,not_found:false},
+    {id:"four",title:"Song Four",recording_id:r4,current_release_id:null,not_found:false},
+  ];
+  data.albumCandidates=[
+    {release_id:a,album:"Original Edition",release_group_id:"family",matched:2,unmatched:2,
+     release_tracks_cached:2,date:"2010",status:"Official"},
+    {release_id:b,album:"Expanded Edition",release_group_id:"family",matched:2,unmatched:2,
+     release_tracks_cached:2,date:"2020",status:"Official"},
+  ];
+  data.albumEditions=[
+    {id:a,name:"Original Edition",group_id:"family",group_name:"Family",complete:true,
+     track_count:2,tracks:[
+       {recording_id:r1,title:"Song One",medium:1,position:1},
+       {recording_id:r2,title:"Song Two",medium:1,position:2}]},
+    {id:b,name:"Expanded Edition",group_id:"family",group_name:"Family",complete:true,
+     track_count:2,tracks:[
+       {recording_id:r2,title:"Song Two",medium:1,position:1},
+       {recording_id:r3,title:"Song Three",medium:1,position:2}]},
+  ];
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.addScriptToEvaluateOnNewDocument",{source:
+    "window.styleViolations=[];document.addEventListener('securitypolicyviolation',event=>{if(event.effectiveDirective.startsWith('style-src'))window.styleViolations.push(event.violatedDirective);});"});
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1");
+  await chrome.evaluate("document.querySelector('[data-tab=album]').click()");
+  await chrome.until("document.querySelectorAll('#albumTracks .album-track-row').length===3");
+  assert.equal(await chrome.evaluate("document.querySelector('#albumTrackCount').textContent.includes('3 loaded')"),true);
+  assert.equal(await chrome.evaluate("document.querySelector('#cataloguePanel').querySelector('[aria-label=\"Album organization\"]')"),null);
+  await chrome.evaluate("document.querySelector('#albumIncludeAssigned').click()");
+  await chrome.until("document.querySelectorAll('#albumTracks .album-track-row').length===4");
+  await chrome.evaluate("document.querySelector('#albumSelectVisible').click()");
+  await chrome.until("document.querySelectorAll('#albumMatrix tbody tr').length===4");
+  await chrome.evaluate("document.querySelector('#albumRecommend').click()");
+  await chrome.until("document.querySelectorAll('#albumCandidates .album-release-card').length===2");
+  await chrome.evaluate("document.querySelectorAll('#albumCandidates .album-release-card button')[0].click()");
+  await chrome.until("document.querySelectorAll('#albumCompared .album-compared-card').length===1");
+  await chrome.evaluate("document.querySelectorAll('#albumCandidates .album-release-card button')[1].click()");
+  await chrome.until("document.querySelectorAll('#albumCompared .album-compared-card').length===2");
+  assert.match(await chrome.evaluate("document.querySelector('#albumMatrix').textContent"),/Song Four/);
+  assert.equal(await chrome.evaluate("document.querySelector('#albumPlanSummary').textContent.startsWith('0 proposed decisions')"),true);
+  // Bulk action may only assign previously albumless songs; Song One remains on A.
+  await chrome.evaluate("document.querySelectorAll('#albumCompared .album-compared-card button')[1].click()");
+  await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('1 new album assignments')");
+  assert.equal(await chrome.evaluate("document.querySelector('#albumPlanSummary').textContent.includes('0 explicit moves')"),true);
+  // Song Three moves to the expanded edition explicitly; Song Four stays unmatched.
+  await chrome.evaluate("(()=>{const row=[...document.querySelectorAll('#albumMatrix tbody tr')].find(tr=>tr.cells[0].textContent==='Song Three');row.querySelector('select').value='"+b+"';row.querySelector('select').dispatchEvent(new Event('change'));})()");
+  await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('2 new album assignments')");
+  await chrome.evaluate("(()=>{const row=[...document.querySelectorAll('#albumMatrix tbody tr')].find(tr=>tr.cells[0].textContent==='Song Four');[...row.querySelectorAll('button')].find(b=>b.textContent==='No Album Found').click();})()");
+  await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('1 No Album Found')");
+  await chrome.evaluate("document.querySelector('#albumPlanPreview').click()");
+  await chrome.until("document.querySelector('#albumPlanStatus').textContent.includes('2 eligible album changes')");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('#albumPlanResults tr').length"),4);
+  await chrome.evaluate("document.querySelector('#albumPlanApply').click()");
+  await chrome.until("document.querySelector('#albumPlanStatus').textContent.includes('2 album-only changes queued')");
+  const writes=data.writes.filter(x=>x.path==="/api/albums/plan-apply");
+  assert.equal(writes.length,1);
+  assert.equal(data.albumTracks[0].current_release_id,a,"already assigned music was not automatically moved");
+  assert.equal(data.albumTracks[1].current_release_id,a);
+  assert.equal(data.albumTracks[2].current_release_id,b);
+  assert.equal(data.albumTracks[3].not_found,true);
+  await chrome.evaluate("document.querySelector('#albumSource').value='source-1';document.querySelector('#albumSource').dispatchEvent(new Event('change'));document.querySelector('#albumPreferenceSection').open=true");
+  await chrome.until("!document.querySelector('#albumPreferenceSave').disabled");
+  await chrome.evaluate("document.querySelector('#albumPreferredRelease').value='"+b+"';document.querySelector('#albumPreferenceSave').click()");
+  await chrome.until("document.querySelector('#albumPreferenceStatus').textContent.includes('Preference saved')");
+  assert.deepEqual(data.albumPreferences,[{user_id:"admin",source_id:"source-1",release_id:b,auto_apply:false}]);
+  await chrome.evaluate("document.querySelector('#albumPreferenceClear').click()");
+  await chrome.until("document.querySelector('#albumPreferenceStatus').textContent.includes('preference cleared')");
+  assert.equal(data.albumPreferences.length,0);
+  assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
+  assert.deepEqual(chrome.errors,[]);
+  await chrome.screenshot("album-assignment-workspace");
 });

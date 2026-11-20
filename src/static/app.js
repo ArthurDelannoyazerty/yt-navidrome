@@ -10,7 +10,7 @@ const activity = {
   fastPoll: new IngestorUI.AsyncState("fast-poll"),
   slowPoll: new IngestorUI.AsyncState("slow-poll"),
 };
-const navigation = IngestorUI.selectionMachine("navigation", ["music", "approval", "catalogue", "language", "graph", "sources", "activity", "maintenance", "help"], "music");
+const navigation = IngestorUI.selectionMachine("navigation", ["music", "approval", "catalogue", "album", "language", "graph", "sources", "activity", "maintenance", "help"], "music");
 const musicView = IngestorUI.selectionMachine("music-view", ["tracks", "ignored"], "tracks");
 const accountFlow = new IngestorUI.StateMachine("library-selection", "loading", {
   loading: {choose: "choosing", select: "selected", fail: "error", reload: "loading"},
@@ -230,6 +230,7 @@ function updateKeyedChildren(container, items, {key, signature, render, backgrou
 function setTab(name, activateApproval = true) {
   if (state.tab === "approval" && name !== "approval") window.MetadataUI?.leave();
   if (state.tab === "catalogue" && name !== "catalogue") window.CatalogueUI?.leave();
+  if (state.tab === "album" && name !== "album") window.AlbumUI?.leave();
   if (state.tab === "graph" && name !== "graph") window.GraphUI?.leave();
   state.tab = name;
   for (const tab of document.querySelectorAll(".tab")) {
@@ -241,6 +242,7 @@ function setTab(name, activateApproval = true) {
   }
   if (name === "approval" && activateApproval) guard(() => window.MetadataUI?.enter())();
   if (name === "catalogue") guard(() => window.CatalogueUI?.enter())();
+  if (name === "album") guard(() => window.AlbumUI?.enter())();
   if (name === "language") guard(() => window.LanguageUI?.enter())();
   if (name === "graph") guard(() => window.GraphUI?.enter())();
   if (name === "maintenance") guard(() => refreshMaintenance(false))();
@@ -314,6 +316,7 @@ function changeUser() {
   window.MetadataUI?.reset();
   window.ArtworkUI?.reset();
   window.CatalogueUI?.reset();
+  window.AlbumUI?.reset();
   window.LanguageUI?.reset();
   window.GraphUI?.reset();
   requestGate.reset();

@@ -13,6 +13,7 @@
   <script src="/static/help-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/artwork-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/catalogue-ui.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/album-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/language-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/force-graph.min.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/graph-ui.js?v=__STATIC_VERSION__" defer></script>
@@ -31,6 +32,7 @@
   <button type="button" class="tab active" data-tab="music">Music</button>
   <button type="button" class="tab" data-tab="approval">Approval</button>
   <button type="button" class="tab" data-tab="catalogue">Catalogue</button>
+  <button type="button" class="tab" data-tab="album">Album</button>
   <button type="button" class="tab" data-tab="language">Language</button>
   <button type="button" class="tab" data-tab="graph">Graph</button>
   <button type="button" class="tab" data-tab="sources">Sources</button>
@@ -289,20 +291,86 @@
             <p id="approvalCacheNotice" class="hint" role="status" aria-live="polite"></p>
           </div>
     </section>
-    <section class="catalogue-details" aria-label="Album organization">
-      <h3>Organize albums</h3>
-      <p class="hint">Select one or more imported sources. Albums are recommendations, not recording identification. Existing tags only change after a reviewed preview and confirmation.</p>
-      <label class="control-field">Sources (Ctrl/Cmd + click for multiple)
-        <select id="catalogueSources" multiple size="5" aria-label="Collections for album matching"></select></label>
-      <label class="control-field">Optional individual track IDs (comma or newline separated)
-        <textarea id="catalogueTrackIDs" rows="2" placeholder="Paste one or more track IDs"></textarea></label>
-      <div class="row"><button id="catalogueRecommend" type="button">Compare albums</button>
-        <button id="catalogueHistoryRefresh" class="secondary" type="button">Refresh changes</button></div>
-      <p id="catalogueAlbumStatus" class="hint" role="status" aria-live="polite"></p>
-      <div id="catalogueRecommendations" class="catalogue-results"></div>
-      <div id="cataloguePreview"></div>
-      <h4>Past album changes and undo</h4><div id="catalogueHistory"></div>
+  </section>
+
+
+  <section class="panel album-panel" data-panel="album" id="albumPanel" hidden>
+    <div class="panel-heading">
+      <div><span class="eyebrow">ORGANIZE YOUR MUSIC</span><h2>Album</h2>
+        <p class="hint">Compare exact MusicBrainz recording IDs against release editions. Draft assignments here; audio tags change only after reviewing and confirming a plan.</p>
+      </div>
+    </div>
+    <div class="album-workspace">
+      <section class="album-workspace-card" aria-labelledby="albumMusicTitle">
+        <div class="album-card-heading"><h3 id="albumMusicTitle">Your recordings</h3>
+          <button type="button" class="secondary" id="albumRefresh">Reload music</button></div>
+        <label class="control-field">Filter by source
+          <select id="albumSource"><option value="">All library sources</option></select></label>
+        <label class="check album-include"><input type="checkbox" id="albumIncludeAssigned"> Include recordings with an existing album (including other sources)</label>
+        <label class="control-field">Filter titles
+          <input type="search" id="albumTrackSearch" placeholder="Search all local recording titles"></label>
+        <div class="row album-card-heading"><p id="albumTrackCount" class="hint" role="status"></p>
+          <button id="albumSelectVisible" class="secondary" type="button">Select visible</button>
+          <button id="albumClearSelection" class="secondary" type="button">Clear selection</button></div>
+        <div id="albumTracks" class="album-track-list" role="group" aria-label="Recordings available for assignment"></div>
+        <button id="albumLoadMore" type="button" class="secondary" hidden>Load more recordings</button>
+      </section>
+      <section class="album-workspace-card" aria-labelledby="albumCandidatesTitle">
+        <div class="album-card-heading"><h3 id="albumCandidatesTitle">Candidate albums</h3>
+          <button id="albumRecommend" type="button">Suggest from selected recordings</button></div>
+        <p class="hint">Album families contain individual release editions. Exact membership matters more than matching titles or coverage percentages.</p>
+        <p id="albumRecommendStatus" class="hint" role="status" aria-live="polite"></p>
+        <div id="albumCandidates" class="album-candidate-list"></div>
+        <form id="albumSearchForm" class="album-extra-search">
+          <h4>Find more albums</h4>
+          <p class="hint">For unmatched songs, search more releases or add an exact MusicBrainz release ID. Adding candidates never resets your plan.</p>
+          <label class="control-field">Album title or release UUID
+            <input type="search" id="albumSearchQuery" placeholder="Album name, or MusicBrainz release ID" maxlength="180"></label>
+          <div class="row"><button type="submit" class="secondary">Search cached albums</button>
+            <button type="button" class="secondary" id="albumOnlineSearch">Search MusicBrainz</button></div>
+          <p id="albumSearchStatus" class="hint" role="status"></p>
+          <div id="albumSearchResults" class="album-candidate-list"></div>
+        </form>
+      </section>
+    </div>
+    <section class="album-workspace-card album-comparison-section" aria-labelledby="albumCompareTitle">
+      <div class="album-card-heading"><h3 id="albumCompareTitle">Compare and assign</h3>
+        <button id="albumCompareRefresh" type="button" class="secondary">Refresh comparison</button>
+        <p id="albumCompareStatus" class="hint" role="status"></p></div>
+      <p class="hint">Compare up to four editions at once. Green checks indicate an exact recording ID. A question mark means its release tracklist has not been fetched. Recordings already assigned elsewhere are never moved automatically.</p>
+      <div id="albumCompared" class="album-compared-chips"></div>
+      <div id="albumMatrix" class="table-scroll album-matrix"></div>
     </section>
+    <section class="album-workspace-card album-plan-card" aria-labelledby="albumPlanTitle">
+      <div class="album-card-heading"><h3 id="albumPlanTitle">Assignment plan</h3>
+        <button id="albumPlanPreview" type="button">Review changes</button></div>
+      <p id="albumPlanSummary" class="hint" role="status">No changes planned yet. Unresolved recordings remain unchanged.</p>
+      <div id="albumPlanResults"></div>
+      <div class="row album-plan-confirm" id="albumPlanConfirm" hidden>
+        <button type="button" id="albumPlanApply">Confirm and queue eligible changes</button>
+        <button type="button" class="secondary" id="albumPlanCancel">Return to comparison</button>
+      </div>
+      <p id="albumPlanStatus" class="hint" role="status" aria-live="polite"></p>
+    </section>
+    <details class="album-workspace-card album-history" id="albumPreferenceSection">
+      <summary>Advanced: preference for future music from a source</summary>
+      <p class="hint">Optional. Only use this when a source genuinely belongs to one exact album edition. Saving a preference does not reassign existing songs. Automatic use for future compatible recordings is off unless you explicitly enable it.</p>
+      <label class="control-field">Release edition
+        <select id="albumPreferredRelease"><option value="">Choose an edition from the comparison</option></select>
+      </label>
+      <label class="check album-include"><input id="albumPreferAuto" type="checkbox"> Automatically use this exact release for future compatible recordings from the selected source</label>
+      <div class="row">
+        <button type="button" id="albumPreferenceSave" class="secondary">Save source preference</button>
+        <button type="button" id="albumPreferenceClear" class="secondary">Clear preference</button>
+      </div>
+      <p id="albumPreferenceStatus" class="hint" role="status" aria-live="polite"></p>
+    </details>
+    <details class="album-workspace-card album-history" id="albumHistorySection">
+      <summary>History and undo</summary>
+      <p class="hint">Completed album tag changes can be individually undone using their original audio backup.</p>
+      <button type="button" class="secondary" id="albumHistoryRefresh">Refresh history</button>
+      <div id="albumHistory"></div>
+    </details>
   </section>
 
   <section class="panel language-panel" data-panel="language" hidden>
@@ -513,6 +581,7 @@
         <a href="#help-music">Music</a>
         <a href="#help-approval">Approval</a>
         <a href="#help-catalogue">Catalogue</a>
+        <a href="#help-album">Album</a>
         <a href="#help-language">Language</a>
         <a href="#help-graph">Graph</a>
         <a href="#help-sources">Sources</a>
@@ -587,7 +656,13 @@
           <p><strong>Cache synchronization</strong> also displays Approval metadata prefetch progress, the queue and cooldown, cached data size and overall Catalogue database size. Expand <strong>Failed searches and metadata requests</strong> to inspect disabled jobs and retry each for three more low-priority attempts. Use <strong>Clean unused cache</strong> to preview removing obsolete searches while retaining metadata for already approved music and recordings still awaiting approval. Music and Catalogue graph entities are never deleted.</p>
           <p><strong>Search cache</strong> uses saved metadata; <strong>Search MusicBrainz</strong> requests new data. <strong>Only items linked to my library</strong> filters by confirmed MusicBrainz IDs and their cached links, not similar names.</p>
           <p><strong>Index downloaded recordings</strong> synchronizes recording and credited-artist metadata in the background. It is metadata-only: it never edits or downloads audio. Use <strong>Refresh progress</strong> for the shared queue; its totals can grow as more relationships are discovered.</p>
-          <p><strong>Organize albums</strong> compares known recordings to edition tracklists. Review the precise release before approving an album change. Applied album changes can be undone from history.</p>
+          <p><strong>Album organization</strong> has moved to the dedicated Album tab. Catalogue is for exploring and synchronizing MusicBrainz metadata.</p>
+        </section>
+        <section id="help-album" class="help-topic" aria-labelledby="help-album-title">
+          <h3 id="help-album-title">Album</h3>
+          <p>Select local recordings, optionally include already-assigned recordings from across the library, and compare MusicBrainz release editions. Release groups are album families; specific releases are editions with potentially different tracklists.</p>
+          <p>Add more releases for an unmatched recording using the search field. Mark albumless recordings <strong>No Album Found</strong> if none is suitable; this is a reversible review decision, not a fake album audio tag. Existing assignments are preserved unless you explicitly choose a different release for that recording. The list can be paged and compared editions can be removed without losing planned assignments.</p>
+          <p>The final review shows each compatible change, unchanged or blocked recording, and exactly what will be queued. Audio changes use the same backed-up, reversible album-only jobs as the previous Catalogue organizer. The separate Artwork editor remains responsible for manual covers.</p>
         </section>
         <section id="help-language" class="help-topic" aria-labelledby="help-language-title">
           <h3 id="help-language-title">Language</h3>

@@ -568,11 +568,15 @@ class Catalogue:
             result = []
             for release_id, compatible in per_release.items():
                 release = con.execute("SELECT data,name FROM entities WHERE kind='release' AND id=?", (release_id,)).fetchone()
-                group = con.execute("""SELECT target_id FROM links WHERE source_kind='release'
-                    AND source_id=? AND target_kind='release-group' AND relation='edition-of' LIMIT 1""", (release_id,)).fetchone()
+                group = con.execute("""SELECT l.target_id,e.name FROM links l
+                    LEFT JOIN entities e ON e.kind='release-group' AND e.id=l.target_id
+                    WHERE l.source_kind='release'
+                    AND l.source_id=? AND l.target_kind='release-group'
+                    AND l.relation='edition-of' LIMIT 1""", (release_id,)).fetchone()
                 count = con.execute("SELECT COUNT(*) FROM release_tracks WHERE release_id=?", (release_id,)).fetchone()[0]
                 detail = json.loads(release["data"]) if release else {}
                 result.append({"release_id": release_id, "release_group_id": group["target_id"] if group else None,
+                               "release_group_name": group["name"] if group else None,
                                "album": release["name"] if release else "Unknown release",
                                "country": detail.get("country"), "date": detail.get("date"),
                                "status": detail.get("status"), "matched": len(compatible),

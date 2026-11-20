@@ -96,7 +96,7 @@ class AlbumManager:
                 raise LookupError("Some selected music does not belong to this library")
             return [dict(row) for row in rows]
 
-    def preview(self, user_id, release_id, source_ids=(), track_ids=()):
+    def preview(self, user_id, release_id, source_ids=(), track_ids=(), *, persist=True):
         self.require_migration_complete()
         self.store.require_user(user_id)
         self._require_completed_migration()
@@ -135,11 +135,12 @@ class AlbumManager:
                             "revision": track["updated_at"], "asset_id": track["current_asset_id"],
                             "sha256": track["sha256"], "path": track["path"],
                             "release_tags": tags})
-        token = uuid.uuid4().hex
-        with self.store.db() as con:
-            con.execute("INSERT INTO album_previews VALUES (?,?,?,?,?,?,NULL)",
-                        (token, user_id, release_id, json.dumps(results), utcnow(), time.time() + 1200))
-            con.execute("DELETE FROM album_previews WHERE expires_at<? AND consumed_at IS NOT NULL", (time.time() - 3600,))
+        token = uuid.uuid4().hex if persist else None
+        if persist:
+            with self.store.db() as con:
+                con.execute("INSERT INTO album_previews VALUES (?,?,?,?,?,?,NULL)",
+                            (token, user_id, release_id, json.dumps(results), utcnow(), time.time() + 1200))
+                con.execute("DELETE FROM album_previews WHERE expires_at<? AND consumed_at IS NOT NULL", (time.time() - 3600,))
         return {"preview_token": token, "release_id": release_id,
                 "album": release["entity"]["name"], "items": results,
                 "can_apply": sum(row["status"] == "COMPATIBLE" for row in results),
