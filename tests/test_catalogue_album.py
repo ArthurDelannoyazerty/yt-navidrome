@@ -1107,6 +1107,9 @@ def test_album_workspace_scopes_user_and_finds_cross_source_assigned_matches(db,
     assert entire["total"] == 3
     subset = workspace.tracks("admin", include_assigned=True, limit=1)
     assert subset["total"] == 3 and subset["has_more"]
+    searched = workspace.tracks("admin", include_assigned=True, query="Track")
+    assert searched["total"] == 3
+    assert workspace.tracks("admin", include_assigned=True, query="no-such-title")["total"] == 0
     next_page = workspace.tracks("admin", include_assigned=True, offset=1)
     assert not {row["id"] for row in subset["items"]} & {row["id"] for row in next_page["items"]}
     compared = workspace.compare("admin", [RELEASE_B], selected_track_ids=[new], include_assigned=True)

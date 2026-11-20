@@ -40,7 +40,7 @@ class AlbumWorkspace:
             con.executescript(SCHEMA)
 
     def tracks(self, user_id, *, source_id=None, include_assigned=False,
-               offset=0, limit=100):
+               query="", offset=0, limit=100):
         """One paginated local-library scope; never infer IDs from song titles."""
         self.store.require_user(user_id)
         offset = max(0, int(offset))
@@ -63,6 +63,12 @@ class AlbumWorkspace:
             else:
                 where.append(membership)
             args.append(source_id)
+        query = str(query).strip()[:100]
+        if query:
+            escaped = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("""(COALESCE(t.matched_title,t.title) LIKE ? ESCAPE '\\' COLLATE NOCASE
+                        OR t.mbid LIKE ? ESCAPE '\\')""")
+            args.extend((escaped,escaped))
         condition = " AND ".join(where)
         with self.store.db() as con:
             total = con.execute("SELECT COUNT(*) FROM tracks t WHERE " + condition, args).fetchone()[0]

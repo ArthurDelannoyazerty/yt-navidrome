@@ -18,7 +18,7 @@ window.AlbumUI = (() => {
     user:null, generation:0, loading:false,
     tracks:new Map(), selected:new Set(), plan:new Map(), candidates:new Map(),
     compared:[], releases:new Map(), recommendations:[], preview:null,
-    offset:0, hasMore:false, total:0, searching:false
+    offset:0, hasMore:false, total:0, searching:false, loadSerial:0, searchTimer:null
   };
   const active = (user, generation) =>
     ui.user === user && state.user === user && ui.generation === generation && state.tab === "album";
@@ -111,22 +111,23 @@ window.AlbumUI = (() => {
   async function loadTracks(reset=true) {
     if (!ui.user)return;
     const user=ui.user, generation=ui.generation;
-    if (ui.loading)return;
+    const loadId=++ui.loadSerial;
     ui.loading=true;
     if (reset){ui.offset=0;ui.tracks.clear();}
     const params=new URLSearchParams({user_id:user,
       include_assigned:String(el("albumIncludeAssigned").checked),
+      q:el("albumTrackSearch").value.trim(),
       offset:String(ui.offset),limit:"100"});
     if(el("albumSource").value)params.set("source_id",el("albumSource").value);
     try {
       const result=await api("/api/albums/tracks?"+params);
-      if (!active(user,generation))return;
+      if (!active(user,generation) || loadId!==ui.loadSerial)return;
       for(const item of result.items||[])ui.tracks.set(item.id,item);
       ui.total=result.total;ui.offset=result.offset+(result.items||[]).length;
       ui.hasMore=Boolean(result.has_more);
       renderTracks();renderMatrix();
     } catch(error) {if(active(user,generation))status(error.message,true);}
-    finally {if(ui.user===user)ui.loading=false;}
+    finally {if(ui.user===user && loadId===ui.loadSerial)ui.loading=false;}
   }
   function releaseCard(entry) {
     const rid=entry.release_id||entry.id;
@@ -463,7 +464,9 @@ window.AlbumUI = (() => {
   }
   function leave(){ui.generation++;}
   function reset(){
-    ui.generation++;ui.user=null;ui.loading=false;ui.tracks.clear();ui.selected.clear();
+    ui.generation++;ui.user=null;ui.loading=false;ui.loadSerial++;
+    clearTimeout(ui.searchTimer);ui.searchTimer=null;
+    ui.tracks.clear();ui.selected.clear();
     ui.plan.clear();ui.candidates.clear();ui.compared=[];ui.releases.clear();
     ui.recommendations=[];ui.preview=null;ui.offset=0;ui.hasMore=false;ui.total=0;
     for(const id of ["albumTracks","albumCandidates","albumSearchResults","albumCompared",
@@ -480,7 +483,11 @@ window.AlbumUI = (() => {
   el("albumIncludeAssigned").addEventListener("change",()=>{
     void loadTracks(true).then(()=>compare());
   });
-  el("albumTrackSearch").addEventListener("input",renderTracks);
+  el("albumTrackSearch").addEventListener("input",()=>{
+    renderTracks();
+    clearTimeout(ui.searchTimer);
+    ui.searchTimer=setTimeout(()=>{void loadTracks(true);},250);
+  });
   el("albumSelectVisible").addEventListener("click",()=>{
     const query=el("albumTrackSearch").value.trim().toLocaleLowerCase();
     for(const track of ui.tracks.values()){

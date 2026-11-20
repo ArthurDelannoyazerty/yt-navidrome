@@ -246,10 +246,10 @@ def install_catalogue_routes(app, store, pipeline):
 
     @app.get("/api/albums/tracks")
     def album_tracks(user_id: str, source_id: str | None = None,
-                     include_assigned: bool = False,
+                     include_assigned: bool = False, q: str = Query("", max_length=100),
                      offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=250)):
         return workspace.tracks(user_id, source_id=source_id,
-                                include_assigned=include_assigned,
+                                include_assigned=include_assigned, query=q,
                                 offset=offset, limit=limit)
 
     @app.post("/api/albums/compare")
