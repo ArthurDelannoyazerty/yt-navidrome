@@ -1347,9 +1347,9 @@ test("real browser: Album workspace compares overlapping releases without moving
   await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('1 new album assignments')");
   assert.equal(await chrome.evaluate("document.querySelector('#albumPlanSummary').textContent.includes('0 explicit moves')"),true);
   // Song Three moves to the expanded edition explicitly; Song Four stays unmatched.
-  await chrome.evaluate("const row=[...document.querySelectorAll('#albumMatrix tbody tr')].find(tr=>tr.cells[0].textContent==='Song Three');row.querySelector('select').value='"+b+"';row.querySelector('select').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("(()=>{const row=[...document.querySelectorAll('#albumMatrix tbody tr')].find(tr=>tr.cells[0].textContent==='Song Three');row.querySelector('select').value='"+b+"';row.querySelector('select').dispatchEvent(new Event('change'));})()");
   await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('2 new album assignments')");
-  await chrome.evaluate("const row=[...document.querySelectorAll('#albumMatrix tbody tr')].find(tr=>tr.cells[0].textContent==='Song Four');[...row.querySelectorAll('button')].find(b=>b.textContent==='No Album Found').click()");
+  await chrome.evaluate("(()=>{const row=[...document.querySelectorAll('#albumMatrix tbody tr')].find(tr=>tr.cells[0].textContent==='Song Four');[...row.querySelectorAll('button')].find(b=>b.textContent==='No Album Found').click();})()");
   await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('1 No Album Found')");
   await chrome.evaluate("document.querySelector('#albumPlanPreview').click()");
   await chrome.until("document.querySelector('#albumPlanStatus').textContent.includes('2 eligible album changes')");
