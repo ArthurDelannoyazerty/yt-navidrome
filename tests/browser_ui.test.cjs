@@ -199,6 +199,14 @@ async function fixtureServer(t, data) {
           result = {group_id:"batch-test",queued:plans.filter(x=>x.action==="release").length,
             marked_not_found:plans.filter(x=>x.action==="not_found").length,skipped:0};
         }
+        if (url.pathname === "/api/catalogue/preference") {
+          data.albumPreferences = (data.albumPreferences || []).filter(p=>p.source_id!==payload.source_id);
+          if(!payload.clear)data.albumPreferences.push({
+            user_id:payload.user_id,source_id:payload.source_id,
+            release_id:payload.release_id,auto_apply:payload.enabled
+          });
+          result={source_id:payload.source_id,auto_apply:payload.enabled,removed:payload.clear};
+        }
         if (url.pathname === "/api/albums/not-found/clear") {
           const track=(data.albumTracks||[]).find(t=>t.id===payload.track_id);
           if(track)track.not_found=false;
@@ -290,6 +298,7 @@ async function fixtureServer(t, data) {
         result = {states: data.languageJobStates || {}};
       else if (url.pathname === "/api/catalogue/language-apply-progress") result = {state:"complete",processed:12,eligible:12,queued:3};
       else if (url.pathname === "/api/catalogue/album-history") result = [];
+      else if (url.pathname === "/api/catalogue/preferences") result = data.albumPreferences || [];
       else if (url.pathname === "/api/catalogue/search") result = {items:data.catalogueSearch || [], remote:false};
       else if (url.pathname === "/api/catalogue/entity") result = data.catalogueEntity ||
         {entity:null, scopes:[], relations:[], tracks:[]};
