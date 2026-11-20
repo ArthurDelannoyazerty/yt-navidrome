@@ -105,7 +105,7 @@ test("Help menu has one reachable section for each application tab", () => {
   const tabs = [...html.matchAll(/class="tab(?: active)?" data-tab="([^"]+)"/g)].map(m => m[1]);
   const topics = [...html.matchAll(/<section id="help-([^"]+)" class="help-topic"/g)].map(m => m[1]);
   const links = [...html.matchAll(/<a href="#help-([^"]+)">/g)].map(m => m[1]);
-  assert.deepEqual(tabs, ["music", "approval", "catalogue", "language", "graph",
+  assert.deepEqual(tabs, ["music", "approval", "catalogue", "album", "language", "graph",
     "sources", "activity", "maintenance", "help"]);
   assert.deepEqual(topics, tabs);
   assert.deepEqual(links, tabs);
