@@ -24,6 +24,16 @@ window.MetadataUI = (() => {
   const active = () => state.tab === "approval" && ui.user === state.user && Boolean(ui.user);
   const scope = () => JSON.stringify([$("approvalFilter").value || "NEEDS_APPROVAL", $("approvalSearch").value.trim()]);
   const storageKey = user => "approval-position-v1:" + user;
+  const route = trackId => ({
+    user: ui.user || state.user, tab:"approval", trackId,
+    status:$("approvalFilter").value, q:$("approvalSearch").value.trim()
+  });
+  function updateRoute(trackId, replace = false) {
+    if (state.tab !== "approval" || !state.user) return;
+    const router=window.IngestorRouter;
+    const prior=router?.read();
+    router?.write(route(trackId), {replace:replace || prior?.tab==="approval" && !prior.trackId});
+  }
   const duration = seconds => Number.isFinite(seconds)
     ? `${Math.floor(Math.round(seconds) / 60)}:${String(Math.round(seconds) % 60).padStart(2, "0")}` : "\u2014";
 
@@ -520,7 +530,7 @@ window.MetadataUI = (() => {
       $("approvalWorkspace").hidden = false;
       const cover = $("approvalCover"); cover.hidden = false;
       cover.src = `/api/tracks/${encodeURIComponent(track.id)}/artwork/current/image?user_id=${encodeURIComponent(user)}&v=${encodeURIComponent(data.revision)}`;
-      rememberPosition(); updateButtons(); scheduleSearch();
+      rememberPosition(); updateRoute(track.id); updateButtons(); scheduleSearch();
     } catch (error) {
       if (active() && serial === ui.loadSerial && user === ui.user && error.name !== "AbortError") {
         flow.detail.fail(); feedback(error.message || String(error), true); updateButtons();
@@ -554,7 +564,8 @@ window.MetadataUI = (() => {
       } else {
         feedback(); $("approvalEmpty").hidden = false;
         $("approvalEmpty").textContent = data.excluded ? "No reviewable music in this view." : "No music in this view.";
-          }
+        updateRoute(null, true);
+      }
     } catch (error) { if (valid()) { flow.queue.fail(); feedback(error.message || String(error), true); updateButtons(); } }
   }
   async function enter() {
@@ -565,10 +576,19 @@ window.MetadataUI = (() => {
   }
   async function open(track, initialPane = "") {
     if (track.user_id && track.user_id !== state.user) return;
-    leave(); setTab("approval", false);
+    leave(); setTab("approval", false, {noHistory:true});
     $("approvalFilter").value = track.operation_state && track.operation_state !== "NEEDS_APPROVAL" ? "ALL" : "NEEDS_APPROVAL";
     $("approvalSearch").value = "";
     return refreshQueue(track.id, track, initialPane);
+  }
+  async function openRoute(routeState) {
+    if (!state.user || state.tab !== "approval") return;
+    if (ui.user && ui.user !== state.user) reset();
+    $("approvalFilter").value = routeState.status || "NEEDS_APPROVAL";
+    if (!$("approvalFilter").value) $("approvalFilter").value = "NEEDS_APPROVAL";
+    $("approvalSearch").value = routeState.q || "";
+    const track = routeState.trackId ? {id:routeState.trackId} : null;
+    return refreshQueue(routeState.trackId || null, track);
   }
   async function navigate(index) {
     if (!active() || flow.mutation.pending || flow.queue.pending || index < 0 || index >= ui.tracks.length) return;
@@ -786,7 +806,7 @@ window.MetadataUI = (() => {
   $("mbPrev").addEventListener("click", () => { if (ui.page > 1) { ui.page -= 1; return search(); } });
   $("mbNext").addEventListener("click", () => { if (ui.page < ui.maxPage) { ui.page += 1; return search(); } });
   $("approvalFilter").value = "NEEDS_APPROVAL";
-  return {open, enter, leave, reset, search};
+  return {open, openRoute, enter, leave, reset, search};
 })();
 
 if (state.user) {
