@@ -267,6 +267,9 @@ function setTab(name, activateApproval = true, {skipEnter = false, noHistory = f
   if (state.tab === "album" && name !== "album") window.AlbumUI?.leave();
   if (state.tab === "graph" && name !== "graph") window.GraphUI?.leave();
   state.tab = name;
+  // Browser history can change pages while a track details dialog is open.
+  // Do not leave a modal from the previous page covering the new page.
+  if (name !== "music" && $("detailsDialog").open) $("detailsDialog").close();
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("active", tab.dataset.tab === name);
     tab.setAttribute("aria-current", tab.dataset.tab === name ? "page" : "false");
