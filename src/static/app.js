@@ -822,6 +822,13 @@ async function showDetails(track) {
   $("detailsDialog").showModal();
 }
 
+// Let Catalogue's rare album-mismatch review open the exact local song,
+// even when it is not on the currently visible Music page.
+window.openAlbumTrackDetails = async trackId => {
+  if(!state.user||!trackId)return;
+  setTab("music");
+  await showDetails({id:trackId});
+};
 $("closeDetails").addEventListener("click", () => $("detailsDialog").close());
 
 function renderTrack(track) {

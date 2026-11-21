@@ -290,6 +290,13 @@
             </div>
             <p id="approvalCacheNotice" class="hint" role="status" aria-live="polite"></p>
           </div>
+      <details id="catalogueContradictions" class="catalogue-contradictions">
+        <summary>Review album metadata mismatches (<span id="catalogueContradictionCount">0</span>)</summary>
+        <p class="hint">Only complete MusicBrainz release tracklists are checked. These rare exceptions are never mixed into the Album comparison. Review each song in Music and correct its release manually.</p>
+        <p id="catalogueContradictionStatus" class="hint" role="status" aria-live="polite"></p>
+        <div id="catalogueContradictionList" class="catalogue-contradiction-list"></div>
+        <button id="catalogueContradictionMore" type="button" class="secondary" hidden>Show more mismatches</button>
+      </details>
     </section>
   </section>
 
