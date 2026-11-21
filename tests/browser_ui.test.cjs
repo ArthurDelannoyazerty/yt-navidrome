@@ -1549,7 +1549,7 @@ test("real browser: Select all includes alternate recording IDs and manual posit
   data.albumEditions=[{
     id:release,name:"IM25",original_title:"IM25",english_title:"IM25",
     complete:true,track_count:4,status:"Official",linked_track_count:4,matched_count:1,
-    matched_track_ids:["second"],tracks:[
+    possible_match_count:2,matched_track_ids:["second"],tracks:[
       song(officialA,"Business as Usual",1,["first"]),
       song(officialB,"Black Velvet",2),
       song(officialC,"Boss La Rosh",3,["third"]),
