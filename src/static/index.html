@@ -315,7 +315,7 @@
       <button id="albumRefresh" type="button" class="secondary">Refresh clusters</button>
     </div>
     <div class="album-cluster-toolbar">
-      <label class="check"><input type="checkbox" id="albumIncludeAssigned"> Allow changes to recordings already assigned to an album</label>
+      <label class="check"><input type="checkbox" id="albumIncludeAssigned"> Preselect already-assigned recordings (manual selection is always possible)</label>
       <label class="control-field album-cluster-search">Filter by music title
         <input type="search" id="albumClusterSearch" placeholder="Find a song's album families" maxlength="100"></label>
       <div class="album-cluster-pagination" aria-label="Cluster navigation">
@@ -356,7 +356,10 @@
       <section class="album-cluster-column album-music-column" aria-labelledby="albumMusicHeading">
         <div class="album-column-heading">
           <h3 id="albumMusicHeading">Tracks on this edition</h3>
-          <label class="check album-show-included"><input id="albumOnlyGreen" type="checkbox"> Green tracks only</label>
+          <div class="album-selection-actions">
+            <button id="albumSelectAll" type="button" class="secondary" disabled>Select all</button>
+            <label class="check album-show-included"><input id="albumOnlyGreen" type="checkbox"> Green tracks only</label>
+          </div>
         </div>
         <p class="hint album-music-context" id="albumMusicContext"></p>
         <div id="albumMusicList" class="album-column-scroll album-track-cards" aria-label="Official edition tracks and related local music"></div>
@@ -698,9 +701,9 @@
         </section>
         <section id="help-album" class="help-topic" aria-labelledby="help-album-title">
           <h3 id="help-album-title">Album</h3>
-          <p>Album groups downloaded recordings into MusicBrainz release-group workspaces. Compilations and featured artists never merge unrelated families. A recording may appear in more than one family. Assigned recordings remain visible and read-only by default; enable <strong>Allow changes to recordings already assigned</strong> to include them in validation. Search a song to find its album families.</p>
+          <p>Album groups downloaded recordings into MusicBrainz release-group workspaces. Compilations and featured artists never merge unrelated families. A recording may appear in more than one family. Already-assigned recordings remain visible; they are not preselected unless you enable <strong>Preselect already-assigned recordings</strong>, but you can always manually check an eligible local recording. Search a song to find its album families.</p>
           <p>Three columns stay on the same screen on desktop: clusters, editions sorted by exact recording coverage, and the complete official tracklist of the selected edition. Green means local, orange means local but in another album, red means no exact local MusicBrainz recording, a separate candidate state suggests a same-title local recording with another recording ID, gray means album locked, and purple/blue mean other local recordings in the cluster but absent from the edition. Green and orange songs are checked by default; red, gray and cluster-only songs are unchecked and unavailable. The compact legend is below the music panel.</p>
-          <p>MusicBrainz release tracklists are prefetched automatically in the durable local catalogue, prioritizing the selected cluster. Use <strong>Green tracks only</strong> to filter to green songs. Uncheck individual eligible tracks you wish to exclude, including orange songs already assigned elsewhere. Click <strong>Validate Album</strong> for a concise review and confirmation; this queues reversible album-only tag jobs. Cluster-only recordings remain for the next edition. An individual albumless cluster-only song can be marked <strong>No Album Found</strong>. History and Undo remain available.</p>
+          <p>MusicBrainz release tracklists are prefetched automatically in the durable local catalogue, prioritizing the selected family. A possible local recording with another MusicBrainz recording ID appears directly in its official track row with a checkbox. Checking it explicitly selects that official position and will update its recording ID together with album metadata after confirmation. For local songs without a suggested position, choose an official position from the dropdown in Other local music. <strong>Select all</strong> checks every eligible local song with an identified official position (including alternative IDs); it skips locked songs and unavailable official tracks. The <strong>Green tracks only</strong> filter hides other colors without changing selection. <strong>Validate Album</strong> previews old and new recording IDs. The reversible job preserves existing song title, artist, audio path and source links, and Undo restores the original tags and MBID. Playlist membership is unchanged.</p>
           <p>On the Music tab, open the track's <strong>Album / lock</strong> entry to manually search and review a different album for that one recording, or lock its album against automatic and manual reassignment until explicitly unlocked. The Artwork editor remains responsible for covers.</p>
         </section>
         <section id="help-language" class="help-topic" aria-labelledby="help-language-title">
