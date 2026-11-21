@@ -1681,3 +1681,27 @@ test("real browser: tab links are real URLs with Back/Forward and library isolat
   await chrome.until("location.pathname==='/libraries/admin/music' && document.querySelector('#user').value==='admin'");
   assert.deepEqual(chrome.errors,[]);
 });
+
+
+test("real browser: Help topics keep canonical URLs, selection and scroll through history", {timeout:60000}, async t=>{
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures();
+  const origin=await fixtureServer(t,data),base="/libraries/admin/help";
+  await chrome.send("Page.navigate",{url:origin+base+"/album"});
+  await chrome.until("document.querySelector('#user')?.value==='admin' && document.querySelector('.help-sidebar a[data-topic=album]')?.getAttribute('aria-current')==='location'");
+  assert.equal(await chrome.evaluate("location.pathname"),base+"/album");
+  assert.equal(await chrome.evaluate("document.querySelector('#help-album').closest('[data-panel]').hidden"),false);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-sidebar [aria-current=location]').length"),1);
+  await chrome.evaluate("document.querySelector('.help-sidebar a[data-topic=approval]').click()");
+  await chrome.until("location.pathname.endsWith('/help/approval') && document.querySelector('.help-sidebar a[data-topic=approval]')?.getAttribute('aria-current')==='location'");
+  await chrome.evaluate("history.back()");
+  await chrome.until("location.pathname.endsWith('/help/album') && document.querySelector('.help-sidebar a[data-topic=album]')?.getAttribute('aria-current')==='location'");
+  await chrome.send("Page.reload",{ignoreCache:true});
+  await chrome.until("document.querySelector('#user')?.value==='admin' && document.querySelector('.help-sidebar a[data-topic=album]')?.getAttribute('aria-current')==='location'");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-sidebar [aria-current=location]').length"),1);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.dataset.topic)"),TABS);
+  await chrome.send("Page.navigate",{url:origin+base+"/not-a-topic"});
+  await chrome.until("document.querySelector('#user')?.value==='admin' && document.querySelector('#notice')?.textContent.includes('Unknown Help topic')");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-sidebar [aria-current=location]').length"),1);
+  assert.deepEqual(chrome.errors,[]);
+});
