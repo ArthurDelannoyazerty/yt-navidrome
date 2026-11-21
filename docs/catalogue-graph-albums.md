@@ -66,11 +66,15 @@ recording-to-release links. Coverage counts show compatibility, not confidence;
 a tiny two-song set may be ambiguous and a large source may mix several albums.
 
 A release must have its complete cached tracklist before a preview can apply it.
-The preview explicitly distinguishes `COMPATIBLE`, `UNCHANGED`, `INCOMPATIBLE`,
-`BUSY`, `UNAVAILABLE`, and `NEEDS_STABLE_PATH_MIGRATION`. A fresh token is
-required to queue edits. Album edits are durable, copy-on-write, metadata-only,
-retain the original audio and tags for undo, and keep the path, recording MBID,
-and source memberships unchanged. The old and new SHA-256 digests are recorded.
+The preview distinguishes `COMPATIBLE`, `UNCHANGED`, `INCOMPATIBLE`,
+`DUPLICATE_RECORDING`, `LOCKED`, `BUSY`, `UNAVAILABLE`, and
+`NEEDS_STABLE_PATH_MIGRATION`. A fresh token is required to queue edits.
+Album edits are durable, copy-on-write, metadata-only, with byte-exact
+backups. Selecting an official edition track position may replace a local
+recording's MusicBrainz recording MBID as well as its album metadata; the
+previous MBID and original audio tags are saved for undo. Existing title,
+artist, file path and source memberships remain unchanged. Old and new
+SHA-256 digests are recorded.
 
 An album preference can be stored for a **source**, but automatic use for future
 compatible recordings is **off by default**. The user must opt in explicitly;
@@ -163,7 +167,7 @@ safe for production solely by importer unit tests.
 Never reformat or modify album tags at the same time as the move-only scan.
 Do not enable bulk album edits until the Navidrome checkpoint is complete.
 
-### Connected album-cluster workspace
+### Release-group album-family workspace
 
 The Album tab uses one workspace per MusicBrainz **release group** (album
 family), not transitive connected components. A downloaded recording may
@@ -174,8 +178,8 @@ releases and prioritizes the currently focused family. Unknown recording
 relationships remain standalone until indexed.
 
 All downloaded songs belonging to a family stay visible, even if already
-assigned. The checkbox controls whether previously assigned recordings
-are eligible for **changes**, not whether they appear in album context.
+assigned. The checkbox controls whether previously assigned recordings are
+**preselected**; an explicit check or Select all can still include them.
 Searching a song title finds its family workspaces. These are navigation and
 comparison views, **not** instructions to tag every song with one album.
 
@@ -187,14 +191,17 @@ the persistent, rate-limited Catalogue queue. Missing metadata remains
 neutral/unknown until the full release has been cached; no manual Sync button
 is needed. The focused cluster's releases have higher queue priority.
 
-Six subdued exact-membership colors plus a separate unverified-candidate
-state describe local assignment. A sibling edition may contain a different
-recording MBID for an identically titled song. Such a local copy is displayed
-as a read-only **possible recording match** when its normalized title and
-available duration agree; track-position evidence is shown where known.
-It is not green/orange, is never selected for tagging automatically, and
-requires an explicit correction of recording identity or independently
-verified album membership before assignment.
+Six subdued exact-membership colors plus a candidate state describe local
+assignment. A sibling edition may contain a different recording MBID for an
+identically titled song. Such a local copy is shown **inside the official
+track cell**, not as a separate sub-row, with a checkbox that explicitly maps
+it to that official position. Unlike exact matches, these alternatives are
+not preselected. Their names, existing artist/title tags and source origin
+are preserved; confirming applies the selected album edition and updates
+the recording MBID to the chosen official ID. Undo restores the previous
+MBID and tags. Candidate detection uses matching titles and compatible
+available durations; the user may override incomplete metadata using the
+manual position chooser for an unmatched local song.
 
 Six exact-membership colors describe *exact release membership* and local assignment:
 - **Green:** downloaded, on this release, and unassigned or already assigned
@@ -204,22 +211,27 @@ Six exact-membership colors describe *exact release membership* and local assign
 - **Red:** no exact-MBID local recording for this official track. It may still
   have a differently identified local copy. Unchecked/disabled.
 - **Gray:** album-locked recording. Unchecked/disabled.
-- **Purple:** local cluster song missing from the selected release and
-  assigned to another album. Unchecked/disabled.
-- **Blue:** local cluster song missing from the release and unassigned.
-  Unchecked/disabled; may be individually reviewed as No Album Found.
+- **Purple:** local family song missing from the selected release and assigned
+  to another album. It can be manually assigned to an official position.
+- **Blue:** unassigned local song without an exact position. Choose a destination
+  official track using the dropdown; it may also be reviewed as No Album Found.
 
-**Green tracks only** is a display-only filter. Orange selections stay selected
-when hidden; the confirmation dialog explicitly counts any hidden orange moves.
-The compact legend stays below the internally scrolling music cards.
+**Select all** picks one eligible locally available song for each official track
+position, including different-MBID alternatives, and excludes locked or missing
+songs. Unmatched local songs need an explicitly chosen position first. One
+official recording position can receive at most one local track in a plan.
+**Green tracks only** is a display-only filter. Other selections stay selected
+when hidden; the confirmation dialog counts hidden orange moves. The compact
+legend remains below the scrolling music cards.
 
 **Validate Album** replaces the previous persistent assignment-plan card.
 It previews the currently checked *eligible* songs, including any moves from
 other releases and per-album before/after counts, in a small modal. Files are
-not touched until the user confirms. The existing backend rechecks exact
-release membership, album locks, file checksums, current job state and undo
-backup space before queuing reversible album-only changes. Cluster-only songs
-remain for another edition, and unchecked songs are untouched. An albumless
+not touched until the user confirms. The backend requires a verified full
+release tracklist and exact membership of the **chosen destination recording**,
+then rechecks duplicate local identities, locks, file checksums, stale previews,
+job state and backup space. These are reversible album and recording-ID changes.
+Unchecked songs are untouched. An albumless
 song can still be marked No Album Found individually without a fake audio tag.
 
 If a local recording is already assigned to a release whose **fully fetched**

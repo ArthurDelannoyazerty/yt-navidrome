@@ -204,6 +204,8 @@ class AlbumWorkspace:
             raise ValueError("Choose between one and 500 track decisions")
         seen = set()
         grouped = defaultdict(list)
+        overrides = defaultdict(dict)
+        targets = []
         not_found = []
         for decision in decisions:
             if not isinstance(decision, dict):
@@ -220,10 +222,19 @@ class AlbumWorkspace:
                 except (TypeError, ValueError, AttributeError):
                     raise ValueError("Invalid destination release") from None
                 grouped[rid].append(tid)
+                if decision.get("target_recording_id") is not None:
+                    try:
+                        target = str(uuid.UUID(str(decision["target_recording_id"])))
+                    except (TypeError, ValueError, AttributeError):
+                        raise ValueError("Invalid destination MusicBrainz recording ID") from None
+                    overrides[rid][tid] = target
+                    targets.append(target)
             elif action == "not_found":
                 not_found.append(tid)
             else:
                 raise ValueError("Unknown album decision")
+        if len(targets) != len(set(targets)):
+            raise ValueError("An official recording position can only receive one local track")
         result = []
         if grouped:
             with self.catalogue.db() as con:
@@ -235,7 +246,8 @@ class AlbumWorkspace:
         for rid, track_ids in grouped.items():
             # Reuse the existing album manager's compatibility and migration
             # checks instead of inventing a weaker file-safety path.
-            preview = self.manager.preview(user_id, rid, track_ids=track_ids, persist=False)
+            preview = self.manager.preview(user_id, rid, track_ids=track_ids,
+                                           persist=False, recording_overrides=overrides[rid])
             for item in preview["items"]:
                 item = {**item, "action": "release", "target_release_id": rid,
                         "target_album": preview["album"]}
@@ -297,7 +309,9 @@ class AlbumWorkspace:
         return {"preview_token": token, "items": result, "impact": impact,
                 "can_apply": sum(row["status"]=="COMPATIBLE" for row in result),
                 "can_mark": sum(row["status"]=="MARK_NOT_FOUND" for row in result),
-                "note": "Only eligible exact-recording matches change album tags. "
+                "note": "Each explicitly selected local track is assigned to its chosen "
+                        "official edition position. A different recording MBID is updated "
+                        "reversibly with the album tags; existing title/artist tags remain. "
                         "No Album Found is a reversible review marker, not an audio tag."}
 
     def apply(self, user_id, token):
@@ -320,7 +334,7 @@ class AlbumWorkspace:
             required_space = 0
             for item in changes:
                 row = con.execute(
-                    """SELECT t.id,t.updated_at,t.release_id,t.current_asset_id,t.operation_state,
+                    """SELECT t.id,t.updated_at,t.release_id,t.mbid,t.current_asset_id,t.operation_state,
                               t.health,a.sha256,a.path FROM tracks t
                        JOIN assets a ON a.id=t.current_asset_id AND a.state='CURRENT'
                        WHERE t.user_id=? AND t.id=?""",(user_id,item["track_id"]),
@@ -332,6 +346,7 @@ class AlbumWorkspace:
                     raise ValueError("Album locked: unlock this recording before reassignment")
                 if (not row or row["updated_at"]!=item["revision"] or
                     row["release_id"]!=item["old_release_id"] or
+                    row["mbid"]!=item["recording_id"] or
                     row["current_asset_id"]!=item["asset_id"] or
                     row["sha256"]!=item["sha256"] or row["path"]!=item["path"] or
                     row["operation_state"]!="IDLE" or row["health"]!="AVAILABLE"):
@@ -345,9 +360,14 @@ class AlbumWorkspace:
                     (item["track_id"],item["track_id"]),
                 ).fetchone():
                     raise ValueError("An operation started since preview; review again")
-                if not self.catalogue.release_assignment(item["target_release_id"],
-                                                         item["recording_id"]):
-                    raise ValueError("MusicBrainz release membership changed; review again")
+                target = item.get("target_recording_id", item["recording_id"])
+                if target != item["recording_id"] and con.execute(
+                    "SELECT 1 FROM tracks WHERE user_id=? AND mbid=? AND id<>?",
+                    (user_id,target,item["track_id"]),
+                ).fetchone():
+                    raise ValueError("Chosen official recording is already owned; review again")
+                if not self.catalogue.release_assignment(item["target_release_id"], target):
+                    raise ValueError("MusicBrainz edition position changed; review again")
                 with self.catalogue.db() as cat_db:
                     if not cat_db.execute(
                         "SELECT 1 FROM fetched_releases WHERE release_id=?",
@@ -387,12 +407,14 @@ class AlbumWorkspace:
                 con.execute(
                     """INSERT INTO album_changes
                        (id,group_id,user_id,track_id,release_id,old_release_id,
-                        release_tags,asset_id,path,expected_sha,status,created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,'QUEUED',?)""",
+                        release_tags,asset_id,path,expected_sha,status,created_at,
+                        old_recording_id,new_recording_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,'QUEUED',?,?,?)""",
                     (change_id,group_id,user_id,item["track_id"],
                      item["target_release_id"],item["old_release_id"],
                      json.dumps(item["release_tags"]),item["asset_id"],
-                     item["path"],item["sha256"],utcnow()),
+                     item["path"],item["sha256"],utcnow(),item["recording_id"],
+                     item.get("target_recording_id",item["recording_id"])),
                 )
                 if not self.store.enqueue("album",change_id,user_id,{"mode":"apply"},con=con):
                     raise ValueError("Could not queue an album change safely")
