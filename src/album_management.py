@@ -120,12 +120,12 @@ class AlbumManager:
                AND user_id=? AND state IN ('PENDING','RUNNING') AND
                (target=? OR target IN (SELECT id FROM album_changes WHERE track_id=?)) LIMIT 1""",
                (user_id, track["id"], track["id"]))
-            if track["release_id"] == release_id:
+            if not tags:
+                status = "INCOMPATIBLE"
+            elif track["release_id"] == release_id:
                 status = "UNCHANGED"
             elif track["album_locked"]:
                 status = "LOCKED"
-            elif not tags:
-                status = "INCOMPATIBLE"
             elif not track["mbid"] or track["health"] != "AVAILABLE" or track["operation_state"] != "IDLE" or existing_job:
                 status = "BUSY"
             elif not stable:

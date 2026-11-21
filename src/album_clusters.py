@@ -13,6 +13,7 @@ from collections import defaultdict
 
 from common import utcnow
 from localized_names import preferred_english_name
+from album_workspace import SCHEMA as REVIEW_SCHEMA
 
 LOCK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS album_track_locks (
@@ -44,7 +45,7 @@ class AlbumClusters:
 
     def init(self):
         with self.store.db() as con:
-            con.executescript(LOCK_SCHEMA)
+            con.executescript(REVIEW_SCHEMA + LOCK_SCHEMA)
 
     def locked(self, user_id, track_id):
         self.store.require_user(user_id)
