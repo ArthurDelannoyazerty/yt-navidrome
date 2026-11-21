@@ -277,7 +277,8 @@ async function fixtureServer(t, data) {
           locked:Boolean(data.lockStates?.[url.searchParams.get("track_id")])};
       else if (url.pathname === "/api/albums/clusters") {
         const include=url.searchParams.get("include_assigned")==="true";
-        const source=(data.albumTracks||[]).filter(t=>include||!t.current_release_id);
+        const source=(data.albumTracks||[]).filter(t=>include||!t.current_release_id)
+          .map(t=>({...t,mbid:t.mbid||t.recording_id}));
         const families=(data.albumFamilies||[{id:"cluster-1",ids:source.map(t=>t.id)}]);
         const all=families.map(family=>{
           const tracks=source.filter(t=>family.ids.includes(t.id));
