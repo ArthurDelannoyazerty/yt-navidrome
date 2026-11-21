@@ -36,7 +36,7 @@ window.AlbumUI = (() => {
   function clusterWork(id=ui.focus){
     if(!ui.work.has(id))ui.work.set(id,{
       resolved:new Set(),selected:null,extra:new Map(),unchecked:new Set(),
-      edition:null,loadingId:null
+      edition:null,loadingId:null,loadingSerial:null
     });
     return ui.work.get(id);
   }
@@ -174,8 +174,8 @@ window.AlbumUI = (() => {
   async function loadEdition(id){
     if(!ui.detail||!id)return;
     const user=ui.user,serial=ui.serial,focus=ui.focus,work=clusterWork(focus);
-    if(work.loadingId===id)return;
-    work.loadingId=id;
+    if(work.loadingId===id&&work.loadingSerial===serial)return;
+    work.loadingId=id;work.loadingSerial=serial;
     try{
       const query=new URLSearchParams({user_id:user,anchor_id:focus,release_id:id,
         include_assigned:String($("albumIncludeAssigned").checked)});
@@ -190,7 +190,9 @@ window.AlbumUI = (() => {
         notice("Tracklist is being indexed in the MusicBrainz cache: "+error.message,false,"albumReleaseStatus");
         scheduleEditionRefresh(id);
       }
-    }finally{work.loadingId=null;}
+    }finally{
+      if(work.loadingSerial===serial){work.loadingId=null;work.loadingSerial=null;}
+    }
   }
   function scheduleEditionRefresh(id){
     clearTimeout(ui.pollTimer);
