@@ -1,7 +1,8 @@
-"""Explicit and reversible album-only tag updates, preserving file locations.
+"""Explicit and reversible album metadata updates, preserving file locations.
 
-No recording identity, source origin, audio codec, or playlist membership is
-changed. Copy-on-write metadata edits are backed by persistent undo files.
+An explicitly selected official album position may replace a local recording's
+MusicBrainz identity. The old ID and complete audio tags are backed up for
+undo; origin links, audio codec, filename and playlist membership are retained.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS album_changes (
  id TEXT PRIMARY KEY, group_id TEXT NOT NULL, user_id TEXT NOT NULL,
  track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE RESTRICT,
  release_id TEXT NOT NULL, old_release_id TEXT, release_tags TEXT NOT NULL,
+ old_recording_id TEXT, new_recording_id TEXT,
  asset_id INTEGER NOT NULL, path TEXT NOT NULL, expected_sha TEXT NOT NULL,
  backup_path TEXT, after_sha TEXT, status TEXT NOT NULL,
  created_at TEXT NOT NULL, completed_at TEXT, reverted_at TEXT,
@@ -49,6 +51,11 @@ class AlbumManager:
     def init(self):
         with self.store.db() as con:
             con.executescript(SCHEMA)
+            # Existing installations have durable album_changes rows already.
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(album_changes)")}
+            for name in ("old_recording_id", "new_recording_id"):
+                if name not in cols:
+                    con.execute("ALTER TABLE album_changes ADD COLUMN " + name + " TEXT")
 
     def _require_completed_migration(self):
         journal = self.store.path.parent / "stable-path-migration.json"
@@ -98,7 +105,8 @@ class AlbumManager:
                 raise LookupError("Some selected music does not belong to this library")
             return [dict(row) for row in rows]
 
-    def preview(self, user_id, release_id, source_ids=(), track_ids=(), *, persist=True):
+    def preview(self, user_id, release_id, source_ids=(), track_ids=(), *,
+                persist=True, recording_overrides=None):
         self.require_migration_complete()
         self.store.require_user(user_id)
         self._require_completed_migration()
@@ -110,9 +118,21 @@ class AlbumManager:
         if not release["entity"] or not release["tracks"]:
             raise ValueError("The complete release tracklist is not cached. Open the release in Catalogue and sync it first.")
         tracks = self._select(user_id, source_ids, track_ids)
+        overrides = recording_overrides or {}
+        if set(overrides) - {track["id"] for track in tracks}:
+            raise ValueError("A recording override is not one of the selected tracks")
         results = []
         for track in tracks:
-            tags = self.catalogue.release_assignment(release_id, track["mbid"]) if track["mbid"] else None
+            target_recording = overrides.get(track["id"], track["mbid"])
+            tags = self.catalogue.release_assignment(release_id, target_recording) if target_recording else None
+            # A recording identity is only replaced when the user explicitly
+            # selected this official position. Keep existing song/artist tags.
+            if tags and target_recording != track["mbid"]:
+                tags["replace_recording_id"] = target_recording
+            collision = target_recording != track["mbid"] and self.store.one(
+                "SELECT id FROM tracks WHERE user_id=? AND mbid=? AND id<>?",
+                (user_id, target_recording, track["id"]),
+            )
             path = Path(track["path"] or "").resolve() if track.get("path") else None
             user_root = (LIBRARY / user_id).resolve()
             stable = path and path.parent == (user_root / "audio") and path.name == track["id"] + ".opus"
@@ -122,11 +142,13 @@ class AlbumManager:
                (user_id, track["id"], track["id"]))
             if not tags:
                 status = "INCOMPATIBLE"
-            elif track["release_id"] == release_id:
+            elif track["release_id"] == release_id and track["mbid"] == target_recording:
                 status = "UNCHANGED"
             elif track["album_locked"]:
                 status = "LOCKED"
-            elif not track["mbid"] or track["health"] != "AVAILABLE" or track["operation_state"] != "IDLE" or existing_job:
+            elif collision:
+                status = "DUPLICATE_RECORDING"
+            elif track["health"] != "AVAILABLE" or track["operation_state"] != "IDLE" or existing_job:
                 status = "BUSY"
             elif not stable:
                 status = "NEEDS_STABLE_PATH_MIGRATION"
@@ -135,6 +157,7 @@ class AlbumManager:
             else:
                 status = "COMPATIBLE"
             results.append({"track_id": track["id"], "recording_id": track["mbid"],
+                            "target_recording_id": target_recording,
                             "old_release_id": track["release_id"], "status": status,
                             "revision": track["updated_at"], "asset_id": track["current_asset_id"],
                             "sha256": track["sha256"], "path": track["path"],
@@ -148,7 +171,9 @@ class AlbumManager:
         return {"preview_token": token, "release_id": release_id,
                 "album": release["entity"]["name"], "items": results,
                 "can_apply": sum(row["status"] == "COMPATIBLE" for row in results),
-                "note": "Only compatible tracks change. File paths and recording IDs stay unchanged."}
+                "note": "Only compatible, explicitly selected album positions are applied. "
+                        "A different recording ID is changed reversibly; song title, artist, "
+                        "audio path, origin and playlist membership are retained."}
 
     def apply(self, user_id, preview_token):
         self.require_migration_complete()
@@ -165,7 +190,7 @@ class AlbumManager:
             if not selected:
                 raise ValueError("No compatible album changes in this preview")
             for item in selected:
-                row = con.execute("""SELECT t.id,t.updated_at,t.release_id,t.current_asset_id,
+                row = con.execute("""SELECT t.id,t.updated_at,t.release_id,t.mbid,t.current_asset_id,
                     t.operation_state,t.health,a.sha256,a.path FROM tracks t
                     JOIN assets a ON a.id=t.current_asset_id AND a.state='CURRENT'
                     WHERE t.user_id=? AND t.id=?""", (user_id, item["track_id"])).fetchone()
@@ -174,13 +199,19 @@ class AlbumManager:
                     (user_id,item["track_id"]),
                 ).fetchone():
                     raise ValueError("Album locked: unlock this recording before reassignment")
-                if not row or row["updated_at"] != item["revision"] or row["release_id"] != item["old_release_id"] or row["current_asset_id"] != item["asset_id"] or row["sha256"] != item["sha256"] or row["path"] != item["path"] or row["operation_state"] != "IDLE" or row["health"] != "AVAILABLE":
+                if not row or row["updated_at"] != item["revision"] or row["release_id"] != item["old_release_id"] or row["mbid"] != item["recording_id"] or row["current_asset_id"] != item["asset_id"] or row["sha256"] != item["sha256"] or row["path"] != item["path"] or row["operation_state"] != "IDLE" or row["health"] != "AVAILABLE":
                     raise ValueError("A track or its audio changed since preview; review again")
                 if con.execute("""SELECT 1 FROM jobs j LEFT JOIN album_changes c ON j.kind='album' AND c.id=j.target
                     WHERE j.state IN ('PENDING','RUNNING') AND (j.kind='track' AND j.target=?
                     OR j.kind='album' AND c.track_id=?) LIMIT 1""", (item["track_id"], item["track_id"])).fetchone():
                     raise ValueError("One of these tracks has an active operation; review again")
-                if not self.catalogue.release_assignment(preview["release_id"], item["recording_id"]):
+                target = item.get("target_recording_id", item["recording_id"])
+                if target != item["recording_id"] and con.execute(
+                    "SELECT 1 FROM tracks WHERE user_id=? AND mbid=? AND id<>?",
+                    (user_id, target, item["track_id"]),
+                ).fetchone():
+                    raise ValueError("Destination recording is already owned in this library")
+                if not self.catalogue.release_assignment(preview["release_id"], target):
                     raise ValueError("The cached release tracklist changed; review again")
                 if not Path(row["path"]).is_file() or sha256_file(Path(row["path"])) != item["sha256"]:
                     raise ValueError("The current audio changed on disk; review again")
@@ -193,11 +224,12 @@ class AlbumManager:
                 change_id = uuid.uuid4().hex
                 con.execute("""INSERT INTO album_changes
                     (id,group_id,user_id,track_id,release_id,old_release_id,release_tags,asset_id,path,
-                     expected_sha,status,created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,'QUEUED',?)""",
+                     expected_sha,status,created_at,old_recording_id,new_recording_id)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,'QUEUED',?,?,?)""",
                     (change_id, group_id, user_id, item["track_id"], preview["release_id"],
                      item["old_release_id"], json.dumps(item["release_tags"]), item["asset_id"],
-                     item["path"], item["sha256"], utcnow()))
+                     item["path"], item["sha256"], utcnow(), item["recording_id"],
+                     item.get("target_recording_id", item["recording_id"])))
                 if not self.store.enqueue("album", change_id, user_id, {"mode": "apply"}, con=con):
                     raise ValueError("Could not queue an album change safely")
             con.execute("UPDATE album_previews SET consumed_at=? WHERE token=?", (utcnow(), preview_token))
@@ -245,7 +277,7 @@ class AlbumManager:
     def history(self, user_id, limit=100):
         self.store.require_user(user_id)
         return self.store.rows("""SELECT id,group_id,track_id,release_id,old_release_id,status,
-          created_at,completed_at,reverted_at,error FROM album_changes WHERE user_id=?
+          old_recording_id,new_recording_id,created_at,completed_at,reverted_at,error FROM album_changes WHERE user_id=?
           ORDER BY created_at DESC,id DESC LIMIT ?""", (user_id, min(200, max(1, limit))))
 
     def undo(self, user_id, change_id):
@@ -257,10 +289,18 @@ class AlbumManager:
                 raise LookupError("Album change not found in this library")
             if row["status"] != "DONE":
                 raise ValueError("Only completed, unreverted album changes can be undone")
-            track = con.execute("SELECT release_id,current_asset_id FROM tracks WHERE user_id=? AND id=?", (user_id, row["track_id"])).fetchone()
+            track = con.execute("SELECT release_id,mbid,current_asset_id FROM tracks WHERE user_id=? AND id=?", (user_id, row["track_id"])).fetchone()
             asset = con.execute("SELECT sha256,path FROM assets WHERE id=? AND state='CURRENT'", (row["asset_id"],)).fetchone()
             if not track or track["release_id"] != row["release_id"] or track["current_asset_id"] != row["asset_id"] or not asset or asset["sha256"] != row["after_sha"] or asset["path"] != row["path"]:
                 raise ValueError("The track changed after this album update; cannot restore older tags safely")
+            if row["new_recording_id"] is not None and track["mbid"] != row["new_recording_id"]:
+                raise ValueError("The recording identity changed after the album update")
+            if (row["new_recording_id"] is not None and
+                row["old_recording_id"] != row["new_recording_id"] and
+                row["old_recording_id"] is not None and
+                con.execute("SELECT 1 FROM tracks WHERE user_id=? AND mbid=? AND id<>?",
+                            (user_id, row["old_recording_id"], row["track_id"])).fetchone()):
+                raise ValueError("Cannot undo: the previous recording identity is now used by another track")
             if con.execute("""SELECT 1 FROM jobs j LEFT JOIN album_changes c ON j.kind='album' AND c.id=j.target
                 WHERE j.state IN ('PENDING','RUNNING') AND (j.kind='track' AND j.target=? OR j.kind='album' AND c.track_id=?) LIMIT 1""",
                 (row["track_id"], row["track_id"])).fetchone():
@@ -324,6 +364,11 @@ class AlbumManager:
                     "musicbrainz_releasegroupid": tags.get("release_group_id"),
                     "musicbrainz_releasetrackid": tags.get("track_id")}
         updates.update({key: value for key, value in optional.items() if value})
+        if tags.get("replace_recording_id"):
+            # Beets uses musicbrainz_trackid for the recording MBID. Also
+            # synchronize the conventional recordingid tag when present/used.
+            updates["musicbrainz_trackid"] = tags["replace_recording_id"]
+            updates["musicbrainz_recordingid"] = tags["replace_recording_id"]
         for key, value in updates.items():
             audio[key] = [str(part) for part in value] if isinstance(value, list) else [str(value)]
         audio.save()
@@ -349,6 +394,14 @@ class AlbumManager:
                 track = self.store.owned("tracks", change["track_id"], user_id)
                 if track["release_id"] != change["old_release_id"] or track["current_asset_id"] != change["asset_id"]:
                     raise ValueError("Recording or album changed; operation refused")
+                if change["new_recording_id"] is not None:
+                    if track["mbid"] != change["old_recording_id"]:
+                        raise ValueError("Recording identity changed; operation refused")
+                    if change["new_recording_id"] != change["old_recording_id"] and self.store.one(
+                        "SELECT 1 FROM tracks WHERE user_id=? AND mbid=? AND id<>?",
+                        (user_id, change["new_recording_id"], change["track_id"]),
+                    ):
+                        raise ValueError("Destination recording is already owned")
                 atomic_copy(destination, backup)
                 atomic_copy(destination, staged)
                 self._retag(staged, json.loads(change["release_tags"]))
@@ -376,6 +429,14 @@ class AlbumManager:
                 track = self.store.owned("tracks", change["track_id"], user_id)
                 if track["release_id"] != change["release_id"]:
                     raise ValueError("Album was changed again; cannot undo safely")
+                if change["new_recording_id"] is not None:
+                    if track["mbid"] != change["new_recording_id"]:
+                        raise ValueError("Recording identity changed; cannot undo safely")
+                    if change["old_recording_id"] != change["new_recording_id"] and self.store.one(
+                        "SELECT 1 FROM tracks WHERE user_id=? AND mbid=? AND id<>?",
+                        (user_id, change["old_recording_id"], change["track_id"]),
+                    ):
+                        raise ValueError("Previous recording identity is already owned")
                 with self.store.db() as con:
                     con.execute("UPDATE album_changes SET status='UNDO_PREPARED' WHERE id=?", (change_id,))
                 atomic_copy(backup, destination)
@@ -405,12 +466,37 @@ class AlbumManager:
                 raise ValueError("Track album or asset changed during album update")
             if mode == "undo" and (track["release_id"] != change["release_id"] or asset["sha256"] != change["after_sha"]):
                 raise ValueError("Track changed since album assignment; undo refused")
+            identity_change = (change["new_recording_id"] is not None and
+                               change["new_recording_id"] != change["old_recording_id"])
+            previous_identity = change["old_recording_id"] if mode == "apply" else change["new_recording_id"]
+            next_identity = change["new_recording_id"] if mode == "apply" else change["old_recording_id"]
+            if change["new_recording_id"] is not None and track["mbid"] != previous_identity:
+                raise ValueError("Recording identity changed during album update")
+            if identity_change and con.execute(
+                "SELECT 1 FROM tracks WHERE user_id=? AND mbid=? AND id<>?",
+                (user_id, next_identity, change["track_id"]),
+            ).fetchone():
+                raise ValueError("Destination recording identity belongs to another local track")
             now = utcnow()
             con.execute("UPDATE assets SET sha256=?,size_bytes=?,mtime_ns=? WHERE id=?",
                         (expected, stat.st_size, stat.st_mtime_ns, change["asset_id"]))
-            con.execute("UPDATE tracks SET release_id=?,beets_id=?,updated_at=? WHERE id=?",
+            con.execute("UPDATE tracks SET release_id=?,mbid=?,beets_id=?,updated_at=? WHERE id=?",
                         (change["release_id"] if mode == "apply" else change["old_release_id"],
+                         next_identity if change["new_recording_id"] is not None else track["mbid"],
                          beets_id if beets_id is not None else track["beets_id"], now, change["track_id"]))
+            if identity_change:
+                con.execute(
+                    """INSERT INTO identity_history(user_id,track_id,previous_mbid,
+                         previous_release_id,previous_title,new_mbid,new_release_id,
+                         new_title,changed_at,reason)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (user_id,change["track_id"],previous_identity,
+                     change["old_release_id"] if mode == "apply" else change["release_id"],
+                     track["matched_title"] or track["title"],next_identity,
+                     change["release_id"] if mode == "apply" else change["old_release_id"],
+                     track["matched_title"] or track["title"],now,
+                     "album_edition_apply" if mode == "apply" else "album_edition_undo"))
+
             if mode == "apply":
                 con.execute("UPDATE album_changes SET status='DONE',completed_at=?,error=NULL WHERE id=?",
                             (now, change_id))
