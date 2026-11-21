@@ -1,4 +1,5 @@
 "use strict";
+const {TABS, helpPaths} = require("./navigation_contract.cjs");
 // Run the real, dependency-free UI in the Chrome shipped on GitHub's runner.
 // API fixtures keep layout and interaction regressions independent of providers.
 const test = require("node:test");
@@ -594,7 +595,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
   assert.equal(await chrome.evaluate("!!document.querySelector('.review-toolbar,#startReview,#approveSelected,#metadataDialog')"),false);
-  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","catalogue","album","language","graph","sources","activity","maintenance","help"]);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),TABS);
   await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
   await chrome.until("!document.querySelector('#approvalWorkspace').hidden && document.querySelectorAll('#mbResults tbody tr').length===1");
   assert.equal(await chrome.evaluate("document.querySelector('#approvalFilter').value"),"NEEDS_APPROVAL");
@@ -658,12 +659,7 @@ test("real browser: Help lazily renders the workflow with local Pele and fits na
   assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#workflowDiagram .pele-node[data-id=queued] rect')).fill"),"rgb(247, 248, 246)");
   assert.equal(await chrome.evaluate("Array.from(document.scripts).filter(script=>script.src.includes('pele-flowchart.js')).every(script=>new URL(script.src).origin===location.origin)"),true);
   assert.equal(await chrome.evaluate("document.querySelectorAll('.transition-table tbody tr').length>=7"),true);
-  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.getAttribute('href'))"),
-    ["/libraries/admin/help/music","/libraries/admin/help/approval",
-     "/libraries/admin/help/catalogue","/libraries/admin/help/album",
-     "/libraries/admin/help/language","/libraries/admin/help/graph",
-     "/libraries/admin/help/sources","/libraries/admin/help/activity",
-     "/libraries/admin/help/maintenance","/libraries/admin/help/help"]);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.getAttribute('href'))"),helpPaths("admin"));
   assert.equal(await chrome.evaluate("document.querySelectorAll('.help-topic').length"),10);
   await chrome.evaluate("document.querySelector('.workflow-diagram').scrollIntoView({block:'start'})");
   await chrome.screenshot("help-workflow-desktop");
