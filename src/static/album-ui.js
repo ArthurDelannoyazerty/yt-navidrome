@@ -36,7 +36,7 @@ window.AlbumUI = (() => {
   function clusterWork(id=ui.focus){
     if(!ui.work.has(id))ui.work.set(id,{
       resolved:new Set(),selected:null,extra:new Map(),unchecked:new Set(),
-      edition:null,loadingId:null,loadingSerial:null
+      manual:new Map(),edition:null,loadingId:null,loadingSerial:null
     });
     return ui.work.get(id);
   }
@@ -59,21 +59,87 @@ window.AlbumUI = (() => {
     const work=clusterWork();
     return ui.detail.tracks.filter(t=>!t.locked&&!t.not_found&&!work.resolved.has(t.id));
   }
-  function chosenForEdition(track,edition){
-    const work=clusterWork();
-    return !track.locked&&!track.unidentified&&!work.resolved.has(track.id) &&
-      !work.unchecked.has(edition.id+":"+track.id);
+  // The checkbox only controls initial selection. A deliberate click (or
+  // Select all) may include an already-assigned local track without it.
+  const canChoose=track=>Boolean(track&&!track.locked&&!track.out_of_scope);
+  const choiceKey=(edition,track)=>edition.id+":"+track.id;
+  function selectedRecordingFor(track,edition){
+    if(!canChoose(track)||clusterWork().resolved.has(track.id))return null;
+    const work=clusterWork(),key=choiceKey(edition,track);
+    if(work.manual.has(key))return work.manual.get(key);
+    if(track.in_scope!==false && edition.matched_track_ids.includes(track.id) &&
+       !work.unchecked.has(key))return track.mbid;
+    return null;
+  }
+  function setSelection(track,edition,target,checked){
+    if(!canChoose(track))return;
+    const work=clusterWork(),key=choiceKey(edition,track);
+    if(!checked){
+      work.manual.delete(key);work.unchecked.add(key);
+    }else{
+      if(!edition.tracks.some(song=>song.recording_id===target))return;
+      // One local copy per official position: never silently submit two
+      // different local tracks with the same destination recording MBID.
+      for(const other of ui.detail.tracks){
+        if(other.id!==track.id && selectedRecordingFor(other,edition)===target){
+          work.unchecked.add(choiceKey(edition,other));
+          work.manual.delete(choiceKey(edition,other));
+        }
+      }
+      work.unchecked.delete(key);
+      if(track.in_scope===false || track.mbid!==target)
+        work.manual.set(key,target);
+      else work.manual.delete(key);
+    }
+    renderMusic();
   }
   function selectedSummary(){
-    const edition=activeEdition(),work=ui.detail&&clusterWork();
-    const rows=ui.detail?.tracks||[];
-    if(!edition?.complete)return {selected:[],moves:[],newTracks:[],unchanged:[],hiddenOrange:0};
-    const selected=rows.filter(t=>t.in_scope!==false&&edition.matched_track_ids.includes(t.id)&&chosenForEdition(t,edition));
-    const moves=selected.filter(t=>t.current_release_id && t.current_release_id!==edition.id);
+    const edition=activeEdition(),rows=ui.detail?.tracks||[];
+    if(!edition?.complete)return {selected:[],moves:[],newTracks:[],unchanged:[],
+      identityChanges:[],hiddenOrange:0};
+    const selected=rows.flatMap(track=>{
+      const target=selectedRecordingFor(track,edition);
+      return target&&edition.tracks.some(song=>song.recording_id===target)
+        ? [{...track,target_recording_id:target}] : [];
+    });
+    const moves=selected.filter(t=>t.current_release_id&&t.current_release_id!==edition.id);
     const newTracks=selected.filter(t=>!t.current_release_id);
-    const unchanged=selected.filter(t=>t.current_release_id===edition.id);
-    return {selected,moves,newTracks,unchanged,
+    const identityChanges=selected.filter(t=>t.mbid!==t.target_recording_id);
+    const unchanged=selected.filter(t=>t.current_release_id===edition.id&&
+      t.mbid===t.target_recording_id);
+    return {selected,moves,newTracks,unchanged,identityChanges,
       hiddenOrange:$("albumOnlyGreen").checked?moves.length:0};
+  }
+  function selectAll(){
+    const edition=activeEdition(),detail=ui.detail;
+    if(!edition?.complete||!detail)return;
+    const work=clusterWork();
+    const chosen=new Map(),used=new Set();
+    for(const song of edition.tracks){
+      const exact=detail.tracks.filter(t=>t.mbid===song.recording_id);
+      const alternatives=(song.possible_local_matches||[])
+        .map(candidate=>detail.tracks.find(t=>t.id===candidate.id)).filter(Boolean);
+      const best=[...exact,...alternatives].find(t=>
+        canChoose(t)&&!work.resolved.has(t.id)&&!used.has(t.id));
+      if(best){
+        chosen.set(best.id,song.recording_id);
+        used.add(best.id);
+      }
+    }
+    for(const track of detail.tracks){
+      const key=choiceKey(edition,track);
+      work.manual.delete(key);
+      work.unchecked.add(key);
+    }
+    for(const track of detail.tracks){
+      if(!chosen.has(track.id))continue;
+      const target=chosen.get(track.id),key=choiceKey(edition,track);
+      if(track.mbid===target&&track.in_scope!==false)work.unchecked.delete(key);
+      else work.manual.set(key,target);
+    }
+    renderMusic();
+    notice(chosen.size+" available local tracks selected for this album edition. "+
+      "Locked and missing recordings were skipped.");
   }
   function renderRemaining(){
     if(!ui.detail){$("albumRemainingStatus").textContent="Select a cluster.";return;}
@@ -227,19 +293,22 @@ window.AlbumUI = (() => {
     control.textContent="Validate Album";
     if(!album){
       control.disabled=true;
+      $("albumSelectAll").disabled=true;
       $("albumSelectedTitle").textContent="Choose an album edition to inspect its complete tracklist.";
       return;
     }
     $("albumSelectedTitle").append(element("span","Selected: ","hint"),bilingual(album));
     const edition=activeEdition(),counts=selectedSummary();
     control.disabled=!edition?.complete||!counts.selected.length;
+    $("albumSelectAll").disabled=!edition?.complete;
     if(!edition?.complete){
       $("albumSelectedTitle").append(element("small",
         "Complete tracklist is being fetched automatically…","hint"));
     }else{
       $("albumSelectedTitle").append(element("small",
         counts.selected.length+" selected · "+counts.newTracks.length+" new · "+
-        counts.moves.length+" from other albums"+
+        counts.moves.length+" from other albums · "+
+        counts.identityChanges.length+" recording IDs to update"+
         (counts.hiddenOrange?" ("+counts.hiddenOrange+" hidden by filter)":""),
         "album-validation-count"));
     }
@@ -249,6 +318,7 @@ window.AlbumUI = (() => {
     const detail=ui.detail;
     $("albumMusicHeading").textContent="Tracks on this edition";
     if(!detail){
+      $("albumSelectAll").disabled=true;
       $("albumMusicContext").textContent="Choose a cluster to review its MusicBrainz editions.";
       renderRemaining();return;
     }
