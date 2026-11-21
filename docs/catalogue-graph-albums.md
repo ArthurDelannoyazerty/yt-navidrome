@@ -165,37 +165,52 @@ Do not enable bulk album edits until the Navidrome checkpoint is complete.
 
 ### Connected album-cluster workspace
 
-Album is now a cluster-first screen. A cluster connects library recordings through
-cached MusicBrainz recording-to-release and release-group relationships; cached
-public records never imply that another user's audio is available. The default
-scope includes available recordings **without an album**. Enable **Include
-recordings already assigned** to review and possibly consolidate a whole
-user library. Song-title search returns the complete cluster that matches.
+The Album tab groups local recordings by exact MusicBrainz release and release-group
+links. Album clusters are navigation groups, **not** a command to tag every song
+with the same album. Use the whole-library checkbox to include songs already
+assigned to other editions. Searching a song title returns its entire cluster.
 
-The desktop display has three internally scrollable columns: a narrow group
-navigator with Previous/Next, an edition list ranked by exact verified recording
-coverage, and a wide recording comparison. Selecting an edition highlights
-excluded songs red and, if requested, included songs green. Native canonical
-titles and their available English equivalents wrap in the cards rather than
-being truncated. A release with an incomplete cached tracklist shows an
-**unknown** match, never a red exclusion.
+The three desktop columns scroll independently: cluster navigator, candidate
+edition list, and the selected edition's **complete official MusicBrainz
+tracklist** plus other local cluster recordings. Original and available English
+titles are displayed together. Tracklists are fetched automatically through
+the persistent, rate-limited Catalogue queue. Missing metadata remains
+neutral/unknown until the full release has been cached; no manual Sync button
+is needed. The focused cluster's releases have higher queue priority.
 
-**Use this album for remaining matching songs** stages decisions for outstanding
-members only, leaving previously staged decisions untouched. Excluded songs
-remain for another edition. A cluster is reviewed when every unlocked song has
-either a staged edition, an explicit Keep Current decision, or a reversible
-**No Album Found** review marker. The cluster plan still requires a fresh
-server preview and explicit confirmation; no click in the comparison itself
-rewrites audio. Matching requires exact MusicBrainz recording membership.
-The same stable-path, checksum, backup and undo guards continue to apply.
-Unrelated albums retain their songs even if another edition shares five tracks.
+Six subdued colors describe *exact release membership* and local assignment:
+- **Green:** downloaded, on this release, and unassigned or already assigned
+  to it. Checked by default.
+- **Orange:** downloaded, on this release, but currently assigned to another
+  album. Checked by default; uncheck to avoid that particular move.
+- **Red:** official release track not downloaded locally. Unchecked/disabled.
+- **Gray:** album-locked recording. Unchecked/disabled.
+- **Purple:** local cluster song missing from the selected release and
+  assigned to another album. Unchecked/disabled.
+- **Blue:** local cluster song missing from the release and unassigned.
+  Unchecked/disabled; may be individually reviewed as No Album Found.
 
-Manual exceptions are handled in the Music tab's track details: **Album / lock**
-opens a release search and a one-song preview/apply action. The album lock
-is stored per user/track and checked on the server when album or identity edits
-are prepared, queued or applied. Unlock before manually assigning a different
-release. Audio covers remain managed by the separate Artwork editor.
+**Green tracks only** is a display-only filter. Orange selections stay selected
+when hidden; the confirmation dialog explicitly counts any hidden orange moves.
+The compact legend stays below the internally scrolling music cards.
 
-An advanced section keeps optional source-level *future song* preferences
-without filtering or changing the active cluster. History keeps per-track undo
-and interrupted-job retry actions.
+**Validate Album** replaces the previous persistent assignment-plan card.
+It previews the currently checked *eligible* songs, including any moves from
+other releases and per-album before/after counts, in a small modal. Files are
+not touched until the user confirms. The existing backend rechecks exact
+release membership, album locks, file checksums, current job state and undo
+backup space before queuing reversible album-only changes. Cluster-only songs
+remain for another edition, and unchecked songs are untouched. An albumless
+song can still be marked No Album Found individually without a fake audio tag.
+
+If a local recording is already assigned to a release whose **fully fetched**
+official tracklist does not include its MusicBrainz recording ID, this rare
+contradiction is deliberately **not** mixed into Album. Catalogue instead has
+a collapsed "Review album metadata mismatches" section listing only verified
+cases from the current user's library, with a direct link to that song's
+Music details. The user can correct the album manually and use the per-track
+album lock to prevent unintended future reassignment.
+
+History and per-song undo remain available. Advanced source-specific album
+preferences still apply only to future matching recordings. Album artwork
+continues to be managed by the separate Artwork tool.
