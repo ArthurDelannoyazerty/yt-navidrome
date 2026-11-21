@@ -1649,7 +1649,7 @@ test("real browser: direct catalogue, approval, source and music links restore c
   assert.equal(await chrome.evaluate("state.tab"),"catalogue");
   assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/catalogue/recording/"+recording);
   await chrome.send("Page.navigate",{url:origin+"/libraries/admin/approval/track-1"});
-  await chrome.until("state.tab==='approval' && !document.querySelector('#approvalWorkspace').hidden");
+  await chrome.until("typeof state!=='undefined' && state.tab==='approval' && document.querySelector('#approvalWorkspace') && !document.querySelector('#approvalWorkspace').hidden");
   assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/approval/track-1");
   await chrome.send("Page.navigate",{url:origin+"/libraries/admin/sources/"+source});
   await chrome.until("document.querySelector('.source.is-target')");
