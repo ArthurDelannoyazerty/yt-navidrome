@@ -164,7 +164,8 @@ window.AlbumUI = (() => {
     renderSelected();
   }
   function selectEdition(id){
-    if(!releases().some(a=>a.id===id))return;
+    // Do not allow a click on the previous scope while its replacement is loading.
+    if(ui.fetching||!releases().some(a=>a.id===id))return;
     const work=clusterWork();
     work.selected=id;work.edition=null;
     clearTimeout(ui.pollTimer);ui.pollTimer=null;

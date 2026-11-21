@@ -1403,7 +1403,7 @@ test("real browser: six album membership colors, individual checkboxes and Valid
   assert.equal(await chrome.evaluate("document.querySelector('#albumPlanTitle')"),null);
   assert.equal(await chrome.evaluate("document.querySelector('#albumClusterPosition').textContent"),"1 / 2");
   await chrome.evaluate("document.querySelector('#albumIncludeAssigned').click()");
-  await chrome.until("document.querySelectorAll('.album-cluster-choice').length===2");
+  await chrome.until("document.querySelector('#albumClusterSummary').textContent.includes('5 recordings')");
   await chrome.evaluate("(()=>{const el=[...document.querySelectorAll('.album-edition-choice')].find(x=>x.textContent.includes('Expanded Edition'));el.click()})()");
   await chrome.until("document.querySelectorAll('.album-track-comparison').length===6");
   assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-green').length"),1);
