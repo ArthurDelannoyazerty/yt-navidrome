@@ -260,6 +260,12 @@
       <div class="row"><button id="catalogueRefreshProgress" type="button" class="secondary">Refresh progress</button>
       <button id="catalogueIndexLibrary" type="button" class="secondary">Index downloaded recordings</button></div>
       <p id="catalogueProgress" class="hint" role="status"></p>
+      <div class="catalogue-album-cache-progress">
+        <strong>Album family and edition cache</strong>
+        <p id="catalogueAlbumCacheStatus" class="hint" role="status">Checking MusicBrainz release-group discovery and tracklist queue…</p>
+        <progress id="catalogueAlbumCacheBar" max="1" value="0"
+          aria-label="Completed album release-group discovery and release tracklist tasks"></progress>
+      </div>
           <div class="approval-cache-panel catalogue-prefetch-merged" aria-labelledby="approvalCacheHeading">
             <div class="approval-cache-heading">
               <div><h3 id="approvalCacheHeading">MusicBrainz cache &amp; prefetch</h3>
@@ -303,15 +309,15 @@
 
   <section class="panel album-panel" data-panel="album" id="albumPanel" hidden>
     <div class="panel-heading">
-      <div><span class="eyebrow">MUSICBRAINZ</span><h2>Album clusters</h2>
-        <p class="hint">Review connected album families across your library. Albums are ordered by exact MusicBrainz recording coverage; higher coverage does not guarantee the correct edition.</p>
+      <div><span class="eyebrow">MUSICBRAINZ</span><h2>Album families</h2>
+        <p class="hint">Review separate MusicBrainz release-group families across your library. Assigned songs remain visible; the checkbox controls whether they may be changed. Different-recording matches are suggestions only.</p>
       </div>
       <button id="albumRefresh" type="button" class="secondary">Refresh clusters</button>
     </div>
     <div class="album-cluster-toolbar">
-      <label class="check"><input type="checkbox" id="albumIncludeAssigned"> Include recordings already assigned to an album (entire library)</label>
+      <label class="check"><input type="checkbox" id="albumIncludeAssigned"> Allow changes to recordings already assigned to an album</label>
       <label class="control-field album-cluster-search">Filter by music title
-        <input type="search" id="albumClusterSearch" placeholder="Find a song's complete cluster" maxlength="100"></label>
+        <input type="search" id="albumClusterSearch" placeholder="Find a song's album families" maxlength="100"></label>
       <div class="album-cluster-pagination" aria-label="Cluster navigation">
         <button id="albumPrev" type="button" class="secondary">Previous</button>
         <output id="albumClusterPosition" aria-live="polite">0 / 0</output>
@@ -321,7 +327,7 @@
     <p class="hint" id="albumClusterStatus" role="status" aria-live="polite">Loading connected recording and album families…</p>
     <div class="album-cluster-grid" aria-label="Album cluster workspace">
       <section class="album-cluster-column album-cluster-sidebar" aria-labelledby="albumClustersHeading">
-        <div class="album-column-heading"><h3 id="albumClustersHeading">Clusters</h3>
+        <div class="album-column-heading"><h3 id="albumClustersHeading">Families</h3>
           <small id="albumClusterCount"></small></div>
         <div id="albumClusterList" class="album-column-scroll" role="listbox" aria-label="Music and album clusters"></div>
       </section>
@@ -358,7 +364,8 @@
           <div id="albumMusicLegend" class="album-music-legend" aria-label="Track colors">
             <span><i class="album-legend-dot album-dot-green"></i> Local</span>
             <span><i class="album-legend-dot album-dot-orange"></i> Another album</span>
-            <span><i class="album-legend-dot album-dot-red"></i> Not local</span>
+            <span><i class="album-legend-dot album-dot-red"></i> No exact local MBID</span>
+            <span><i class="album-legend-dot album-dot-candidate"></i> Possible different-MBID match</span>
             <span><i class="album-legend-dot album-dot-gray"></i> Locked</span>
             <span><i class="album-legend-dot album-dot-purple"></i> Cluster / other album</span>
             <span><i class="album-legend-dot album-dot-blue"></i> Cluster / unassigned</span>
@@ -686,12 +693,13 @@
           <p><strong>Cache synchronization</strong> also displays Approval metadata prefetch progress, the queue and cooldown, cached data size and overall Catalogue database size. Expand <strong>Failed searches and metadata requests</strong> to inspect disabled jobs and retry each for three more low-priority attempts. Use <strong>Clean unused cache</strong> to preview removing obsolete searches while retaining metadata for already approved music and recordings still awaiting approval. Music and Catalogue graph entities are never deleted.</p>
           <p><strong>Search cache</strong> uses saved metadata; <strong>Search MusicBrainz</strong> requests new data. <strong>Only items linked to my library</strong> filters by confirmed MusicBrainz IDs and their cached links, not similar names.</p>
           <p><strong>Index downloaded recordings</strong> synchronizes recording and credited-artist metadata in the background. It is metadata-only: it never edits or downloads audio. Use <strong>Refresh progress</strong> for the shared queue; its totals can grow as more relationships are discovered.</p>
+          <p><strong>Album family cache</strong> shows completed, queued, deferred, and running release-group discovery and release-tracklist tasks. This is a growing queue: newly discovered editions increase the total. Album changes still require verified exact MusicBrainz recording IDs.</p>
           <p><strong>Album organization</strong> has moved to the dedicated Album tab. Catalogue is for exploring and synchronizing MusicBrainz metadata.</p>
         </section>
         <section id="help-album" class="help-topic" aria-labelledby="help-album-title">
           <h3 id="help-album-title">Album</h3>
-          <p>Album groups your local library's music into connected recording/album clusters using exact MusicBrainz release evidence. By default it examines music without an assigned album; enable <strong>Include recordings already assigned</strong> to review the whole library. Search a song name to find its complete cluster, and move between clusters with Previous/Next.</p>
-          <p>Three columns stay on the same screen on desktop: clusters, editions sorted by exact recording coverage, and the complete official tracklist of the selected edition. Green means local, orange means local but in another album, red means not downloaded, gray means album locked, and purple/blue mean other local recordings in the cluster but absent from the edition. Green and orange songs are checked by default; red, gray and cluster-only songs are unchecked and unavailable. The compact legend is below the music panel.</p>
+          <p>Album groups downloaded recordings into MusicBrainz release-group workspaces. Compilations and featured artists never merge unrelated families. A recording may appear in more than one family. Assigned recordings remain visible and read-only by default; enable <strong>Allow changes to recordings already assigned</strong> to include them in validation. Search a song to find its album families.</p>
+          <p>Three columns stay on the same screen on desktop: clusters, editions sorted by exact recording coverage, and the complete official tracklist of the selected edition. Green means local, orange means local but in another album, red means no exact local MusicBrainz recording, a separate candidate state suggests a same-title local recording with another recording ID, gray means album locked, and purple/blue mean other local recordings in the cluster but absent from the edition. Green and orange songs are checked by default; red, gray and cluster-only songs are unchecked and unavailable. The compact legend is below the music panel.</p>
           <p>MusicBrainz release tracklists are prefetched automatically in the durable local catalogue, prioritizing the selected cluster. Use <strong>Green tracks only</strong> to filter to green songs. Uncheck individual eligible tracks you wish to exclude, including orange songs already assigned elsewhere. Click <strong>Validate Album</strong> for a concise review and confirmation; this queues reversible album-only tag jobs. Cluster-only recordings remain for the next edition. An individual albumless cluster-only song can be marked <strong>No Album Found</strong>. History and Undo remain available.</p>
           <p>On the Music tab, open the track's <strong>Album / lock</strong> entry to manually search and review a different album for that one recording, or lock its album against automatic and manual reassignment until explicitly unlocked. The Artwork editor remains responsible for covers.</p>
         </section>

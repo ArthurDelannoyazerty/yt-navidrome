@@ -165,10 +165,19 @@ Do not enable bulk album edits until the Navidrome checkpoint is complete.
 
 ### Connected album-cluster workspace
 
-The Album tab groups local recordings by exact MusicBrainz release and release-group
-links. Album clusters are navigation groups, **not** a command to tag every song
-with the same album. Use the whole-library checkbox to include songs already
-assigned to other editions. Searching a song title returns its entire cluster.
+The Album tab uses one workspace per MusicBrainz **release group** (album
+family), not transitive connected components. A downloaded recording may
+appear in multiple families (for example, both an album and a compilation)
+without merging those families; track artists and featured artists never
+create family edges. Cached release-group edition browsing discovers sibling
+releases and prioritizes the currently focused family. Unknown recording
+relationships remain standalone until indexed.
+
+All downloaded songs belonging to a family stay visible, even if already
+assigned. The checkbox controls whether previously assigned recordings
+are eligible for **changes**, not whether they appear in album context.
+Searching a song title finds its family workspaces. These are navigation and
+comparison views, **not** instructions to tag every song with one album.
 
 The three desktop columns scroll independently: cluster navigator, candidate
 edition list, and the selected edition's **complete official MusicBrainz
@@ -178,12 +187,22 @@ the persistent, rate-limited Catalogue queue. Missing metadata remains
 neutral/unknown until the full release has been cached; no manual Sync button
 is needed. The focused cluster's releases have higher queue priority.
 
-Six subdued colors describe *exact release membership* and local assignment:
+Six subdued exact-membership colors plus a separate unverified-candidate
+state describe local assignment. A sibling edition may contain a different
+recording MBID for an identically titled song. Such a local copy is displayed
+as a read-only **possible recording match** when its normalized title and
+available duration agree; track-position evidence is shown where known.
+It is not green/orange, is never selected for tagging automatically, and
+requires an explicit correction of recording identity or independently
+verified album membership before assignment.
+
+Six exact-membership colors describe *exact release membership* and local assignment:
 - **Green:** downloaded, on this release, and unassigned or already assigned
   to it. Checked by default.
 - **Orange:** downloaded, on this release, but currently assigned to another
   album. Checked by default; uncheck to avoid that particular move.
-- **Red:** official release track not downloaded locally. Unchecked/disabled.
+- **Red:** no exact-MBID local recording for this official track. It may still
+  have a differently identified local copy. Unchecked/disabled.
 - **Gray:** album-locked recording. Unchecked/disabled.
 - **Purple:** local cluster song missing from the selected release and
   assigned to another album. Unchecked/disabled.

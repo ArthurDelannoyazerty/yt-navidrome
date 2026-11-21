@@ -318,7 +318,7 @@ async function fixtureServer(t, data) {
         result = {total:list.length,offset,limit,items:list.slice(offset,offset+limit),
           has_more:offset+limit<list.length};
       }
-      else if (url.pathname === "/api/catalogue/progress") result = {counts:{}, active:[]};
+      else if (url.pathname === "/api/catalogue/progress") result = data.catalogueProgress || {counts:{}, active:[]};
       else if (url.pathname === "/api/catalogue/graph") result = data.graph || {nodes:[], edges:[], owned_recording_count:0, truncated:false};
       else if (url.pathname === "/api/catalogue/language-preview") result = data.languagePreview || {
         eligible:0, skipped:{already_localized:0,manual_or_busy:0,invalid_or_missing:0}, sample:[]};
@@ -1152,7 +1152,12 @@ test("real browser: queued searches resolve asynchronously without blocking Beet
 
 test("real browser: Catalogue cache synchronization shows progress and safe cleanup", {timeout:60000}, async t => {
   const chrome=await browser(t); if(!chrome)return;
-  const data=fixtures(), origin=await fixtureServer(t,data);
+  const data=fixtures();
+  data.catalogueProgress={
+    counts:{COMPLETE:72,PENDING:18,RUNNING:2},active:[],
+    album_cache:{complete:60,pending:17,deferred:4,running:2,total:79,cached_tracklists:123}
+  };
+  const origin=await fixtureServer(t,data);
   await chrome.send("Emulation.setDeviceMetricsOverride",{width:1200,height:900,deviceScaleFactor:1,mobile:false});
   await chrome.send("Page.navigate",{url:origin});
   await chrome.until("document.querySelector('#user option[value=admin]') && document.querySelector('#user').value===''");
@@ -1165,6 +1170,10 @@ test("real browser: Catalogue cache synchronization shows progress and safe clea
   assert.match(await chrome.evaluate("document.querySelector('#approvalCacheDetail').textContent"),/8\.0 MiB/);
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheProgress').value"),120);
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheProgress').max"),1920);
+  await chrome.until("document.querySelector('#catalogueAlbumCacheBar').value===60");
+  assert.equal(await chrome.evaluate("document.querySelector('#catalogueAlbumCacheBar').max"),79);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueAlbumCacheStatus').textContent"),/17 queued \(4 deferred\)/);
+  assert.match(await chrome.evaluate("document.querySelector('#catalogueAlbumCacheStatus').textContent"),/123 release tracklists cached/);
   assert.equal(await chrome.evaluate("document.querySelector('#approvalCacheClean').disabled"),false);
   await chrome.evaluate("document.querySelector('#approvalCacheClean').click()");
   await chrome.until("!document.querySelector('#approvalCacheConfirm').hidden");

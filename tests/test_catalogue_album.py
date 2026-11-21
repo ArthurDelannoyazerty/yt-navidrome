@@ -1301,9 +1301,10 @@ def test_cluster_groups_connected_release_families_and_filters_whole_group(db, e
     db.execute("UPDATE tracks SET release_id=NULL WHERE id IN (?,?)", (second,third))
     guest, _, _ = add_audio_track(db, environment, RECORDING_1, user="guest")
     unassigned = clusters.list("admin")
-    assert unassigned["total_tracks"] == 2
+    assert unassigned["total_tracks"] == 3
     assert len(unassigned["clusters"]) == 1
-    assert {x["id"] for x in unassigned["detail"]["tracks"]} == {second,third}
+    assert {x["id"] for x in unassigned["detail"]["tracks"]} == {first,second,third}
+    assert {x["id"] for x in unassigned["detail"]["tracks"] if x["in_scope"]} == {second,third}
     entire = clusters.list("admin", include_assigned=True)
     assert entire["total_tracks"] == 3
     assert len(entire["clusters"]) == 1
@@ -1350,7 +1351,7 @@ def test_cluster_keeps_disjoint_music_separate_and_recognizes_incomplete_release
     assert result["total_clusters"] == 2
     assert {c["track_count"] for c in result["clusters"]} == {1}
     detail=clusters.list("admin",focus_id=outside)["detail"]
-    assert detail["id"] == outside
+    assert {t["id"] for t in detail["tracks"]} == {outside}
     candidate=detail["releases"][0]
     assert candidate["id"] == other_release
     assert candidate["complete"] is False
@@ -1459,7 +1460,7 @@ def test_album_cluster_prefetches_missing_tracklists_without_duplicate_queue_ent
         con.execute("DELETE FROM fetched_releases WHERE release_id=?", (RELEASE_A,))
         con.execute("DELETE FROM scopes WHERE kind='release' AND entity_id=?", (RELEASE_A,))
     initial = clusters.list("admin", include_assigned=True, focus_id=first)
-    assert initial["detail"]["id"] == first
+    assert {t["id"] for t in initial["detail"]["tracks"]} == {first}
     assert initial["detail"]["cache_progress"]["complete"] < initial["detail"]["cache_progress"]["total"]
     with cat.db() as con:
         request = con.execute(
@@ -1540,13 +1541,117 @@ def test_album_edition_knows_downloaded_songs_excluded_by_unassigned_only_scope(
     unassigned, _, _ = add_audio_track(db, environment, RECORDING_4)
     db.execute("UPDATE tracks SET release_id=NULL WHERE id=?", (unassigned,))
     cluster = clusters.list("admin")
-    assert cluster["total_tracks"] == 1
+    assert cluster["total_tracks"] == 2
+    assert {t["id"] for t in cluster["detail"]["tracks"] if t["in_scope"]} == {unassigned}
     edition = clusters.edition("admin", unassigned, RELEASE_B)
     assert edition["complete"]
     by_recording = {r["recording_id"]: r for r in edition["tracks"]}
-    assert assigned not in by_recording[RECORDING_2]["local_track_ids"]
+    # Assigned recordings are now visible in context but remain read-only.
+    assert assigned in by_recording[RECORDING_2]["local_track_ids"]
+    assert not next(t for t in cluster["detail"]["tracks"] if t["id"] == assigned)["in_scope"]
     assert by_recording[RECORDING_2]["local_copies"] == [
         {"id": assigned, "current_release_id": RELEASE_A,
          "locked": False, "display_title": "Track"}
     ]
     assert unassigned in by_recording[RECORDING_4]["local_track_ids"]
+
+
+def test_release_group_workspaces_do_not_merge_compilations_or_featured_artists(db, environment):
+    """A shared recording/artist can belong to multiple family views without union."""
+    from album_clusters import AlbumClusters
+    cat, albums = setup_catalogue(db)
+    bridge_release = "aaaa1111-1111-4111-8111-111111111111"
+    bridge_group = "bbbb2222-2222-4222-8222-222222222222"
+    independent_recording = "cccc3333-3333-4333-8333-333333333333"
+    # A compilation includes a song from the first family and a new song.
+    with cat.db() as con:
+        cat.ingest(con, "release", {
+            "id": bridge_release, "title": "Compilation",
+            "release-group": {"id": bridge_group, "title": "Compilation"},
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "Composer"}}],
+        })
+        cat._store_release_tracks(con, {"id": bridge_release, "media": [{
+            "position": 1, "tracks": [
+                {"position": 1, "title": "Shared", "recording": {"id": RECORDING_2, "title": "Shared"}},
+                {"position": 2, "title": "Other", "recording": {"id": independent_recording, "title": "Other"}},
+            ]
+        }]})
+    shared, _, _ = add_audio_track(db, environment, RECORDING_2)
+    other, _, _ = add_audio_track(db, environment, independent_recording)
+    # This song is on the compilation but is not assigned to the other album.
+    db.execute("UPDATE tracks SET release_id=NULL WHERE id=?", (other,))
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    result = clusters.list("admin", include_assigned=True)
+    assert result["total_clusters"] == 2
+    family = clusters.list("admin", include_assigned=True, focus_id=GROUP)["detail"]
+    compilation = clusters.list("admin", include_assigned=True, focus_id=bridge_group)["detail"]
+    assert {t["id"] for t in family["tracks"]} == {shared}
+    assert {t["id"] for t in compilation["tracks"]} == {shared, other}
+
+
+def test_im25_sibling_editions_offer_read_only_different_mbid_matches(db, environment):
+    """Ten songs across two releases stay visible, without unsafe automatic moves."""
+    from album_clusters import AlbumClusters
+    cat, albums = setup_catalogue(db, (RELEASE_A, [RECORDING_1]),
+                                  (RELEASE_B, [RECORDING_4, RECORDING_2]))
+    # The B release has a Business as Usual identity not owned locally, plus
+    # an unrelated local member anchoring the sibling family.
+    with cat.db() as con:
+        cat._store_release_tracks(con, {
+            "id": RELEASE_A, "media": [{"position": 1, "tracks": [{
+                "position": 3, "title": "Business as Usual", "length": 175000,
+                "recording": {"id": RECORDING_1, "title": "Business As Usual", "length": 175000},
+            }]}],
+        })
+        cat._store_release_tracks(con, {
+            "id": RELEASE_B, "media": [{"position": 1, "tracks": [{
+                "position": 3, "title": "Business as Usual", "length": 175000,
+                "recording": {"id": RECORDING_4, "title": "Business As Usual", "length": 175000},
+            }, {
+                "position": 4, "title": "Boss La Rosh", "length": 195000,
+                "recording": {"id": RECORDING_2, "title": "Boss La Rosh", "length": 195000},
+            }]}],
+        })
+    first, _, _ = add_audio_track(db, environment, RECORDING_1)
+    second, _, _ = add_audio_track(db, environment, RECORDING_2)
+    db.execute("UPDATE tracks SET release_id=NULL WHERE id=?", (first,))
+    db.execute("UPDATE tracks SET release_id=? WHERE id=?", (RELEASE_B, second))
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    original = clusters.list("admin")
+    assert original["total_tracks"] == 2
+    assert {t["id"] for t in original["detail"]["tracks"]} == {first, second}
+    assert {t["id"] for t in original["detail"]["tracks"] if t["in_scope"]} == {first}
+    album = clusters.edition("admin", GROUP, RELEASE_A)
+    assert album["matched_track_ids"] == [first]
+    # The copy with a different MBID must NEVER become an exact selection.
+    assert album["tracks"][0]["local_track_ids"] == [first]
+    other = clusters.edition("admin", GROUP, RELEASE_B)
+    assert other["matched_track_ids"] == [second]
+    assert not other["tracks"][0]["local_track_ids"]
+    assert any(m["id"] == first for m in other["tracks"][0]["possible_local_matches"])
+    assert first not in other["matched_track_ids"]
+    assert other["possible_match_count"] == 1
+
+
+def test_album_cache_progress_includes_release_group_discovery_and_tracklists(db, environment):
+    from album_clusters import AlbumClusters
+    cat, albums = setup_catalogue(db)
+    tid, _, _ = add_audio_track(db, environment, RECORDING_2)
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    clusters.list("admin", include_assigned=True)
+    with cat.db() as con:
+        pending = con.execute(
+            """SELECT state FROM scopes WHERE kind='release-group'
+               AND entity_id=? AND section='release'""", (GROUP,)
+        ).fetchone()
+        assert pending and pending["state"] == "PENDING"
+    with TestClient(create_app(db, start_workers=False)) as client:
+        response = client.get("/api/catalogue/progress", params={"user_id":"admin"})
+        assert response.status_code == 200
+        status = response.json()["album_cache"]
+        assert status["total"] >= 1
+        assert status["pending"] >= 1
+        assert status["cached_tracklists"] >= 2

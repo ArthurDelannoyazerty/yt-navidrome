@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Literal
 from pydantic import BaseModel, Field
 from fastapi import Query
@@ -159,8 +160,30 @@ def install_catalogue_routes(app, store, pipeline):
             recent = con.execute("""SELECT kind,entity_id,section,state,cursor,total,last_complete_at,
                  last_error FROM scopes WHERE state IN ('PENDING','RUNNING')
                  ORDER BY requested_at LIMIT 25""").fetchall()
+            family = con.execute(
+                """SELECT
+                    SUM(CASE WHEN state='COMPLETE' THEN 1 ELSE 0 END) AS complete,
+                    SUM(CASE WHEN state='PENDING' THEN 1 ELSE 0 END) AS pending,
+                    SUM(CASE WHEN state='RUNNING' THEN 1 ELSE 0 END) AS running,
+                    SUM(CASE WHEN state='PENDING' AND retry_after > ? THEN 1 ELSE 0 END) AS deferred,
+                    COUNT(*) AS total
+                   FROM scopes WHERE (kind='release' AND section='lookup')
+                      OR (kind='release-group' AND section='release')""",
+                (time.time(),),
+            ).fetchone()
+            editions = con.execute(
+                """SELECT COUNT(*) FROM fetched_releases""").fetchone()[0]
             return {"counts": {r["state"]: r["count"] for r in states},
-                    "active": [dict(r) for r in recent]}
+                    "active": [dict(r) for r in recent],
+                    "album_cache": {
+                        "complete": family["complete"] or 0,
+                        "pending": family["pending"] or 0,
+                        "running": family["running"] or 0,
+                        "deferred": family["deferred"] or 0,
+                        "total": family["total"],
+                        "cached_tracklists": editions,
+                        "note": "Known MusicBrainz release-group edition browses and release tracklists; total grows as editions are discovered.",
+                    }}
 
     @app.post("/api/catalogue/index-library")
     def index_library(data: IndexLibraryInput):

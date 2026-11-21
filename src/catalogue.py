@@ -413,6 +413,23 @@ class Catalogue:
                     priority=10 if rid in focused else 120))
         return {"known": len(ids), "new_requests": new}
 
+    def prefetch_album_families(self, group_ids, *, focused_ids=()):
+        """Discover editions of relevant release groups through the durable queue.
+
+        This is bounded by locally linked album families, not an artist crawl.
+        New editions can be added to the queue as the browse completes.
+        """
+        ids = sorted({_id(g) for g in group_ids if _id(g)})
+        focused = {_id(g) for g in focused_ids if _id(g)}
+        queued = 0
+        with self.db() as con:
+            for gid in sorted(ids, key=lambda g: (g not in focused, g)):
+                queued += bool(self._queue_scope(
+                    con, "release-group", gid, "release",
+                    priority=12 if gid in focused else 125
+                ))
+        return {"known_families": len(ids), "new_requests": queued}
+
     def index_recordings(self, recording_ids):
         """Queue a whole library in one SQLite transaction without HTTP calls."""
         valid = sorted({_id(value) for value in recording_ids if _id(value)})
