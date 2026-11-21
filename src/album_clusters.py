@@ -1,13 +1,14 @@
-"""Clustered album organization from exact MusicBrainz release associations.
+"""User-scoped album-family workspaces based on MusicBrainz release groups.
 
-Clusters are connected components of the user's available recordings via
-release editions and release groups. Shared public cache metadata never grants
-access to another user's local tracks.
+A local recording can appear in several album families (including compilations)
+without merging those families or connecting unrelated artists. Only exact
+recording MBIDs are eligible for an album assignment.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+import unicodedata
 import uuid
 from collections import defaultdict
 
@@ -35,6 +36,12 @@ def _chunks(items, size=350):
 def _canonical_name(value):
     data = value or {}
     return str(data.get("title") or data.get("name") or "")
+
+
+def _title_key(value):
+    """Punctuation/Unicode-insensitive title key for read-only suggestions."""
+    plain = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    return "".join(char for char in plain if char.isalnum() and not unicodedata.combining(char))
 
 
 class AlbumClusters:
@@ -90,7 +97,7 @@ class AlbumClusters:
 
     def _local_tracks(self, user_id, include_assigned):
         self.store.require_user(user_id)
-        where = "" if include_assigned else "AND t.release_id IS NULL"
+        where = ""  # All available local copies remain visible in every review scope.
         with self.store.db() as con:
             rows = con.execute(
                 """SELECT t.id,t.mbid,t.title,t.matched_title,t.release_id,
@@ -106,72 +113,93 @@ class AlbumClusters:
                 " ORDER BY t.id",
                 (user_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        # Visibility is independent of eligibility to edit. Otherwise an album
+        # appears incomplete whenever its already-assigned copies are hidden.
+        return [{**dict(row), "in_scope": include_assigned or row["release_id"] is None}
+                for row in rows]
 
     def _catalogue_data(self, tracks):
         rec_ids = sorted({row["mbid"] for row in tracks if row["mbid"]})
         release_rec = defaultdict(set)
         verified_rec = defaultdict(set)
         current_releases = {row["release_id"] for row in tracks if row["release_id"]}
-        release_data = {}
-        recording_data = {}
-        groups = {}
-        fetched = set()
-        track_counts = {}
+        release_data, recording_data, groups = {}, {}, {}
+        group_data, group_releases = {}, defaultdict(set)
+        fetched, track_counts = set(), {}
         with self.catalogue.db() as con:
             for chunk in _chunks(rec_ids):
                 qs = ",".join("?" for _ in chunk)
-                # Cached complete release tracks provide exact positive matches.
                 for row in con.execute(
                     f"""SELECT release_id,recording_id FROM release_tracks
                         WHERE recording_id IN ({qs})""", chunk,
                 ):
                     release_rec[row["release_id"]].add(row["recording_id"])
                     verified_rec[row["release_id"]].add(row["recording_id"])
-                # Even before a full release tracklist is fetched, a recording's
-                # explicit 'appears-on' edge can connect its release family.
                 for row in con.execute(
                     f"""SELECT source_id,target_id FROM links WHERE
                         source_kind='recording' AND target_kind='release'
-                        AND relation='appears-on' AND source_id IN ({qs})""",
-                    chunk,
+                        AND relation='appears-on' AND source_id IN ({qs})""", chunk,
                 ):
                     release_rec[row["target_id"]].add(row["source_id"])
                 for row in con.execute(
-                    f"""SELECT id,name,data FROM entities WHERE kind='recording'
+                    f"""SELECT id,data FROM entities WHERE kind='recording'
                         AND id IN ({qs})""", chunk,
                 ):
                     recording_data[row["id"]] = json.loads(row["data"])
-            release_ids = sorted(set(release_rec) | current_releases)
-            for chunk in _chunks(release_ids):
+
+            def load_releases(ids):
+                for chunk in _chunks(sorted(ids)):
+                    qs = ",".join("?" for _ in chunk)
+                    for row in con.execute(
+                        f"SELECT id,data FROM entities WHERE kind='release' AND id IN ({qs})", chunk
+                    ):
+                        release_data[row["id"]] = json.loads(row["data"])
+                    for row in con.execute(
+                        f"""SELECT source_id,target_id FROM links
+                            WHERE source_kind='release' AND target_kind='release-group'
+                            AND relation='edition-of' AND source_id IN ({qs})""", chunk,
+                    ):
+                        groups[row["source_id"]] = row["target_id"]
+                    for row in con.execute(
+                        f"SELECT release_id FROM fetched_releases WHERE release_id IN ({qs})", chunk
+                    ):
+                        fetched.add(row["release_id"])
+                    for row in con.execute(
+                        f"""SELECT release_id,COUNT(*) AS n FROM release_tracks
+                            WHERE release_id IN ({qs}) GROUP BY release_id""", chunk
+                    ):
+                        track_counts[row["release_id"]] = row["n"]
+                for rid in ids:
+                    group = (release_data.get(rid) or {}).get("release-group") or {}
+                    if isinstance(group, dict) and group.get("id"):
+                        groups.setdefault(rid, group["id"])
+
+            direct_releases = set(release_rec) | current_releases
+            load_releases(direct_releases)
+            family_ids = set(groups.values())
+            # Include sibling editions already discovered through the family
+            # catalogue. A background release-group browse discovers more.
+            for chunk in _chunks(sorted(family_ids)):
                 qs = ",".join("?" for _ in chunk)
                 for row in con.execute(
-                    f"""SELECT id,name,data FROM entities WHERE kind='release'
+                    f"""SELECT id,data FROM entities WHERE kind='release-group'
                         AND id IN ({qs})""", chunk,
                 ):
-                    release_data[row["id"]] = json.loads(row["data"])
+                    group_data[row["id"]] = json.loads(row["data"])
                 for row in con.execute(
-                    f"""SELECT source_id,target_id FROM links
-                        WHERE source_kind='release' AND target_kind='release-group'
-                        AND relation='edition-of' AND source_id IN ({qs})""", chunk,
+                    f"""SELECT source_id,target_id FROM links WHERE
+                        source_kind='release' AND target_kind='release-group'
+                        AND relation='edition-of' AND target_id IN ({qs})""", chunk,
                 ):
                     groups[row["source_id"]] = row["target_id"]
-                for row in con.execute(
-                    f"SELECT release_id FROM fetched_releases WHERE release_id IN ({qs})",
-                    chunk,
-                ):
-                    fetched.add(row["release_id"])
-                for row in con.execute(
-                    f"""SELECT release_id,COUNT(*) AS n FROM release_tracks
-                        WHERE release_id IN ({qs}) GROUP BY release_id""",
-                    chunk,
-                ):
-                    track_counts[row["release_id"]] = row["n"]
-            for rid, data in release_data.items():
-                group = data.get("release-group") or {}
-                if isinstance(group, dict) and group.get("id"):
-                    groups.setdefault(rid, group["id"])
-        return release_rec, verified_rec, release_data, recording_data, groups, fetched, track_counts
+                    group_releases[row["target_id"]].add(row["source_id"])
+            sibling_ids = {rid for ids in group_releases.values() for rid in ids}
+            load_releases(sibling_ids - direct_releases)
+            for rid in direct_releases | sibling_ids:
+                if groups.get(rid):
+                    group_releases[groups[rid]].add(rid)
+        return (release_rec, verified_rec, release_data, recording_data,
+                groups, fetched, track_counts, group_data, group_releases)
 
     @staticmethod
     def _album(rid, ids, data, group, complete, track_count, track_map):
@@ -193,75 +221,38 @@ class AlbumClusters:
         tracks = self._local_tracks(user_id, include_assigned)
         if not tracks:
             return {"clusters": [], "total_clusters": 0, "total_tracks": 0, "detail": None}
-        (release_rec, verified_rec, release_data, recording_data,
-         groups, fetched, track_counts) = self._catalogue_data(tracks)
-        by_recording = defaultdict(list)
+        (release_rec, verified_rec, release_data, recording_data, groups, fetched,
+         track_counts, group_data, group_releases) = self._catalogue_data(tracks)
+        by_recording = defaultdict(set)
         by_id = {row["id"]: row for row in tracks}
         for row in tracks:
             if row["mbid"]:
-                by_recording[row["mbid"]].append(row["id"])
-        parent = {row["id"]: row["id"] for row in tracks}
+                by_recording[row["mbid"]].add(row["id"])
 
-        def root(tid):
-            while parent[tid] != tid:
-                parent[tid] = parent[parent[tid]]
-                tid = parent[tid]
-            return tid
-
-        def union(a, b):
-            first, second = root(a), root(b)
-            if first != second:
-                parent[max(first, second)] = min(first, second)
-
-        # One recording may belong to several editions; an edition may contain
-        # several recordings, and related editions share a release group.
-        group_first = {}
-        for rid, record_ids in release_rec.items():
-            local = [tid for rec in record_ids for tid in by_recording.get(rec, ())]
-            if not local:
-                continue
-            first = local[0]
-            for tid in local[1:]:
-                union(first, tid)
-            group = groups.get(rid)
-            if group:
-                if group in group_first:
-                    union(first, group_first[group])
-                else:
-                    group_first[group] = first
-        # Local album assignments are useful evidence if the public cache is
-        # missing a recording-to-release relation.
-        release_first = {}
-        for row in tracks:
-            rid = row["release_id"]
-            if not rid:
-                continue
-            if rid in release_first:
-                union(row["id"], release_first[rid])
-            else:
-                release_first[rid] = row["id"]
-            gid = groups.get(rid)
-            if gid:
-                if gid in group_first:
-                    union(row["id"], group_first[gid])
-                else:
-                    group_first[gid] = row["id"]
-
-        component = defaultdict(list)
-        for row in tracks:
-            component[root(row["id"])].append(row)
-        records = {}
-        for anchor, members in component.items():
-            records[anchor] = {row["mbid"] for row in members if row["mbid"]}
-        release_by_component = defaultdict(dict)
-        for rid, rec_ids in release_rec.items():
-            roots = {root(tid) for rec in rec_ids for tid in by_recording.get(rec, ())}
-            for anchor in roots:
-                release_by_component[anchor][rid] = rec_ids & records[anchor]
+        # A family is a release-group, NOT a connected component of recording
+        # edges. Recordings that appear on compilations may occur in multiple
+        # families without merging unrelated albums. Artist credits never union.
+        family_members = defaultdict(set)
+        family_editions = defaultdict(set)
+        for rid in set(release_rec) | {r["release_id"] for r in tracks if r["release_id"]}:
+            family = groups.get(rid) or rid
+            family_editions[family].add(rid)
+            for rec in release_rec.get(rid, ()):
+                family_members[family].update(by_recording.get(rec, ()))
+        for group, editions in group_releases.items():
+            if group in family_members:
+                family_editions[group].update(editions)
         for row in tracks:
             rid = row["release_id"]
             if rid:
-                release_by_component[root(row["id"])].setdefault(rid, set())
+                family = groups.get(rid) or rid
+                family_members[family].add(row["id"])
+                family_editions[family].add(rid)
+        included = {tid for tids in family_members.values() for tid in tids}
+        for row in tracks:
+            if row["id"] not in included:
+                # Unknown MusicBrainz relationships must not silently disappear.
+                family_members[row["id"]].add(row["id"])
 
         for row in tracks:
             data = recording_data.get(row["mbid"]) or {}
@@ -275,89 +266,112 @@ class AlbumClusters:
             row["unidentified"] = not bool(row["mbid"])
             reviewed = row.pop("reviewed_recording_id")
             row["not_found"] = bool(row["mbid"]) and reviewed == row["mbid"] and row["current_release_id"] is None
-        summaries = []
-        details = {}
-        for anchor, members in component.items():
-            member_ids = {row["id"] for row in members}
+
+        summaries, details = [], {}
+        for family, member_ids in family_members.items():
+            members = [by_id[tid] for tid in member_ids]
             rec_map = defaultdict(set)
             for row in members:
                 if row["mbid"]:
                     rec_map[row["mbid"]].add(row["id"])
             editions = []
-            for rid, rec_ids in release_by_component.get(anchor, {}).items():
+            for rid in family_editions.get(family, ()):
+                rec_ids = release_rec.get(rid, set())
                 album = self._album(
-                    rid, verified_rec.get(rid, set()) & records[anchor] if rid in fetched else rec_ids,
-                    release_data.get(rid) or {},
-                    groups.get(rid), rid in fetched, track_counts.get(rid, 0),
-                    rec_map,
+                    rid, verified_rec.get(rid, set()) if rid in fetched else rec_ids,
+                    release_data.get(rid) or {}, groups.get(rid),
+                    rid in fetched, track_counts.get(rid, 0), rec_map,
                 )
                 album["linked_track_count"] = len({
                     tid for rec in rec_ids for tid in rec_map.get(rec, ())
                 })
                 editions.append(album)
-            editions.sort(key=lambda a:(
+            editions.sort(key=lambda a: (
                 -a["matched_count"], -a["linked_track_count"],
                 0 if a["status"] == "Official" else 1,
                 -a["track_count"], a["name"].casefold(), a["id"],
             ))
             best = next((album for album in editions if album["matched_count"]), None)
-            title = best["name"] if best else (members[0]["display_title"] if len(members) == 1 else
-                members[0]["display_title"] + " + " + str(len(members)-1))
-            unassigned = sum(row["current_release_id"] is None for row in members)
-            pending = sum(not row["not_found"] and not row["locked"] for row in members)
+            group_name = _canonical_name(group_data.get(family))
+            title = (preferred_english_name(group_data[family]) or group_name
+                     if family in group_data else None)
+            title = title or (best["name"] if best else (
+                members[0]["display_title"] if len(members) == 1 else
+                members[0]["display_title"] + " + " + str(len(members) - 1)))
+            pending = sum(not row["not_found"] and not row["locked"] and row["in_scope"]
+                          for row in members)
             summary = {
-                "id": anchor, "title": title,
-                "original_title": best["original_title"] if best else title,
-                "english_title": best["english_title"] if best else title,
-                "track_count": len(members), "unassigned": unassigned,
+                "id": family, "title": title,
+                "original_title": group_name or (best["original_title"] if best else title),
+                "english_title": title, "track_count": len(members),
+                "unassigned": sum(row["current_release_id"] is None for row in members),
                 "locked": sum(row["locked"] for row in members),
                 "reviewed_not_found": sum(row["not_found"] for row in members),
-                "candidate_count": len(editions),
-                "best_match": best["matched_count"] if best else 0,
-                "pending": pending,
+                "candidate_count": len(editions), "best_match": best["matched_count"] if best else 0,
+                "pending": pending, "release_group_id": family if family in group_releases else None,
             }
             summaries.append(summary)
-            details[anchor] = (members, editions, member_ids)
-        summaries.sort(key=lambda row:(-row["pending"],-row["track_count"],row["title"].casefold(),row["id"]))
+            details[family] = (members, editions, member_ids)
+        summaries.sort(key=lambda row: (
+            -row["pending"], -row["track_count"], row["title"].casefold(), row["id"],
+        ))
         query = str(query or "").strip().casefold()[:100]
         if query:
             visible = []
             for summary in summaries:
                 members, editions, _ = details[summary["id"]]
                 haystack = [summary["title"], summary["english_title"], summary["original_title"]]
+                haystack.extend(album["name"] for album in editions)
                 for track in members:
-                    haystack.extend([track["display_title"],track["original_title"],
-                                     track["english_title"],track["mbid"]])
+                    haystack.extend([track["display_title"], track["original_title"],
+                                     track["english_title"], track["mbid"]])
                 if any(query in str(value).casefold() for value in haystack):
                     visible.append(summary)
             summaries = visible
         if not any(row["id"] == focus_id for row in summaries):
-            focus_id = summaries[0]["id"] if summaries else None
+            # Accept the former track-ID anchor for bookmarked API calls. A song
+            # can be in multiple families; prefer its current assignment family.
+            preferred = None
+            if focus_id in by_id:
+                assigned = by_id[focus_id].get("current_release_id")
+                preferred = groups.get(assigned) or assigned
+                if not any(row["id"] == preferred for row in summaries):
+                    preferred = next((row["id"] for row in summaries
+                                      if focus_id in details[row["id"]][2]), None)
+            focus_id = preferred or (summaries[0]["id"] if summaries else None)
         detail = None
-        if focus_id:
+        if focus_id is not None:
             members, editions, member_ids = details[focus_id]
-            members = sorted(members, key=lambda row:(
-                row["not_found"], row["locked"],row["display_title"].casefold(),row["id"],
+            members = sorted(members, key=lambda row: (
+                row["not_found"], row["locked"], row["display_title"].casefold(), row["id"],
             ))
             detail = {
                 "id": focus_id, "tracks": members,
                 "releases": editions[:MAX_CLUSTER_EDITIONS],
                 "total_releases": len(editions),
-                "releases_truncated": len(editions)>MAX_CLUSTER_EDITIONS,
+                "releases_truncated": len(editions) > MAX_CLUSTER_EDITIONS,
+                "release_group_id": focus_id if focus_id in group_releases else None,
             }
-        # Reuse the durable Catalogue scopes instead of inventing a second
-        # MusicBrainz cache or making synchronous HTTP calls from the Album tab.
-        # Prioritize the currently displayed cluster; the rest catch up quietly.
-        release_ids = {rid for values in release_by_component.values() for rid in values}
-        if release_ids:
-            self.catalogue.prefetch_album_tracklists(
-                release_ids, focused_ids=release_by_component.get(focus_id, {}),
-            )
+        all_releases = {rid for ids in family_editions.values() for rid in ids}
+        focused_releases = family_editions.get(focus_id, set())
+        if all_releases:
+            self.catalogue.prefetch_album_tracklists(all_releases, focused_ids=focused_releases)
+        families = set(group_releases) & set(family_members)
+        if families:
+            self.catalogue.prefetch_album_families(families, focused_ids=[focus_id])
         if detail is not None:
-            focus_releases = release_by_component.get(focus_id, {})
+            focus = family_editions.get(focus_id, set())
+            discovering = False
+            if focus_id in families:
+                with self.catalogue.db() as con:
+                    status = con.execute(
+                        """SELECT state FROM scopes WHERE kind='release-group'
+                           AND entity_id=? AND section='release'""", (focus_id,)
+                    ).fetchone()
+                    discovering = status is None or status["state"] != "COMPLETE"
             detail["cache_progress"] = {
-                "complete": len(set(focus_releases) & fetched),
-                "total": len(focus_releases),
+                "complete": len(focus & fetched), "total": len(focus),
+                "discovering_editions": discovering,
             }
         return {"clusters": summaries, "total_clusters": len(summaries),
                 "total_tracks": len(tracks), "detail": detail}
@@ -416,18 +430,21 @@ class AlbumClusters:
                 "items":items[offset:offset+limit]}
 
     def edition(self, user_id, anchor_id, release_id, *, include_assigned=False):
-        # User ownership and cluster identity are validated by generating the
-        # user's scoped components. A foreign anchor reveals no metadata.
+        # Accept family-ID anchors and legacy track-ID anchors, but only within
+        # the requesting user's own album family.
         result = self.list(user_id, include_assigned=include_assigned, focus_id=anchor_id)
-        if not result["detail"] or result["detail"]["id"] != anchor_id:
-            raise LookupError("This cluster does not belong to the selected library scope")
+        detail = result["detail"]
+        if not detail or (detail["id"] != anchor_id and
+                          not any(t["id"] == anchor_id for t in detail["tracks"])):
+            raise LookupError("This album family does not belong to the selected library scope")
         try:
             rid = str(uuid.UUID(release_id))
         except (ValueError, TypeError, AttributeError):
             raise ValueError("Invalid release ID") from None
         track_map = defaultdict(set)
-        for row in result["detail"]["tracks"]:
-            track_map[row["mbid"]].add(row["id"])
+        for track in detail["tracks"]:
+            if track["mbid"]:
+                track_map[track["mbid"]].add(track["id"])
         with self.catalogue.db() as con:
             entity = con.execute(
                 "SELECT data FROM entities WHERE kind='release' AND id=?", (rid,)
@@ -436,7 +453,7 @@ class AlbumClusters:
                 "SELECT 1 FROM fetched_releases WHERE release_id=?", (rid,)
             ).fetchone())
             release_rows = con.execute(
-                """SELECT r.medium,r.position,r.recording_id,r.title,
+                """SELECT r.medium,r.position,r.recording_id,r.title,r.duration_ms,
                           e.data AS recording_data
                    FROM release_tracks r LEFT JOIN entities e
                      ON e.kind='recording' AND e.id=r.recording_id
@@ -444,53 +461,110 @@ class AlbumClusters:
                 (rid,),
             ).fetchall() if fetched else []
             rec_ids = {r["recording_id"] for r in release_rows}
-            count = len(release_rows)
+            # Position/duration evidence from sibling editions is only used
+            # for read-only suggestions, never exact membership or validation.
+            known = {t["current_release_id"] for t in detail["tracks"] if t["current_release_id"]}
+            known.update(a["id"] for a in detail["releases"])
+            positions = defaultdict(list)
+            for chunk in _chunks(sorted(known)):
+                qs = ",".join("?" for _ in chunk)
+                for row in con.execute(
+                    f"""SELECT recording_id,medium,position,duration_ms FROM release_tracks
+                        WHERE release_id IN ({qs})""", chunk
+                ):
+                    positions[row["recording_id"]].append(row)
         if not fetched:
-            self.catalogue.prefetch_album_tracklists([rid],focused_ids=[rid])
+            self.catalogue.prefetch_album_tracklists([rid], focused_ids=[rid])
         if not entity:
             raise ValueError("Release is not cached yet; its tracklist is queued automatically.")
         data = json.loads(entity["data"])
         edition = self._album(rid, rec_ids, data, (data.get("release-group") or {}).get("id"),
-                              fetched, count, track_map)
-        # An assigned local copy may be outside the chosen "unassigned only"
-        # review scope. It is still downloaded and must never be shown as red.
-        # Return it read-only; only selected cluster members can be validated.
-        all_local=defaultdict(list)
+                              fetched, len(release_rows), track_map)
+        all_local = defaultdict(list)
         if rec_ids:
             with self.store.db() as user_db:
                 for chunk in _chunks(sorted(rec_ids)):
-                    marks=",".join("?" for _ in chunk)
+                    marks = ",".join("?" for _ in chunk)
                     for copy in user_db.execute(
                         """SELECT t.id,t.mbid,t.title,t.matched_title,t.release_id,
                                   CASE WHEN l.track_id IS NULL THEN 0 ELSE 1 END AS locked
                            FROM tracks t LEFT JOIN album_track_locks l
                              ON l.user_id=t.user_id AND l.track_id=t.id
                            WHERE t.user_id=? AND t.current_asset_id IS NOT NULL
-                             AND t.mbid IN ("""+marks+")",
-                        (user_id,*chunk),
+                             AND t.health='AVAILABLE' AND t.mbid IN (""" + marks + ")",
+                        (user_id, *chunk),
                     ):
                         all_local[copy["mbid"]].append({
-                            "id":copy["id"],"current_release_id":copy["release_id"],
-                            "locked":bool(copy["locked"]),
-                            "display_title":copy["matched_title"] or copy["title"],
+                            "id": copy["id"], "current_release_id": copy["release_id"],
+                            "locked": bool(copy["locked"]),
+                            "display_title": copy["matched_title"] or copy["title"],
                         })
-        # Exact MusicBrainz recording IDs join official album positions with
-        # the selected user's local copies. A missing local copy is NOT checked.
+        local_titles = {}
+        for local in detail["tracks"]:
+            local_titles[local["id"]] = {
+                _title_key(name) for name in
+                (local["display_title"], local["original_title"], local["english_title"])
+                if _title_key(name)
+            }
         official = []
         for row in release_rows:
             recording = json.loads(row["recording_data"]) if row["recording_data"] else {}
             original = row["title"] or _canonical_name(recording) or "Unknown track"
             english = preferred_english_name(recording) if recording else original
+            official_names = {
+                _title_key(name) for name in (original, english, _canonical_name(recording))
+                if _title_key(name)
+            }
+            official_isrc = set(recording.get("isrcs") or [])
+            official_duration = row["duration_ms"] or recording.get("length")
+            possible = []
+            # A same-title different-MBID recording is visible as a suggestion,
+            # not a green/orange selection. Never infer ownership from public MB.
+            if not all_local.get(row["recording_id"]):
+                for local in detail["tracks"]:
+                    if not local["mbid"] or local["mbid"] == row["recording_id"]:
+                        continue
+                    title_match = bool(official_names & local_titles[local["id"]])
+                    metadata = positions.get(local["mbid"], ())
+                    position_match = any(
+                        p["medium"] == row["medium"] and p["position"] == row["position"]
+                        for p in metadata
+                    )
+                    local_duration = next(
+                        (p["duration_ms"] for p in metadata if p["duration_ms"]), None
+                    )
+                    # A different duration may indicate a remix/live version.
+                    duration_ok = (not official_duration or not local_duration or
+                                   abs(int(official_duration) - int(local_duration)) <= 10000)
+                    if not title_match or not duration_ok:
+                        continue
+                    evidence = ["same normalized title"]
+                    if position_match:
+                        evidence.append("same disc/track position")
+                    if official_duration and local_duration:
+                        evidence.append("compatible duration")
+                    possible.append({
+                        "id": local["id"], "recording_id": local["mbid"],
+                        "current_release_id": local["current_release_id"],
+                        "display_title": local["display_title"],
+                        "evidence": ", ".join(evidence),
+                        "position_match": position_match,
+                    })
+                possible.sort(key=lambda a: (not a["position_match"], a["display_title"], a["id"]))
             official.append({
                 "recording_id": row["recording_id"], "medium": row["medium"],
                 "position": row["position"], "title": original,
                 "original_title": original, "english_title": english or original,
                 "local_track_ids": sorted(track_map.get(row["recording_id"], ())),
                 "local_copies": all_local.get(row["recording_id"], []),
+                "possible_local_matches": possible[:5],
             })
         edition["tracks"] = official
+        edition["possible_match_count"] = len({
+            c["id"] for t in official for c in t["possible_local_matches"]
+        })
         edition["cluster_only"] = [
-            row["id"] for row in result["detail"]["tracks"]
-            if fetched and row["mbid"] not in rec_ids
+            local["id"] for local in detail["tracks"]
+            if fetched and local["mbid"] not in rec_ids
         ]
         return edition
