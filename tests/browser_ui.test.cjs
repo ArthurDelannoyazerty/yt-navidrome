@@ -141,8 +141,10 @@ async function fixtureServer(t, data) {
       response.setHeader("Cache-Control", "no-store");
       if (data.strictCsp) response.setHeader("Content-Security-Policy",
         "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'self'");
-      if (url.pathname === "/" || url.pathname.startsWith("/static/")) {
-        const file = url.pathname === "/" ? "index.html" : basename(url.pathname);
+      if (url.pathname === "/" || url.pathname.startsWith("/libraries/") ||
+          url.pathname.startsWith("/static/")) {
+        const file = url.pathname === "/" || url.pathname.startsWith("/libraries/")
+          ? "index.html" : basename(url.pathname);
         const content = readFileSync(join(staticRoot, file));
         response.setHeader("Content-Type", file.endsWith(".js") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "text/html");
         response.end(file === "index.html" ? content.toString().replaceAll("__STATIC_VERSION__", "browser-test") : content);
@@ -1588,5 +1590,94 @@ test("real browser: Select all includes alternate recording IDs and manual posit
   assert.equal(byId.get("third"),officialC);
   assert.equal(byId.get("fourth"),officialD);
   assert.match(await chrome.evaluate("document.querySelector('#albumValidateDetails').textContent"),/Recording MBID/);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: deep links to an album edition survive reload, selection and Back", {timeout:60000}, async t => {
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures();
+  const family="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const first="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const second="cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const recording="dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  data.albumTracks=[{id:"owned",mbid:recording,recording_id:recording,
+    display_title:"Business as Usual",original_title:"Business as Usual",
+    english_title:"Business as Usual",in_scope:true,current_release_id:null,
+    locked:false,not_found:false}];
+  data.albumFamilies=[{id:family,title:"IM25",ids:["owned"]}];
+  const edition=id=>({id,name:"IM25",original_title:"IM25",english_title:"IM25",
+    complete:true,track_count:1,status:"Official",linked_track_count:1,matched_count:1,
+    matched_track_ids:["owned"],possible_match_count:0,
+    tracks:[{recording_id:recording,title:"Business as Usual",
+      original_title:"Business as Usual",english_title:"Business as Usual",
+      medium:1,position:3,local_track_ids:["owned"],local_copies:[],possible_local_matches:[]}]});
+  data.albumEditions=[edition(first),edition(second)];
+  const origin=await fixtureServer(t,data);
+  const url="/libraries/admin/albums/"+family+"/editions/"+first;
+  await chrome.send("Page.navigate",{url:origin+url});
+  await chrome.until("document.querySelector('#albumSelectedTitle').textContent.includes('IM25') && document.querySelector('#user').value==='admin'");
+  assert.equal(await chrome.evaluate("location.pathname"),url);
+  assert.equal(await chrome.evaluate("document.querySelector('[data-tab=album]').getAttribute('aria-current')"),"page");
+  await chrome.evaluate("(()=>{const choices=[...document.querySelectorAll('.album-edition-choice')];choices.find(x=>!x.classList.contains('is-active')).click()})()");
+  await chrome.until("location.pathname.endsWith('/editions/"+second+"')");
+  await chrome.evaluate("history.back()");
+  await chrome.until("location.pathname.endsWith('/editions/"+first+"') && document.querySelector('#albumSelectedTitle').textContent.includes('IM25')");
+  assert.equal(await chrome.evaluate("document.querySelector('.album-edition-choice.is-active').getAttribute('aria-selected')"),"true");
+  await chrome.send("Page.navigate",{url:origin+url});
+  await chrome.until("document.querySelector('#albumSelectedTitle').textContent.includes('IM25')");
+  assert.equal(await chrome.evaluate("location.pathname"),url);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+test("real browser: direct catalogue, approval, source and music links restore correct items", {timeout:60000}, async t => {
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures();
+  const recording="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const source="ffffffff-ffff-4fff-8fff-ffffffffffff";
+  data.catalogueEntity={entity:{id:recording,name:"IM25 cached recording",data:{}},
+    scopes:[],relations:[],tracks:[]};
+  data.sources=[{id:source,user_id:"admin",title:"IM25 playlist",url:"https://youtube.com/playlist?list=abc",
+    provider:"youtube",status:"ACTIVE",monitored:true,is_playlist:true}];
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin+"/libraries/admin/catalogue/recording/"+recording});
+  await chrome.until("document.querySelector('#catalogueDetail').textContent.includes('IM25 cached recording')");
+  assert.equal(await chrome.evaluate("state.tab"),"catalogue");
+  assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/catalogue/recording/"+recording);
+  await chrome.send("Page.navigate",{url:origin+"/libraries/admin/approval/track-1"});
+  await chrome.until("state.tab==='approval' && !document.querySelector('#approvalWorkspace').hidden");
+  assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/approval/track-1");
+  await chrome.send("Page.navigate",{url:origin+"/libraries/admin/sources/"+source});
+  await chrome.until("document.querySelector('.source.is-target')");
+  assert.equal(await chrome.evaluate("state.tab"),"sources");
+  assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/sources/"+source);
+  await chrome.send("Page.navigate",{url:origin+"/libraries/admin/music/track-1"});
+  await chrome.until("document.querySelector('#detailsDialog').open");
+  assert.equal(await chrome.evaluate("state.tab"),"music");
+  assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/music/track-1");
+  await chrome.evaluate("document.querySelector('#closeDetails').click()");
+  await chrome.until("location.pathname==='/libraries/admin/music'");
+  assert.deepEqual(chrome.errors,[]);
+});
+
+test("real browser: tab links are real URLs with Back/Forward and library isolation", {timeout:60000}, async t => {
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures(),origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin+"/libraries/admin/music"});
+  await chrome.until("document.querySelector('#user').value==='admin' && location.pathname.endsWith('/music')");
+  assert.equal(await chrome.evaluate("document.querySelector('[data-tab=album]').getAttribute('href')"),"/libraries/admin/albums");
+  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
+  await chrome.until("location.pathname==='/libraries/admin/catalogue'");
+  await chrome.evaluate("document.querySelector('[data-tab=help]').click()");
+  await chrome.until("location.pathname==='/libraries/admin/help'");
+  await chrome.evaluate("history.back()");
+  await chrome.until("location.pathname==='/libraries/admin/catalogue' && state.tab==='catalogue'");
+  await chrome.evaluate("history.back()");
+  await chrome.until("location.pathname==='/libraries/admin/music' && state.tab==='music'");
+  await chrome.evaluate("document.querySelector('#user').value='guest';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.until("location.pathname==='/libraries/guest/music'");
+  assert.equal(await chrome.evaluate("document.querySelector('[data-tab=album]').getAttribute('href')"),"/libraries/guest/albums");
+  await chrome.evaluate("history.back()");
+  await chrome.until("location.pathname==='/libraries/admin/music' && document.querySelector('#user').value==='admin'");
   assert.deepEqual(chrome.errors,[]);
 });
