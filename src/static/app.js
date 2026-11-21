@@ -462,9 +462,18 @@ $("ingestForm").addEventListener("submit", guard(async event => {
 
 function renderSource(source) {
   const row = node("div", null, "source");
+  row.dataset.sourceId = source.id;
   const content = node("div", null, "source-details");
+  const sourceLink = node("a", source.title, "source-permalink");
+  sourceLink.href = Router?.build(pageRoute("sources", {sourceId:source.id})) || "/";
+  sourceLink.addEventListener("click", event => {
+    if (event?.metaKey || event?.ctrlKey || event?.shiftKey) return;
+    event?.preventDefault?.();
+    routeWrite(pageRoute("sources", {sourceId:source.id}));
+    focusSource(source.id, true);
+  });
   content.append(
-    node("strong", source.title),
+    sourceLink,
     node("p", source.url, "url"),
     badge(source.status),
     node("small", source.monitored ? " Monitored" : " One-off"),
@@ -535,6 +544,21 @@ function renderSource(source) {
   return row;
 }
 
+function focusSource(sourceId, scroll = false) {
+  let found = false;
+  for (const row of document.querySelectorAll(".source[data-source-id]")) {
+    const selected = Boolean(sourceId && row.dataset.sourceId === sourceId);
+    row.classList.toggle("is-target", selected);
+    if (selected) {
+      found = true;
+      if (row.closest?.("#archivedSources"))
+        $("archivedSourcesPanel").open = true;
+      if (scroll) row.scrollIntoView?.({block:"center", behavior:"auto"});
+    }
+  }
+  return found;
+}
+
 async function loadSources(generation, background = false) {
   const current = beginRequest("sources");
   const sources = await api(`/api/sources?user_id=${encodeURIComponent(state.user)}`, null, null, current);
@@ -558,6 +582,11 @@ async function loadSources(generation, background = false) {
     background,
     empty: () => node("p", "No sources yet.", "empty"),
   });
+  if (state.tab === "sources") {
+    const route = Router?.read();
+    if (route?.tab === "sources" && route.user === state.user && route.sourceId)
+      focusSource(route.sourceId, false);
+  }
 }
 
 async function action(track, mode, extra = {}) {
