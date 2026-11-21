@@ -298,6 +298,12 @@ async function fixtureServer(t, data) {
           detail:selected?{id:selected.id,tracks:selected.tracks,releases:selected.releases,
             total_releases:selected.releases.length,releases_truncated:false}:null};
       }
+      else if (url.pathname === "/api/albums/contradictions") {
+        const rows = data.albumContradictions || [];
+        const offset=Number(url.searchParams.get("offset")||0);
+        const limit=Number(url.searchParams.get("limit")||50);
+        result={total:rows.length,offset,limit,items:rows.slice(offset,offset+limit)};
+      }
       else if (url.pathname === "/api/albums/cluster-edition") {
         const rid=url.searchParams.get("release_id");
         result=(data.albumEditions||[]).find(e=>e.id===rid)||
@@ -1339,42 +1345,52 @@ test("real browser: failed MusicBrainz prefetch dropdown retries one request wit
 });
 
 
-test("real browser: cluster-first edition workflow keeps exclusions active and wraps bilingual names", {timeout:60000}, async t => {
+test("real browser: six album membership colors, individual checkboxes and Validate dialog", {timeout:60000}, async t => {
   const chrome=await browser(t);if(!chrome)return;
   const data=fixtures();data.strictCsp=true;
   const a="55555555-5555-4555-8555-555555555555",b="66666666-6666-4666-8666-666666666666";
+  const ids={
+    one:"11111111-1111-4111-8111-111111111111",
+    two:"22222222-2222-4222-8222-222222222222",
+    three:"33333333-3333-4333-8333-333333333333",
+    four:"44444444-4444-4444-8444-444444444444",
+    six:"66666666-6666-4666-8666-666666666666",
+    remote:"77777777-7777-4777-8777-777777777777"
+  };
+  const track=(id,name,release,locked=false)=>({
+    id,recording_id:ids[id]||"88888888-8888-4888-8888-888888888888",
+    display_title:name,original_title:id==="two"?"長い日本語オリジナルタイトル 一号":name,
+    english_title:name,current_release_id:release,locked,not_found:false,mbid:ids[id]});
   data.albumSources=[{id:"source-1",title:"Soundtrack source",status:"ACTIVE"}];
   data.albumTracks=[
-    {id:"one",recording_id:"11111111-1111-4111-8111-111111111111",
-     display_title:"Song One",original_title:"長い日本語オリジナルタイトル 一号",english_title:"Song One",
-     current_release_id:a,locked:false,not_found:false},
-    {id:"two",recording_id:"22222222-2222-4222-8222-222222222222",
-     display_title:"Song Two",original_title:"Song Two",english_title:"Song Two",
-     current_release_id:null,locked:false,not_found:false},
-    {id:"three",recording_id:"33333333-3333-4333-8333-333333333333",
-     display_title:"Song Three",original_title:"Song Three",english_title:"Song Three",
-     current_release_id:null,locked:false,not_found:false},
-    {id:"four",recording_id:"44444444-4444-4444-8444-444444444444",
-     display_title:"Song Four",original_title:"Song Four",english_title:"Song Four",
-     current_release_id:null,locked:false,not_found:false},
-    {id:"five",recording_id:"55555555-5555-4555-8555-555555555555",
-     display_title:"Other Cluster",original_title:"Other Cluster",english_title:"Other Cluster",
-     current_release_id:null,locked:false,not_found:false},
+    track("one","Undertale Song",a),track("two","Deltarune Song",a),
+    track("three","Unassigned Song",null),track("four","Cluster-only Song",null),
+    track("six","Locked Song",a,true),track("five","Another cluster song",null)
   ];
   data.albumFamilies=[
-    {id:"cluster-1",title:"Original / Expanded Soundtrack",ids:["one","two","three","four"]},
-    {id:"cluster-2",title:"Other Cluster",ids:["five"]},
+    {id:"cluster-1",title:"Undertale + Deltarune",ids:["one","two","three","four","six"]},
+    {id:"cluster-2",title:"Other Cluster",ids:["five"]}
   ];
+  const song=(recording_id,local_track_ids,title,position)=>({
+    recording_id,local_track_ids,title,original_title:title,
+    english_title:title,medium:1,position});
   data.albumEditions=[
     {id:a,name:"Original Edition",original_title:"原作 サウンドトラック 全曲豪華盤",
-     english_title:"Original Edition",complete:true,track_count:20,status:"Official",
+     english_title:"Original Edition",complete:true,track_count:2,status:"Official",
      date:"2010",country:"JP",linked_track_count:2,matched_count:2,
-     matched_track_ids:["one","two"]},
+     matched_track_ids:["one","two"],tracks:[
+       song(ids.one,["one"],"Undertale Song",1),song(ids.two,["two"],"Deltarune Song",2)]},
     {id:b,name:"Expanded Edition",original_title:"拡張版 サウンドトラック 完全版",
-     english_title:"Expanded Edition",complete:true,track_count:30,status:"Official",
-     date:"2020",country:"JP",linked_track_count:2,matched_count:2,
-     matched_track_ids:["two","three"]},
+     english_title:"Expanded Edition",complete:true,track_count:4,status:"Official",
+     date:"2020",country:"JP",linked_track_count:3,matched_count:3,
+     matched_track_ids:["two","three","six"],tracks:[
+       song(ids.two,["two"],"長い日本語オリジナルタイトル 一号",1),
+       song(ids.three,["three"],"Unassigned Song",2),
+       song(ids.six,["six"],"Locked Song",3),
+       song(ids.remote,[],"Not downloaded from this soundtrack",4)]}
   ];
+  data.albumContradictions=[{track_id:"track-1",title:"Review erroneous album",
+    album:"Original Edition",release_id:a,locked:false}];
   const origin=await fixtureServer(t,data);
   await chrome.send("Page.addScriptToEvaluateOnNewDocument",{source:
     "window.styleViolations=[];document.addEventListener('securitypolicyviolation',e=>{if(e.effectiveDirective.startsWith('style-src'))window.styleViolations.push(e.violatedDirective);});"});
@@ -1384,55 +1400,71 @@ test("real browser: cluster-first edition workflow keeps exclusions active and w
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1");
   await chrome.evaluate("document.querySelector('[data-tab=album]').click()");
   await chrome.until("document.querySelectorAll('.album-cluster-choice').length===2");
-  assert.equal(await chrome.evaluate("document.querySelector('#albumSource')"),null,
-    "Source filter should be removed from cluster workspace");
-  assert.equal(await chrome.evaluate("document.querySelectorAll('#albumTrackSearch').length"),0);
+  assert.equal(await chrome.evaluate("document.querySelector('#albumPlanTitle')"),null);
   assert.equal(await chrome.evaluate("document.querySelector('#albumClusterPosition').textContent"),"1 / 2");
-  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-track-comparison').length"),3);
   await chrome.evaluate("document.querySelector('#albumIncludeAssigned').click()");
-  await chrome.until("document.querySelectorAll('.album-track-comparison').length===4");
-  await chrome.evaluate("(()=>{[...document.querySelectorAll('.album-edition-choice')].find(x=>x.textContent.includes('Original Edition')).click()})()");
-  await chrome.until("document.querySelectorAll('.album-music-excluded').length===2");
-  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-included').length"),0);
-  await chrome.evaluate("document.querySelector('#albumShowIncluded').click()");
-  await chrome.until("document.querySelectorAll('.album-music-included').length===2");
+  await chrome.until("document.querySelector('#albumClusterSummary').textContent.includes('5 recordings')");
+  await chrome.evaluate("(()=>{const el=[...document.querySelectorAll('.album-edition-choice')].find(x=>x.textContent.includes('Expanded Edition'));el.click()})()");
+  await chrome.until("document.querySelectorAll('.album-track-comparison').length===6");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-green').length"),1);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-orange').length"),1);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-gray').length"),1);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-red').length"),1);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-purple').length"),1);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-blue').length"),1);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-red input:checked,.album-music-gray input:checked,.album-music-purple input:checked,.album-music-blue input:checked').length"),0);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-red input:disabled,.album-music-gray input:disabled,.album-music-purple input:disabled,.album-music-blue input:disabled').length"),4);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-green input:checked,.album-music-orange input:checked').length"),2);
   assert.match(await chrome.evaluate("document.querySelector('#albumMusicList').textContent"),/長い日本語オリジナルタイトル/);
-  assert.match(await chrome.evaluate("document.querySelector('#albumReleaseList').textContent"),/原作 サウンドトラック/);
+  assert.match(await chrome.evaluate("document.querySelector('#albumReleaseList').textContent"),/拡張版 サウンドトラック/);
   assert.equal(await chrome.evaluate("(()=>{const g=document.querySelector('.album-cluster-grid');return g.scrollHeight<=g.clientHeight+1})()"),true,
-    "The three columns scroll internally, rather than expanding the page");
+    "The three columns should scroll internally");
+  await chrome.evaluate("document.querySelector('#albumOnlyGreen').click()");
+  await chrome.until("document.querySelectorAll('.album-track-comparison').length===1");
+  assert.match(await chrome.evaluate("document.querySelector('#albumSelectedTitle').textContent"),/1 hidden by filter/);
   await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
-  await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('1 new assignments')");
-  assert.equal(await chrome.evaluate("document.querySelector('#albumPlanSummary').textContent.includes('0 album moves')"),true);
-  await chrome.evaluate("(()=>{[...document.querySelectorAll('.album-edition-choice')].find(x=>x.textContent.includes('Expanded Edition')).click()})()");
+  await chrome.until("document.querySelector('#albumValidateDialog').open");
+  assert.match(await chrome.evaluate("document.querySelector('#albumValidateSummary').textContent"),/1 moved from other albums/);
+  assert.match(await chrome.evaluate("document.querySelector('#albumValidateSummary').textContent"),/orange moves currently hidden/);
+  await chrome.evaluate("document.querySelector('#albumValidateCancel').click()");
+  await chrome.evaluate("document.querySelector('#albumOnlyGreen').click()");
+  await chrome.until("document.querySelectorAll('.album-track-comparison').length===6");
+  await chrome.evaluate("(()=>{const cb=document.querySelector('.album-music-orange input');cb.click()})()");
+  await chrome.until("document.querySelector('#albumSelectedTitle').textContent.includes('0 from other albums')");
   await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
-  await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('2 new assignments')");
-  await chrome.evaluate("document.querySelector('#albumMarkUnfound').click()");
-  await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('1 No Album Found')");
-  await chrome.evaluate("document.querySelector('#albumPlanPreview').click()");
-  await chrome.until("document.querySelector('#albumPlanStatus').textContent.includes('2 album updates')");
-  assert.equal(await chrome.evaluate("document.querySelectorAll('#albumPlanResults tr').length"),4);
-  await chrome.evaluate("document.querySelector('#albumPlanApply').click()");
-  await chrome.until("document.querySelector('#albumClusterStatus').textContent.includes('2 reversible album updates queued')");
+  await chrome.until("document.querySelector('#albumValidateDialog').open");
+  assert.match(await chrome.evaluate("document.querySelector('#albumValidateSummary').textContent"),/0 moved from other albums/);
+  await chrome.evaluate("document.querySelector('#albumValidateCancel').click()");
+  await chrome.evaluate("(()=>{const cb=document.querySelector('.album-music-orange input');cb.click()})()");
+  await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
+  await chrome.until("document.querySelector('#albumValidateDialog').open");
+  await chrome.evaluate("document.querySelector('#albumValidateConfirm').click()");
+  await chrome.until("document.querySelector('#albumClusterStatus').textContent.includes('2 reversible album changes queued')");
   assert.equal(data.albumTracks.find(t=>t.id==="one").current_release_id,a);
-  assert.equal(data.albumTracks.find(t=>t.id==="two").current_release_id,a);
+  assert.equal(data.albumTracks.find(t=>t.id==="two").current_release_id,b);
   assert.equal(data.albumTracks.find(t=>t.id==="three").current_release_id,b);
-  assert.equal(data.albumTracks.find(t=>t.id==="four").not_found,true);
+  assert.equal(data.albumTracks.find(t=>t.id==="six").current_release_id,a);
+  assert.equal(data.albumTracks.find(t=>t.id==="four").current_release_id,null);
   await chrome.evaluate("document.querySelector('#albumNext').click()");
   await chrome.until("document.querySelector('#albumClusterPosition').textContent==='2 / 2'");
   await chrome.evaluate("document.querySelector('#albumPrev').click()");
   await chrome.until("document.querySelector('#albumClusterPosition').textContent==='1 / 2'");
-  await chrome.evaluate("document.querySelector('#albumClusterSearch').value='Song Three';document.querySelector('#albumClusterSearch').dispatchEvent(new Event('input'))");
+  await chrome.evaluate("document.querySelector('#albumClusterSearch').value='Unassigned Song';document.querySelector('#albumClusterSearch').dispatchEvent(new Event('input'))");
   await chrome.until("document.querySelector('#albumClusterPosition').textContent==='1 / 1'");
-  assert.equal(await chrome.evaluate("document.querySelectorAll('#albumMusicList .album-track-comparison').length"),4,
-    "Search for one song should preserve its entire cluster");
   await chrome.evaluate("document.querySelector('#albumPreferenceSource').value='source-1';document.querySelector('#albumPreferenceSource').dispatchEvent(new Event('change'))");
   await chrome.until("!document.querySelector('#albumPreferenceSave').disabled");
   await chrome.evaluate("document.querySelector('#albumPreferredRelease').value='"+b+"';document.querySelector('#albumPreferenceSave').click()");
   await chrome.until("document.querySelector('#albumPreferenceStatus').textContent.includes('preference saved')");
-  assert.deepEqual(data.albumPreferences,[{user_id:"admin",source_id:"source-1",release_id:b,auto_apply:false}]);
+  await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
+  await chrome.until("document.querySelector('#catalogueContradictionCount').textContent==='1'");
+  await chrome.evaluate("document.querySelector('#catalogueContradictions summary').click()");
+  await chrome.until("document.querySelectorAll('.catalogue-contradiction-row').length===1");
+  await chrome.evaluate("document.querySelector('.catalogue-contradiction-row button').click()");
+  await chrome.until("document.querySelector('#detailsDialog')?.open && document.querySelector('.album-track-editor')");
+  assert.equal(await chrome.evaluate("document.querySelector('[data-panel=music]').hidden"),false);
   assert.deepEqual(await chrome.evaluate("window.styleViolations"),[]);
   assert.deepEqual(chrome.errors,[]);
-  await chrome.screenshot("album-cluster-workspace");
+  await chrome.screenshot("album-six-state-validation");
 });
 
 

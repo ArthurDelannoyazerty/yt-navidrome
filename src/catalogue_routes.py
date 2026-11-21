@@ -259,6 +259,11 @@ def install_catalogue_routes(app, store, pipeline):
         return clusters.list(user_id, include_assigned=include_assigned,
                              query=q, focus_id=focus_id)
 
+    @app.get("/api/albums/contradictions")
+    def album_contradictions(user_id: str, offset: int = Query(0, ge=0),
+                             limit: int = Query(50, ge=1, le=100)):
+        return clusters.contradictions(user_id, offset=offset, limit=limit)
+
     @app.get("/api/albums/cluster-edition")
     def album_cluster_edition(user_id: str, anchor_id: str, release_id: str,
                               include_assigned: bool = False):
