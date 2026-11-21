@@ -781,3 +781,59 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
   .album-edition-footer,.album-music-footer {max-height:190px;}
   .album-cluster-toolbar .control-field {min-width:min(100%,210px);}
 }
+
+
+/* Exact edition membership: six colors, all subtle enough for long track text. */
+.album-track-section-label {font-size:11px;font-weight:750;letter-spacing:.04em;
+  color:var(--muted);padding:7px 3px 3px;line-height:1.3;}
+.album-cluster-only-label {border-top:1px solid var(--border);margin-top:7px;padding-top:12px;}
+.album-track-decision {display:flex;align-items:flex-start;gap:10px;min-width:0;}
+.album-track-decision input[type="checkbox"] {margin:4px 0 0;flex:none;min-width:16px;min-height:16px;}
+.album-track-decision-label {display:grid;gap:4px;min-width:0;flex:1;overflow-wrap:anywhere;}
+.album-music-green {background:rgba(42,167,100,.105);border-color:rgba(42,167,100,.36);}
+.album-music-orange {background:rgba(228,157,38,.135);border-color:rgba(228,157,38,.4);}
+.album-music-red {background:rgba(221,88,82,.105);border-color:rgba(221,88,82,.31);}
+.album-music-gray {background:rgba(142,145,151,.105);border-color:rgba(142,145,151,.35);opacity:.75;}
+.album-music-purple {background:rgba(145,100,205,.10);border-color:rgba(145,100,205,.36);}
+.album-music-blue {background:rgba(78,143,220,.11);border-color:rgba(78,143,220,.37);}
+.album-music-unknown {background:rgba(180,153,64,.075);border-color:rgba(180,153,64,.27);}
+.album-music-legend {display:flex;align-items:center;flex-wrap:wrap;gap:7px 12px;padding:2px 0 5px;}
+.album-music-legend span {display:inline-flex;align-items:center;gap:5px;font-size:10px;
+  color:var(--muted);white-space:nowrap;}
+.album-legend-dot {display:inline-block;width:9px;height:9px;border-radius:3px;flex:none;}
+.album-dot-green {background:#2da66d;}
+.album-dot-orange {background:#e5a340;}
+.album-dot-red {background:#d87773;}
+.album-dot-gray {background:#92969d;}
+.album-dot-purple {background:#956dc8;}
+.album-dot-blue {background:#5598d7;}
+.album-validation-count {display:block;font-size:11px;line-height:1.45;margin-top:6px;opacity:.85;}
+.album-not-found-action {margin-top:7px;font-size:11px;padding:5px 8px;}
+.album-validate-dialog {border:1px solid var(--border);border-radius:12px;
+  background:var(--panel);color:inherit;width:min(720px,calc(100vw - 32px));
+  max-height:min(85vh,800px);padding:0;box-shadow:0 20px 70px #0006;}
+.album-validate-dialog::backdrop {background:rgba(0,0,0,.54);}
+.album-validate-body {padding:20px;display:grid;gap:12px;min-width:0;}
+.album-validate-body h3 {margin:0;}
+.album-validate-body p {margin:0;font-size:12px;line-height:1.5;}
+.album-validate-details {min-width:0;max-height:min(46vh,350px);overflow-y:auto;overscroll-behavior:contain;}
+.album-validate-list {display:grid;gap:4px;}
+.album-validate-row {display:grid;gap:3px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;
+  font-size:12px;overflow-wrap:anywhere;}
+.album-validate-row strong {font-size:13px;}
+.album-validate-row small {font-size:11px;}
+.album-validate-actions {display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;}
+.catalogue-contradictions {border:1px solid var(--border);border-radius:9px;padding:11px;margin-top:13px;}
+.catalogue-contradictions summary {cursor:pointer;font-size:13px;font-weight:650;}
+.catalogue-contradictions > .hint {font-size:12px;line-height:1.5;}
+.catalogue-contradiction-list {display:grid;gap:8px;max-height:390px;overflow-y:auto;}
+.catalogue-contradiction-row {display:flex;align-items:center;justify-content:space-between;
+  gap:9px;padding:11px;border:1px solid var(--border);border-radius:8px;min-width:0;}
+.catalogue-contradiction-info {display:grid;gap:4px;min-width:0;overflow-wrap:anywhere;}
+.catalogue-contradiction-info strong {font-size:12px;}
+.catalogue-contradiction-info small {font-size:11px;color:var(--muted);}
+.catalogue-contradiction-row button {font-size:11px;flex:none;white-space:nowrap;}
+@media(max-width:500px){
+  .album-validate-body {padding:12px;}
+  .catalogue-contradiction-row {flex-direction:column;align-items:flex-start;}
+}
