@@ -49,7 +49,8 @@ window.CatalogueUI = (() => {
     for (const id of ["catalogueResults"]) byId(id).replaceChildren();
     byId("catalogueResults").append(element("p", "Search to find cached MusicBrainz entries.", "hint"));
     byId("catalogueDetail").replaceChildren(element("p", "Select an entry on the left to browse its discography or tracklist.", "hint"));
-    for (const id of ["catalogueStatus", "catalogueProgress"]) byId(id).textContent = "";
+    for (const id of ["catalogueStatus", "catalogueProgress", "catalogueAlbumCacheStatus"]) byId(id).textContent = "";
+    byId("catalogueAlbumCacheBar").value = 0;
   }
   const num = value => Number(value || 0).toLocaleString();
   function bytes(value) {
@@ -158,6 +159,7 @@ window.CatalogueUI = (() => {
     }
     if ((ui.user && state.tab === "catalogue") && user === ui.user) {
       clearTimeout(ui.prefetchTimer);
+      void refreshProgress().catch(() => {});
       ui.prefetchTimer = setTimeout(refreshPrefetchStatus, 10000);
     }
   }
@@ -386,6 +388,17 @@ window.CatalogueUI = (() => {
     }
   }
   function displayProgress(data) {
+    const album = data.album_cache || {};
+    const total = Number(album.total || 0), complete = Number(album.complete || 0);
+    const pending = Number(album.pending || 0), running = Number(album.running || 0);
+    const deferred = Number(album.deferred || 0);
+    byId("catalogueAlbumCacheBar").max = Math.max(1,total);
+    byId("catalogueAlbumCacheBar").value = Math.min(complete,Math.max(1,total));
+    byId("catalogueAlbumCacheStatus").textContent =
+      num(complete)+" / "+num(total)+" album cache tasks completed · "+
+      num(pending)+" queued ("+num(deferred)+" deferred) · "+
+      num(running)+" running · "+num(album.cached_tracklists)+" release tracklists cached. "+
+      "Totals grow as release-group searches discover editions.";
     const counts = Object.entries(data.counts || {}).map(([k, count]) => `${k}: ${count}`).join(" · ");
     const active = (data.active || []).slice(0, 4).map(row => `${row.kind} ${row.section}: page ${row.cursor + 1}${row.total == null ? "" : ` / ${Math.ceil(row.total / 100)}`}`).join("; ");
     message(`${counts || "Nothing queued"}${active ? ` · ${active}` : ""}`, false, "catalogueProgress");
