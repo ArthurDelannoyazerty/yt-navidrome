@@ -3,6 +3,30 @@
 const $ = id => document.getElementById(id);
 const FAST_POLL_MS = 2500;
 const SLOW_POLL_MS = 10000;
+const Router = window.IngestorRouter || null;
+let restoringRoute = false;
+let bootstrappingRoute = true;
+let routeRevision = 0;
+function pageRoute(tab, extra = {}) {
+  return {user: state.user, tab, ...extra};
+}
+function routeWrite(route, replace = false) {
+  if (!restoringRoute && state.user) Router?.write(route, {replace});
+}
+function updateNavigationLinks() {
+  for (const tab of document.querySelectorAll(".tab")) {
+    const destination = Router?.build({user: state.user, tab: tab.dataset.tab});
+    if (destination) tab.href = destination;
+  }
+}
+function musicRoute(extra = {}) {
+  return pageRoute("music", {
+    ...(state.musicView === "ignored" ? {ignored: true} : {
+      status: $("filter").value, q: $("search").value.trim(), page: state.page,
+    }),
+    ...extra,
+  });
+}
 
 const activity = {
   replacement: new IngestorUI.AsyncState("replacement"),
@@ -227,7 +251,7 @@ function updateKeyedChildren(container, items, {key, signature, render, backgrou
   }
 }
 
-function setTab(name, activateApproval = true) {
+function setTab(name, activateApproval = true, {skipEnter = false} = {}) {
   if (state.tab === "approval" && name !== "approval") window.MetadataUI?.leave();
   if (state.tab === "catalogue" && name !== "catalogue") window.CatalogueUI?.leave();
   if (state.tab === "album" && name !== "album") window.AlbumUI?.leave();
@@ -240,17 +264,27 @@ function setTab(name, activateApproval = true) {
   for (const panel of document.querySelectorAll("[data-panel]")) {
     panel.hidden = panel.dataset.panel !== name;
   }
-  if (name === "approval" && activateApproval) guard(() => window.MetadataUI?.enter())();
-  if (name === "catalogue") guard(() => window.CatalogueUI?.enter())();
-  if (name === "album") guard(() => window.AlbumUI?.enter())();
-  if (name === "language") guard(() => window.LanguageUI?.enter())();
-  if (name === "graph") guard(() => window.GraphUI?.enter())();
+  if (!skipEnter) {
+    if (name === "approval" && activateApproval) guard(() => window.MetadataUI?.enter())();
+    if (name === "catalogue") guard(() => window.CatalogueUI?.enter())();
+    if (name === "album") guard(() => window.AlbumUI?.enter())();
+    if (name === "language") guard(() => window.LanguageUI?.enter())();
+    if (name === "graph") guard(() => window.GraphUI?.enter())();
+  }
   if (name === "maintenance") guard(() => refreshMaintenance(false))();
   if (name === "activity" && state.followLogs) requestAnimationFrame(followLatestEvents);
+  if (name === "music") routeWrite(musicRoute());
+  else routeWrite(pageRoute(name));
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => setTab(tab.dataset.tab));
+  tab.addEventListener("click", event => {
+    // Native hrefs still allow open-in-new-tab and keyboard/copy-link actions.
+    if (event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.altKey ||
+        (event?.button != null && event.button !== 0)) return;
+    event?.preventDefault?.();
+    setTab(tab.dataset.tab);
+  });
 }
 
 // A new key deliberately ignores the old silently populated "music-user" value.
@@ -364,6 +398,7 @@ function changeUser() {
   $("exportFailures").href = `/api/failures/export?user_id=${encodeURIComponent(state.user)}`;
   for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
   if (state.user) rememberLibrary(state.user);
+  updateNavigationLinks();
   state.page = 1;
   state.after = 0;
   state.generation += 1;
@@ -385,7 +420,15 @@ function changeUser() {
     return;
   }
   guard(() => refreshAll(false))();
-  if (state.tab === "approval") guard(() => window.MetadataUI?.enter())();
+  if (!bootstrappingRoute && !restoringRoute) {
+    routeWrite(pageRoute(state.tab));
+    if (state.tab === "album") guard(() => window.AlbumUI?.enter())();
+    if (state.tab === "catalogue") guard(() => window.CatalogueUI?.enter())();
+    if (state.tab === "graph") guard(() => window.GraphUI?.enter())();
+    if (state.tab === "language") guard(() => window.LanguageUI?.enter())();
+  }
+  if (state.tab === "approval" && !restoringRoute)
+    guard(() => window.MetadataUI?.enter())();
 }
 
 $("user").addEventListener("change", changeUser);
