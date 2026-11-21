@@ -1316,7 +1316,7 @@ test("real browser: Graph canvas loads with strict CSP, switches layers and supp
   // exact neighborhood instead of silently displaying an unrelated snapshot.
   assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/graph/artist/b");
   await chrome.send("Page.reload",{ignoreCache:true});
-  await chrome.until("document.querySelector('#user').value==='admin' && document.querySelector('#graphStatus').textContent.includes('3 nodes')");
+  await chrome.until("document.querySelector('#user')?.value==='admin' && document.querySelector('#graphStatus')?.textContent.includes('3 nodes')");
   assert.equal(data.reads.filter(path=>path.startsWith("/api/catalogue/graph?")).length,count+1);
   assert.equal(await chrome.evaluate("document.querySelector('#graphRepelForce').value"),"11");
   assert.equal(await chrome.evaluate("document.querySelector('#graphLayout').value"),"layers");
@@ -1620,16 +1620,16 @@ test("real browser: deep links to an album edition survive reload, selection and
   const origin=await fixtureServer(t,data);
   const url="/libraries/admin/albums/"+family+"/editions/"+first;
   await chrome.send("Page.navigate",{url:origin+url});
-  await chrome.until("document.querySelector('#albumSelectedTitle').textContent.includes('IM25') && document.querySelector('#user').value==='admin'");
+  await chrome.until("document.querySelector('#albumSelectedTitle')?.textContent.includes('IM25') && document.querySelector('#user')?.value==='admin'");
   assert.equal(await chrome.evaluate("location.pathname"),url);
   assert.equal(await chrome.evaluate("document.querySelector('[data-tab=album]').getAttribute('aria-current')"),"page");
   await chrome.evaluate("(()=>{const choices=[...document.querySelectorAll('.album-edition-choice')];choices.find(x=>!x.classList.contains('is-active')).click()})()");
   await chrome.until("location.pathname.endsWith('/editions/"+second+"')");
   await chrome.evaluate("history.back()");
-  await chrome.until("location.pathname.endsWith('/editions/"+first+"') && document.querySelector('#albumSelectedTitle').textContent.includes('IM25')");
+  await chrome.until("location.pathname.endsWith('/editions/"+first+"') && document.querySelector('#albumSelectedTitle')?.textContent.includes('IM25')");
   assert.equal(await chrome.evaluate("document.querySelector('.album-edition-choice.is-active').getAttribute('aria-selected')"),"true");
   await chrome.send("Page.navigate",{url:origin+url});
-  await chrome.until("document.querySelector('#albumSelectedTitle').textContent.includes('IM25')");
+  await chrome.until("document.querySelector('#albumSelectedTitle')?.textContent.includes('IM25')");
   assert.equal(await chrome.evaluate("location.pathname"),url);
   assert.deepEqual(chrome.errors,[]);
 });
@@ -1645,7 +1645,7 @@ test("real browser: direct catalogue, approval, source and music links restore c
     provider:"youtube",status:"ACTIVE",monitored:true,is_playlist:true}];
   const origin=await fixtureServer(t,data);
   await chrome.send("Page.navigate",{url:origin+"/libraries/admin/catalogue/recording/"+recording});
-  await chrome.until("document.querySelector('#catalogueDetail').textContent.includes('IM25 cached recording')");
+  await chrome.until("document.querySelector('#catalogueDetail')?.textContent.includes('IM25 cached recording')");
   assert.equal(await chrome.evaluate("state.tab"),"catalogue");
   assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/catalogue/recording/"+recording);
   await chrome.send("Page.navigate",{url:origin+"/libraries/admin/approval/track-1"});
@@ -1668,7 +1668,7 @@ test("real browser: tab links are real URLs with Back/Forward and library isolat
   const chrome=await browser(t);if(!chrome)return;
   const data=fixtures(),origin=await fixtureServer(t,data);
   await chrome.send("Page.navigate",{url:origin+"/libraries/admin/music"});
-  await chrome.until("document.querySelector('#user').value==='admin' && location.pathname.endsWith('/music')");
+  await chrome.until("document.querySelector('#user')?.value==='admin' && location.pathname.endsWith('/music')");
   assert.equal(await chrome.evaluate("document.querySelector('[data-tab=album]').getAttribute('href')"),"/libraries/admin/albums");
   await chrome.evaluate("document.querySelector('[data-tab=catalogue]').click()");
   await chrome.until("location.pathname==='/libraries/admin/catalogue'");
