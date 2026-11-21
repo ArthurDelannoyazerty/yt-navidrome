@@ -534,6 +534,10 @@ window.AlbumUI = (() => {
         entry.append(element("small",
           (row.old_release_id?"From "+row.old_release_id.slice(0,8)+"…":"Previously unassigned")+
           " → "+(row.target_album||edition.name)+" · "+row.status,"hint"));
+        const destination=edition.tracks.find(t=>t.recording_id===row.target_recording_id);
+        if(destination)entry.append(element("small",
+          "Target: Disc "+destination.medium+" · Track "+destination.position+
+          " · "+(destination.english_title||destination.title),"hint"));
         if(row.recording_id!==row.target_recording_id){
           entry.append(element("small","Recording MBID: "+
             (row.recording_id?row.recording_id.slice(0,8)+"…":"unidentified")+
@@ -616,6 +620,10 @@ window.AlbumUI = (() => {
         const row=element("article",null,"album-history-row");
         row.append(element("span",
           change.track_id.slice(0,8)+" · "+change.release_id.slice(0,8)+" · "+change.status));
+        if(change.new_recording_id&&change.new_recording_id!==change.old_recording_id)
+          row.append(element("small","Recording ID: "+
+            (change.old_recording_id?change.old_recording_id.slice(0,8)+"…":"unidentified")+
+            " → "+change.new_recording_id.slice(0,8)+"…","hint"));
         if(change.status==="DONE")row.append(button("Undo",async()=>{
           if(!confirm("Undo this individual album change using its saved backup?"))return;
           await api("/api/catalogue/album-undo",{user_id:user,change_id:change.id});
