@@ -845,6 +845,8 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 #catalogueAlbumCacheBar {width:100%;height:8px;accent-color:var(--accent);}
 .album-music-candidate {background:rgba(180,153,64,.09);border-color:rgba(180,153,64,.4);}
 .album-dot-candidate {background:#b49940;}
-.album-recording-alternatives {display:grid;gap:5px;margin-top:-5px;padding:7px 12px;border:1px dashed var(--border);border-radius:7px;}
-.album-recording-alternative {display:grid;gap:4px;font-size:12px;overflow-wrap:anywhere;}
-.album-recording-alternative small {color:var(--muted);font-size:11px;}
+.album-selection-actions {display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:9px;}
+.album-selection-actions button {font-size:11px;padding:5px 8px;}
+.album-track-manual-target {padding-top:5px;}
+.album-track-manual-target select {width:100%;min-width:0;padding:7px 9px;font-size:11px;}
+.album-music-candidate .album-music-info small {color:var(--muted);}
