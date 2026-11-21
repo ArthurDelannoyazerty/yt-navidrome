@@ -46,8 +46,9 @@ function browser(spotify = false, metadata = false) {
   });
   const path = require.resolve('../src/static/app.js');
   const source = fs.readFileSync(path, 'utf8');
-  // Initialization alone is excluded; all definitions and event handlers run.
-  vm.runInContext(source.slice(0, source.lastIndexOf('(async () => {')) +
+  // The navigation bootstrap lives in navigation.js. Unit tests load app
+  // callbacks without scheduling timers or triggering startup API requests.
+  vm.runInContext(source +
     '\nglobalThis.app = {state, loadEvents, loadIntegrity, loadIgnored, loadSources, refreshTracks, showDetails};', context);
   if (spotify) vm.runInContext(fs.readFileSync(require.resolve('../src/static/spotify-ui.js'), 'utf8'), context);
   if (metadata) vm.runInContext(fs.readFileSync(require.resolve('../src/static/metadata-ui.js'), 'utf8'), context);

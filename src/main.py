@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import re
 import shutil
 import traceback
 from contextlib import asynccontextmanager
@@ -33,7 +34,7 @@ from state_machines import MACHINES, SOURCE_INACTIVE, SERVICE
 STATIC_ROOT = ROOT / "static"
 INDEX_TEMPLATE = (STATIC_ROOT / "index.html").read_text()
 _asset_digest = hashlib.sha256()
-for _asset_name in ("style.css", "ui-state.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js", "help-ui.js", "pele-flowchart.js", "catalogue-ui.js", "album-ui.js", "language-ui.js", "force-graph.css", "force-graph.min.js", "graph-ui.js"):
+for _asset_name in ("style.css", "ui-state.js", "router.js", "app.js", "spotify-ui.js", "metadata-ui.js", "artwork-ui.js", "help-ui.js", "pele-flowchart.js", "catalogue-ui.js", "album-ui.js", "language-ui.js", "force-graph.css", "force-graph.min.js", "graph-ui.js", "navigation.js"):
     _asset_digest.update((STATIC_ROOT / _asset_name).read_bytes())
 STATIC_VERSION = _asset_digest.hexdigest()[:12]
 
@@ -217,7 +218,7 @@ def create_app(store=None, start_workers=True):
         )
         # The HTML must always be revalidated so it can point at the current
         # content-addressed frontend assets. Versioned static URLs are immutable.
-        if request.url.path == "/":
+        if request.url.path == "/" or request.url.path.startswith("/libraries/"):
             response.headers["Cache-Control"] = "no-store, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
@@ -249,11 +250,38 @@ def create_app(store=None, start_workers=True):
     ):
         app.add_exception_handler(exception, error_response)
 
+    def frontend_shell():
+        return HTMLResponse(INDEX_TEMPLATE.replace("__STATIC_VERSION__", STATIC_VERSION))
+
     @app.get("/")
     def index():
-        return HTMLResponse(
-            INDEX_TEMPLATE.replace("__STATIC_VERSION__", STATIC_VERSION)
-        )
+        return frontend_shell()
+
+    # The browser router owns these paths; API endpoints and static files never
+    # fall through to the application shell. Direct links/refresh therefore
+    # work without a client-side hash or changing any existing JSON endpoints.
+    def frontend_route_allowed(section):
+        parts = section.strip("/").split("/")
+        if not parts or any(not p or len(p) > 200 or
+                            not re.fullmatch(r"[A-Za-z0-9._~-]+", p) or p in {".", ".."}
+                            for p in parts):
+            return False
+        page, *rest = parts
+        if page in {"music", "approval", "sources", "help"}:
+            return len(rest) <= 1
+        if page in {"catalogue", "graph"}:
+            return not rest or (len(rest) == 2 and
+                                rest[0] in {"artist", "recording", "release", "release-group", "work"})
+        if page == "albums":
+            return not rest or len(rest) == 1 or (len(rest) == 3 and rest[1] == "editions")
+        return page in {"language", "activity", "maintenance"} and not rest
+
+    @app.get("/libraries/{library}/{section:path}", include_in_schema=False)
+    def frontend_entry(library: str, section: str):
+        if (not library or len(library) > 64 or not re.fullmatch(r"[A-Za-z0-9._~-]+", library)
+                or not frontend_route_allowed(section)):
+            raise HTTPException(404, "Unknown application page")
+        return frontend_shell()
 
     @app.get("/healthz")
     def health():

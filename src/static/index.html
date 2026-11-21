@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/static/style.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/force-graph.css?v=__STATIC_VERSION__">
   <script src="/static/ui-state.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/router.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/app.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/spotify-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/metadata-ui.js?v=__STATIC_VERSION__" defer></script>
@@ -17,6 +18,7 @@
   <script src="/static/language-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/force-graph.min.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/graph-ui.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/navigation.js?v=__STATIC_VERSION__" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -29,16 +31,16 @@
 </header>
 
 <nav class="tabs" aria-label="Application sections">
-  <button type="button" class="tab active" data-tab="music">Music</button>
-  <button type="button" class="tab" data-tab="approval">Approval</button>
-  <button type="button" class="tab" data-tab="catalogue">Catalogue</button>
-  <button type="button" class="tab" data-tab="album">Album</button>
-  <button type="button" class="tab" data-tab="language">Language</button>
-  <button type="button" class="tab" data-tab="graph">Graph</button>
-  <button type="button" class="tab" data-tab="sources">Sources</button>
-  <button type="button" class="tab" data-tab="activity">Activity</button>
-  <button type="button" class="tab" data-tab="maintenance">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></button>
-  <button type="button" class="tab" data-tab="help">Help</button>
+  <a class="tab active" data-tab="music" href="/">Music</a>
+  <a class="tab" data-tab="approval" href="/">Approval</a>
+  <a class="tab" data-tab="catalogue" href="/">Catalogue</a>
+  <a class="tab" data-tab="album" href="/">Album</a>
+  <a class="tab" data-tab="language" href="/">Language</a>
+  <a class="tab" data-tab="graph" href="/">Graph</a>
+  <a class="tab" data-tab="sources" href="/">Sources</a>
+  <a class="tab" data-tab="activity" href="/">Activity</a>
+  <a class="tab" data-tab="maintenance" href="/">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></a>
+  <a class="tab" data-tab="help" href="/">Help</a>
 </nav>
 
 <div id="notice" role="status" aria-live="polite" hidden></div>
@@ -310,9 +312,9 @@
   <section class="panel album-panel" data-panel="album" id="albumPanel" hidden>
     <div class="panel-heading">
       <div><span class="eyebrow">MUSICBRAINZ</span><h2>Album families</h2>
-        <p class="hint">Review separate MusicBrainz release-group families across your library. Assigned songs remain visible; the checkbox controls whether they may be changed. Different-recording matches are suggestions only.</p>
+        <p class="hint">Review separate MusicBrainz release-group families across your library. Assigned songs remain visible; the checkbox controls automatic preselection. Different-recording matches can be explicitly selected after review.</p>
       </div>
-      <button id="albumRefresh" type="button" class="secondary">Refresh clusters</button>
+      <button id="albumRefresh" type="button" class="secondary">Refresh families</button>
     </div>
     <div class="album-cluster-toolbar">
       <label class="check"><input type="checkbox" id="albumIncludeAssigned"> Preselect already-assigned recordings (manual selection is always possible)</label>
@@ -324,17 +326,17 @@
         <button id="albumNext" type="button" class="secondary">Next</button>
       </div>
     </div>
-    <p class="hint" id="albumClusterStatus" role="status" aria-live="polite">Loading connected recording and album families…</p>
-    <div class="album-cluster-grid" aria-label="Album cluster workspace">
+    <p class="hint" id="albumClusterStatus" role="status" aria-live="polite">Loading MusicBrainz release-group families…</p>
+    <div class="album-cluster-grid" aria-label="Album family workspace">
       <section class="album-cluster-column album-cluster-sidebar" aria-labelledby="albumClustersHeading">
         <div class="album-column-heading"><h3 id="albumClustersHeading">Families</h3>
           <small id="albumClusterCount"></small></div>
-        <div id="albumClusterList" class="album-column-scroll" role="listbox" aria-label="Music and album clusters"></div>
+        <div id="albumClusterList" class="album-column-scroll" role="listbox" aria-label="Music and album families"></div>
       </section>
       <section class="album-cluster-column album-edition-column" aria-labelledby="albumEditionsHeading">
         <div class="album-column-heading"><h3 id="albumEditionsHeading">Album editions</h3>
           <small id="albumClusterSummary"></small></div>
-        <div id="albumReleaseList" class="album-column-scroll" role="listbox" aria-label="Candidate albums in this cluster"></div>
+        <div id="albumReleaseList" class="album-column-scroll" role="listbox" aria-label="Candidate editions in this family"></div>
         <div class="album-edition-footer">
           <p id="albumSelectedTitle" class="hint">Choose an edition to inspect the differences.</p>
           <button id="albumEditionUse" type="button" disabled>Validate Album</button>

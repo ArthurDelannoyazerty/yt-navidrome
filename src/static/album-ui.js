@@ -18,6 +18,12 @@ window.AlbumUI = (() => {
     preview:null,searchTimer:null,pollTimer:null,familyTimer:null,preferences:[],sources:[],fetching:false};
   const active=(user,serial)=>state.user===user && ui.user===user &&
     state.tab==="album" && ui.serial===serial;
+  const currentRoute = (familyId=ui.focus,editionId=ui.focus?clusterWork().selected:null) => ({
+    user:ui.user||state.user,tab:"album",familyId,editionId,
+    q:$("albumClusterSearch").value.trim(),
+    includeAssigned:$("albumIncludeAssigned").checked
+  });
+  const saveRoute=(replace=false)=>window.IngestorRouter?.write(currentRoute(),{replace});
   const notice=(message,error=false,id="albumClusterStatus")=>{
     const target=$(id);target.textContent=message||"";
     target.className=error?"error-text":"hint";
@@ -184,6 +190,8 @@ window.AlbumUI = (() => {
       ui.clusters=response.clusters||[];
       ui.focus=response.detail?.id||null;
       ui.detail=response.detail||null;
+      if (ui.focus && window.IngestorRouter?.read()?.tab === "album" &&
+          !window.IngestorRouter?.read()?.familyId) saveRoute(true);
       ui.preview=null;
       clearTimeout(ui.pollTimer);ui.pollTimer=null;
       clearTimeout(ui.familyTimer);ui.familyTimer=null;
@@ -201,6 +209,7 @@ window.AlbumUI = (() => {
   async function selectCluster(id){
     if(!id||id===ui.focus)return;
     await loadClusters(id);
+    if(ui.focus===id)saveRoute();
   }
   function renderAlbums(){
     const body=$("albumReleaseList");body.replaceChildren();
@@ -236,6 +245,7 @@ window.AlbumUI = (() => {
     if(ui.fetching||!releases().some(a=>a.id===id))return;
     const work=clusterWork();
     work.selected=id;work.edition=null;
+    saveRoute();
     clearTimeout(ui.pollTimer);ui.pollTimer=null;
     renderAlbums();renderMusic();
     void loadEdition(id);
@@ -682,7 +692,7 @@ window.AlbumUI = (() => {
       notice(clear?"Source preference cleared.":"Source preference saved.",false,"albumPreferenceStatus");
     }catch(error){if(active(user,serial))notice(error.message,true,"albumPreferenceStatus");}
   }
-  async function enter(){
+  async function enter(routeState=null){
     if(!state.user)return;
     if(ui.user!==state.user){
       reset();ui.user=state.user;
@@ -698,9 +708,34 @@ window.AlbumUI = (() => {
         }
       }catch(error){if(active(user,serial))notice(error.message,true);}
     }
-    await loadClusters(ui.focus);
+    if(routeState){
+      $("albumIncludeAssigned").checked=Boolean(routeState.includeAssigned);
+      $("albumClusterSearch").value=routeState.q||"";
+    }
+    await loadClusters(routeState?.familyId||ui.focus);
+    if(routeState && ui.detail){
+      const work=clusterWork();
+      if(routeState.editionId && ui.focus===routeState.familyId){
+        if(!releases().some(a=>a.id===routeState.editionId)){
+          work.extra.set(routeState.editionId,{
+            id:routeState.editionId,name:"Loading requested edition…",
+            original_title:"Loading requested edition…",
+            matched_count:0,linked_track_count:0,complete:false
+          });
+        }
+        work.selected=routeState.editionId;work.edition=null;
+        renderAlbums();renderMusic();
+        await loadEdition(routeState.editionId);
+      }else if(!routeState.editionId){
+        work.selected=null;work.edition=null;
+        renderAlbums();renderMusic();
+      }
+    }
     void loadHistory();
     void loadPreferences();
+  }
+  async function openRoute(routeState){
+    return enter(routeState);
   }
   function leave(){
     ui.serial++;clearTimeout(ui.searchTimer);clearTimeout(ui.pollTimer);
@@ -825,11 +860,15 @@ window.AlbumUI = (() => {
       $("albumIncludeAssigned").checked=!$("albumIncludeAssigned").checked;
       return;
     }
-    ui.work.clear();ui.focus=null;ui.detail=null;void loadClusters(null);
+    ui.work.clear();ui.focus=null;ui.detail=null;
+    void loadClusters(null).then(()=>saveRoute(true));
   });
   $("albumClusterSearch").addEventListener("input",()=>{
     clearTimeout(ui.searchTimer);
-    ui.searchTimer=setTimeout(()=>loadClusters(null),280);
+    ui.searchTimer=setTimeout(async()=>{
+      await loadClusters(null);
+      if(ui.focus)saveRoute(true);
+    },280);
   });
   $("albumPrev").addEventListener("click",()=>{
     const index=ui.clusters.findIndex(c=>c.id===ui.focus);if(index>0)void selectCluster(ui.clusters[index-1].id);
@@ -851,5 +890,5 @@ window.AlbumUI = (() => {
   $("albumPreferenceSource").addEventListener("change",renderPreference);
   $("albumPreferenceSave").addEventListener("click",()=>savePreference(false));
   $("albumPreferenceClear").addEventListener("click",()=>savePreference(true));
-  return {enter,leave,reset,mountTrack};
+  return {enter,openRoute,leave,reset,mountTrack};
 })();

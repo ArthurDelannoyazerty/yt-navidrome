@@ -288,7 +288,13 @@ window.CatalogueUI = (() => {
       displayProgress(progress);
     } catch (error) { if (current(user, serial)) message(error.message, true); }
   }
-  async function search(online = false) {
+  const currentRoute = (kind, entityId) => ({
+    user:state.user,tab:"catalogue",kind,entityId,
+    q:byId("catalogueQuery").value.trim(),
+    searchKind:byId("catalogueKind").value,
+    localOnly:byId("catalogueLocalOnly").checked
+  });
+  async function search(online = false, updateUrl = true) {
     const user = state.user, serial = ++ui.serial;
     const q = byId("catalogueQuery").value.trim(), kind = byId("catalogueKind").value;
     const local_only = byId("catalogueLocalOnly").checked;
@@ -299,6 +305,7 @@ window.CatalogueUI = (() => {
       const result = await api(`/api/catalogue/search?${params}`);
       if (!current(user, serial)) return;
       ui.results = result.items || [];
+      if (updateUrl) window.IngestorRouter?.write(currentRoute(), {replace:true});
       const body = byId("catalogueResults");
       body.replaceChildren(...ui.results.map(renderResult));
       body.scrollTop = 0;
@@ -333,6 +340,7 @@ window.CatalogueUI = (() => {
     const data = await api(`/api/catalogue/entity?${new URLSearchParams({user_id: user, kind, id})}`);
     if (!current(user, serial)) return;
     ui.detail = data;
+    window.IngestorRouter?.write(currentRoute(kind,id));
     box.replaceChildren();
     box.append(element("h4", data.entity?.name || `${kind} ${id}`));
     box.append(element("p", `${kind} · ${id}`, "hint"));
@@ -343,8 +351,10 @@ window.CatalogueUI = (() => {
       if (result.entity) await openEntity(kind, id);
     }));
     actionRow.append(button("Show in graph", () => {
-      byId("graphFocus").value = id;
-      setTab("graph"); window.GraphUI?.refresh();
+      setTab("graph",true,{noHistory:true,skipEnter:true});
+      const route={user:state.user,tab:"graph",kind,entityId:id,focus:id};
+      window.IngestorRouter?.write(route);
+      window.GraphUI?.openRoute(route);
     }));
     box.append(actionRow);
     const scopes = data.scopes || [];
@@ -385,6 +395,26 @@ window.CatalogueUI = (() => {
     // The selected entry is beside search on desktop and below it on mobile.
     if (window.innerWidth <= 850) {
       box.closest(".catalogue-selection-card")?.scrollIntoView?.({behavior: "auto", block: "start"});
+    }
+  }
+  async function openRoute(route) {
+    if (!state.user || state.tab !== "catalogue") return;
+    if (ui.user !== state.user) await enter();
+    byId("catalogueQuery").value=route.q||"";
+    byId("catalogueKind").value=route.searchKind||"recording";
+    if (!byId("catalogueKind").value) byId("catalogueKind").value="recording";
+    byId("catalogueLocalOnly").checked=Boolean(route.localOnly);
+    if (route.q?.length>=2) await search(false,false);
+    else {
+      ui.results=[];
+      byId("catalogueResults").replaceChildren(element("p",
+        "Search to find cached MusicBrainz entries.","hint"));
+    }
+    if (route.kind&&route.entityId) await openEntity(route.kind,route.entityId);
+    else {
+      ui.detail=null;
+      byId("catalogueDetail").replaceChildren(element("p",
+        "Select an entry to browse its cached details and related entries.","hint"));
     }
   }
   function displayProgress(data) {
@@ -445,5 +475,5 @@ window.CatalogueUI = (() => {
       await refreshProgress();
     } catch (error) { message(error.message, true); }
   });
-  return {enter, leave, reset, openEntity, refreshProgress};
+  return {enter, leave, reset, openEntity, openRoute, refreshProgress};
 })();

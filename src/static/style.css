@@ -850,3 +850,9 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 .album-track-manual-target {padding-top:5px;}
 .album-track-manual-target select {width:100%;min-width:0;padding:7px 9px;font-size:11px;}
 .album-music-candidate .album-music-info small {color:var(--muted);}
+
+/* Canonical browser navigation uses real links, without changing tab visuals. */
+.tabs .tab {text-decoration:none;display:inline-block;white-space:nowrap;}
+.tabs .tab:focus-visible,.source-permalink:focus-visible {outline:2px solid var(--accent);outline-offset:3px;}
+.source-permalink {display:inline-block;font-weight:650;overflow-wrap:anywhere;}
+.source.is-target {border-color:var(--accent);box-shadow:0 0 0 2px rgba(39,99,78,.14);}

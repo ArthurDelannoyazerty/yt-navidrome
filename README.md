@@ -183,30 +183,43 @@ The daily/manual integrity check verifies current files, hashes changed files,
 checks beets membership/path agreement, and reports untracked Opus files. It does
 not silently delete or repair music.
 
-## Interface layout
+## Interface and direct links
 
-The single-page interface is split into six tabs:
+The browser interface has ten sections: **Music**, **Approval**, **Catalogue**,
+**Album**, **Language**, **Graph**, **Sources**, **Activity**, **Maintenance**,
+and **Help**. It is a small, framework-free JavaScript application served by
+FastAPI; all existing media queues, undo flows, provider imports and metadata
+controls remain server-owned.
 
-- **Music** — search, status filters, metadata actions and pagination and an **Ignored music** view. Less frequent actions stay
-  in **More**, including sources, repair, reprocessing, redownload and removal.
-- **Approval** - one track at a time, with current music on the left and Beets
-  suggestions, original-source metadata and automatic MusicBrainz search on the right.
-  Defaults to Waiting for approval; Previous/Next and a searchable collapsed picker
-  navigate the queue. See [Approval](docs/continuous-review.md).
-- **Sources** — URL ingestion and monitored playlists.
-- **Activity** — persistent events, following the latest message by default.
-  Scrolling up pauses following; **Jump to latest** resumes it. **Clear view**
-  clears only the browser display.
-- **Maintenance** — paginated integrity issues, optional batch tag/loudness repair,
-  failed-operation export and downloader updates.
-- **Help** — a locally rendered Pele workflow graph, separate recovery guidance and
-  an expandable table of operation transitions.
+Each page has its own library-scoped URL. Important items also have direct
+addresses, including tracks, approval entries, MusicBrainz catalogue entities,
+album release groups and exact editions, selected sources, graph nodes and help
+topics. For example:
 
-Search is server-side and matches source titles/channels and identified
-artist/title. Pagination follows filtering/search, with 50 rows per page and
-Previous/Next controls above and below the results. Library totals stay in the
-filter counters; the redundant visible results-summary line is removed.
-Narrow screens use stacked track rows.
+```text
+/libraries/admin/music
+/libraries/admin/music/<track-id>
+/libraries/admin/approval/<track-id>
+/libraries/admin/catalogue/recording/<recording-mbid>
+/libraries/admin/albums/<release-group-id>/editions/<release-id>
+/libraries/admin/sources/<source-id>
+/libraries/admin/graph/recording/<recording-mbid>
+```
+
+Filters, search and pagination may appear as query parameters. Browser Back,
+Forward, reload, link copying and opening entries in a separate tab are supported.
+Album checkboxes and unsaved changes are **not** included in shareable URLs.
+Direct links to a library do not bypass the authenticated reverse proxy or API
+ownership checks. If the requested library is unavailable, choose a valid library
+rather than silently opening a different user's entries.
+
+The Music screen provides search, server-side pagination, status filters and an
+Ignored music view. Approval keeps its one-recording-at-a-time full-width workflow.
+Sources support one-off links and monitored playlists; Activity follows recent
+events; Maintenance contains integrity and repair tools. Help documents workflows.
+
+See [frontend navigation and route contracts](docs/frontend-routing.md) and
+[interface decisions](docs/interface.md) for implementation boundaries.
 
 ## Start with Docker Compose
 

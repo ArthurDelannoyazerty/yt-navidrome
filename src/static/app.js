@@ -3,6 +3,38 @@
 const $ = id => document.getElementById(id);
 const FAST_POLL_MS = 2500;
 const SLOW_POLL_MS = 10000;
+const Router = window.IngestorRouter || null;
+let restoringRoute = false;
+let bootstrappingRoute = true;
+let routeRevision = 0;
+function pageRoute(tab, extra = {}) {
+  return {user: state.user, tab, ...extra};
+}
+function routeWrite(route, replace = false) {
+  if (!restoringRoute && state.user) Router?.write(route, {replace});
+}
+function updateNavigationLinks() {
+  for (const tab of document.querySelectorAll(".tab")) {
+    const destination = Router?.build({user: state.user, tab: tab.dataset.tab});
+    if (destination) tab.href = destination;
+  }
+  for (const link of document.querySelectorAll('.help-sidebar a[href]')) {
+    const topic = (link.dataset.topic || link.getAttribute("href").split("#help-")[1]);
+    if (topic) {
+      link.dataset.topic=topic;
+      const url=Router?.build({user:state.user,tab:"help",topic});
+      if (url) link.href=url;
+    }
+  }
+}
+function musicRoute(extra = {}) {
+  return pageRoute("music", {
+    ...(state.musicView === "ignored" ? {ignored: true} : {
+      status: $("filter").value, q: $("search").value.trim(), page: state.page,
+    }),
+    ...extra,
+  });
+}
 
 const activity = {
   replacement: new IngestorUI.AsyncState("replacement"),
@@ -69,6 +101,7 @@ function setFilter(value) {
   $("ignoredMusicPanel").hidden = state.musicView !== "ignored";
   for (const tab of $("stats").children) tab.setAttribute("aria-pressed", String(tab.dataset.filter === value));
   if (value === "IGNORED") {
+    routeWrite(musicRoute());
     state.ignoredPage = 1;
     guard(async () => reportErrors(await Promise.allSettled([loadIgnored(false), loadDisabledOrigins(false)])))();
     return;
@@ -76,6 +109,7 @@ function setFilter(value) {
   $("filter").value = value;
   state.page = 1;
   state.generation += 1;
+  routeWrite(musicRoute());
   guard(() => refreshTracks(false))();
 }
 
@@ -227,12 +261,15 @@ function updateKeyedChildren(container, items, {key, signature, render, backgrou
   }
 }
 
-function setTab(name, activateApproval = true) {
+function setTab(name, activateApproval = true, {skipEnter = false, noHistory = false} = {}) {
   if (state.tab === "approval" && name !== "approval") window.MetadataUI?.leave();
   if (state.tab === "catalogue" && name !== "catalogue") window.CatalogueUI?.leave();
   if (state.tab === "album" && name !== "album") window.AlbumUI?.leave();
   if (state.tab === "graph" && name !== "graph") window.GraphUI?.leave();
   state.tab = name;
+  // Browser history can change pages while a track details dialog is open.
+  // Do not leave a modal from the previous page covering the new page.
+  if (name !== "music" && $("detailsDialog").open) $("detailsDialog").close();
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("active", tab.dataset.tab === name);
     tab.setAttribute("aria-current", tab.dataset.tab === name ? "page" : "false");
@@ -240,17 +277,40 @@ function setTab(name, activateApproval = true) {
   for (const panel of document.querySelectorAll("[data-panel]")) {
     panel.hidden = panel.dataset.panel !== name;
   }
-  if (name === "approval" && activateApproval) guard(() => window.MetadataUI?.enter())();
-  if (name === "catalogue") guard(() => window.CatalogueUI?.enter())();
-  if (name === "album") guard(() => window.AlbumUI?.enter())();
-  if (name === "language") guard(() => window.LanguageUI?.enter())();
-  if (name === "graph") guard(() => window.GraphUI?.enter())();
+  if (!skipEnter) {
+    if (name === "approval" && activateApproval) guard(() => window.MetadataUI?.enter())();
+    if (name === "catalogue") guard(() => window.CatalogueUI?.enter())();
+    if (name === "album") guard(() => window.AlbumUI?.enter())();
+    if (name === "language") guard(() => window.LanguageUI?.enter())();
+    if (name === "graph") guard(() => window.GraphUI?.enter())();
+  }
   if (name === "maintenance") guard(() => refreshMaintenance(false))();
   if (name === "activity" && state.followLogs) requestAnimationFrame(followLatestEvents);
+  if (!noHistory) {
+    if (name === "music") routeWrite(musicRoute());
+    else routeWrite(pageRoute(name));
+  }
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => setTab(tab.dataset.tab));
+  tab.addEventListener("click", event => {
+    // Native hrefs still allow open-in-new-tab and keyboard/copy-link actions.
+    if (event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.altKey ||
+        (event?.button != null && event.button !== 0)) return;
+    event?.preventDefault?.();
+    setTab(tab.dataset.tab);
+  });
+}
+for(const link of document.querySelectorAll(".help-sidebar a[href]")){
+  link.addEventListener("click",event=>{
+    if(event?.metaKey || event?.ctrlKey || event?.shiftKey) return;
+    event?.preventDefault?.();
+    const topic=link.dataset.topic || link.getAttribute("href").split("#help-")[1];
+    const target=document.getElementById("help-"+topic);
+    if(!target)return;
+    routeWrite(pageRoute("help",{topic}));
+    target.scrollIntoView?.({block:"start"});
+  });
 }
 
 // A new key deliberately ignores the old silently populated "music-user" value.
@@ -364,6 +424,7 @@ function changeUser() {
   $("exportFailures").href = `/api/failures/export?user_id=${encodeURIComponent(state.user)}`;
   for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
   if (state.user) rememberLibrary(state.user);
+  updateNavigationLinks();
   state.page = 1;
   state.after = 0;
   state.generation += 1;
@@ -385,7 +446,15 @@ function changeUser() {
     return;
   }
   guard(() => refreshAll(false))();
-  if (state.tab === "approval") guard(() => window.MetadataUI?.enter())();
+  if (!bootstrappingRoute && !restoringRoute) {
+    routeWrite(pageRoute(state.tab));
+    if (state.tab === "album") guard(() => window.AlbumUI?.enter())();
+    if (state.tab === "catalogue") guard(() => window.CatalogueUI?.enter())();
+    if (state.tab === "graph") guard(() => window.GraphUI?.enter())();
+    if (state.tab === "language") guard(() => window.LanguageUI?.enter())();
+  }
+  if (state.tab === "approval" && !restoringRoute)
+    guard(() => window.MetadataUI?.enter())();
 }
 
 $("user").addEventListener("change", changeUser);
@@ -415,9 +484,18 @@ $("ingestForm").addEventListener("submit", guard(async event => {
 
 function renderSource(source) {
   const row = node("div", null, "source");
+  row.dataset.sourceId = source.id;
   const content = node("div", null, "source-details");
+  const sourceLink = node("a", source.title, "source-permalink");
+  sourceLink.href = Router?.build(pageRoute("sources", {sourceId:source.id})) || "/";
+  sourceLink.addEventListener("click", event => {
+    if (event?.metaKey || event?.ctrlKey || event?.shiftKey) return;
+    event?.preventDefault?.();
+    routeWrite(pageRoute("sources", {sourceId:source.id}));
+    focusSource(source.id, true);
+  });
   content.append(
-    node("strong", source.title),
+    sourceLink,
     node("p", source.url, "url"),
     badge(source.status),
     node("small", source.monitored ? " Monitored" : " One-off"),
@@ -488,6 +566,21 @@ function renderSource(source) {
   return row;
 }
 
+function focusSource(sourceId, scroll = false) {
+  let found = false;
+  for (const row of document.querySelectorAll(".source[data-source-id]")) {
+    const selected = Boolean(sourceId && row.dataset.sourceId === sourceId);
+    row.classList.toggle("is-target", selected);
+    if (selected) {
+      found = true;
+      if (row.closest?.("#archivedSources"))
+        $("archivedSourcesPanel").open = true;
+      if (scroll) row.scrollIntoView?.({block:"center", behavior:"auto"});
+    }
+  }
+  return found;
+}
+
 async function loadSources(generation, background = false) {
   const current = beginRequest("sources");
   const sources = await api(`/api/sources?user_id=${encodeURIComponent(state.user)}`, null, null, current);
@@ -511,6 +604,11 @@ async function loadSources(generation, background = false) {
     background,
     empty: () => node("p", "No sources yet.", "empty"),
   });
+  if (state.tab === "sources") {
+    const route = Router?.read();
+    if (route?.tab === "sources" && route.user === state.user && route.sourceId)
+      focusSource(route.sourceId, false);
+  }
 }
 
 async function action(track, mode, extra = {}) {
@@ -730,7 +828,7 @@ $("replacementForm").addEventListener("submit", async event => {
 async function showDetails(track) {
   const current = beginRequest("details");
   const details = await api(`/api/tracks/${encodeURIComponent(track.id)}?user_id=${encodeURIComponent(state.user)}`, null, null, current);
-  if (!current()) return;
+  if (!current() || state.tab !== "music") return;
   $("detailsTitle").textContent = details.matched_title || details.title;
   const body = $("detailsBody");
   const grid = node("div", null, "details-grid");
@@ -819,17 +917,21 @@ async function showDetails(track) {
   grid.append(tags, technical, origins, assets, history);
   window.AlbumUI?.mountTrack(details, grid, api, () => refreshTracks(false));
   body.replaceChildren(grid);
-  $("detailsDialog").showModal();
+  if (!$("detailsDialog").open) $("detailsDialog").showModal();
+  routeWrite(musicRoute({trackId:track.id}));
 }
 
 // Let Catalogue's rare album-mismatch review open the exact local song,
 // even when it is not on the currently visible Music page.
 window.openAlbumTrackDetails = async trackId => {
   if(!state.user||!trackId)return;
-  setTab("music");
+  setTab("music", true, {noHistory:true});
   await showDetails({id:trackId});
 };
 $("closeDetails").addEventListener("click", () => $("detailsDialog").close());
+$("detailsDialog").addEventListener("close", () => {
+  if (state.tab === "music") routeWrite(musicRoute(), true);
+});
 
 function renderTrack(track) {
   state.tracks.set(track.id, track);
@@ -1052,6 +1154,7 @@ async function refreshTracks(background = true) {
   state.maxPage = Math.max(1, Math.ceil(data.total / data.limit));
   if (state.page > state.maxPage) {
     state.page = state.maxPage;
+    routeWrite(musicRoute(), true);
     return refreshTracks(background);
   }
   for (const suffix of ["", "Bottom"]) {
@@ -1384,18 +1487,21 @@ $("search").addEventListener("input", () => {
   searchTimer = setTimeout(() => {
     state.page = 1;
     state.generation += 1;
+    routeWrite(musicRoute(), true);
     guard(() => refreshTracks(false))();
   }, 300);
 });
 $("filter").addEventListener("change", () => {
   state.page = 1;
   state.generation += 1;
+  routeWrite(musicRoute());
   guard(() => refreshTracks(false))();
 });
 for (const suffix of ["", "Bottom"]) {
   for (const [direction, delta] of [["prev", -1], ["next", 1]]) {
     $(direction + suffix).addEventListener("click", guard(async () => {
       state.page = Math.max(1, Math.min(state.maxPage, state.page + delta));
+      routeWrite(musicRoute());
       await refreshTracks(false);
       if (suffix) $("musicResults").scrollIntoView?.({block: "start"});
     }));
@@ -1501,19 +1607,3 @@ async function pollSlow() {
   catch (error) { activity.slowPoll.fail(token); throw error; }
 }
 
-(async () => {
-  try {
-    const params = new URLSearchParams(window.location.search);
-    const connected = params.get("spotify") === "connected";
-    await loadUsers(rememberedLibrary());
-    if (connected) {
-      setTab("sources"); notice("Spotify connected. Import a source or browse your playlists.");
-      window.history.replaceState(null, "", window.location.pathname);
-    }
-  } catch (error) {
-    notice(error?.message || String(error), true);
-  } finally {
-    setInterval(() => guard(pollFast)(), FAST_POLL_MS);
-    setInterval(() => guard(pollSlow)(), SLOW_POLL_MS);
-  }
-})();

@@ -24,6 +24,12 @@ window.GraphUI = (() => {
   };
   let databasePromise = null;
   const kinds = () => [...document.querySelectorAll(".graph-type:checked")].map(input => input.value);
+  const graphRoute = (kind,entityId) => ({
+    user:state.user, tab:"graph",kind,entityId,
+    view:get("graphView").value, focus:get("graphFocus").value.trim(),
+    q:get("graphQuery").value.trim(), kinds:kinds().join(","),
+    limit:Number(get("graphLimit").value)||180
+  });
   const status = (message, error=false) => {
     get("graphStatus").textContent = message;
     get("graphStatus").className = error ? "error-text" : "hint";
@@ -386,8 +392,10 @@ window.GraphUI = (() => {
     });
     if (!ui.active) network.pauseAnimation();
   }
-  function select(node) {
+  function select(node, updateUrl=true) {
     ui.selected=node;get("graphNodeSelect").value=node.id;
+    if(updateUrl && state.tab==="graph")
+      window.IngestorRouter?.write(graphRoute(node.kind,node.id.slice(node.kind.length+1)));
     const box=get("graphDetails");box.replaceChildren();
     const heading=document.createElement("h3");heading.textContent=node.label;
     const info=document.createElement("p");
@@ -397,7 +405,7 @@ window.GraphUI = (() => {
     const inspect=document.createElement("button");
     inspect.type="button";inspect.className="secondary";inspect.textContent="Select in Catalogue";
     inspect.addEventListener("click",()=>{
-      setTab("catalogue");
+      setTab("catalogue",true,{noHistory:true});
       window.CatalogueUI?.openEntity(node.kind,node.id.slice(node.kind.length+1))
         .catch(error=>status(error.message,true));
     });
@@ -422,7 +430,7 @@ window.GraphUI = (() => {
       (result.truncated?" Display limited: change the node count or focus to explore more.":"")+
       (restored?" Restored from this browser; Explore refreshes the catalogue.":""));
   }
-  async function refresh() {
+  async function refresh(suppressUrl=false) {
     if (!state.user) return;
     const user=state.user,serial=++ui.serial;
     if (!kinds().length) {
@@ -431,7 +439,10 @@ window.GraphUI = (() => {
       ui.selected=null;ui.renderer?.graphData({nodes:[],links:[]});
       get("graphEmpty").hidden=false;get("graphDetails").replaceChildren();
       populatePicker([]);updateTotal(ui.graph);status("Enable at least one node type.");
-      saveControls(user);saveSoon();return;
+      saveControls(user);saveSoon();
+      if(!suppressUrl && state.tab==="graph")
+        window.IngestorRouter?.write(graphRoute(),{replace:true});
+      return;
     }
     const requestLimit=clampLimit();
     const params=new URLSearchParams({user_id:user,view:get("graphView").value,
@@ -443,6 +454,8 @@ window.GraphUI = (() => {
       const result=await api("/api/catalogue/graph?"+params);
       if (serial!==ui.serial || user!==state.user) return;
       ui.user=user;ui.graph=result;ui.selected=null;ui.hovered=null;
+      if(!suppressUrl && state.tab==="graph")
+        window.IngestorRouter?.write(graphRoute(),{replace:true});
       get("graphDetails").replaceChildren();
       updateTotal(result);
       draw(result);
@@ -469,6 +482,31 @@ window.GraphUI = (() => {
     updateTotal(saved.graph);
     draw(saved.graph,saved);
     report(saved.graph,true);
+  }
+  async function openRoute(route) {
+    if (!state.user || state.tab!=="graph") return;
+    const hasLocation = route.entityId || route.focus || route.q || route.view || route.kinds || route.limit;
+    if(!hasLocation) return enter();
+    const user=state.user;
+    ui.active=true;
+    restoreControls(readLocal(storageKey(SETTINGS_KEY,user)));
+    get("graphView").value=route.view||"downloaded";
+    get("graphFocus").value=route.entityId||route.focus||"";
+    get("graphQuery").value=route.q||"";
+    if(route.kinds){
+      const visible=new Set(route.kinds.split(","));
+      for(const checkbox of document.querySelectorAll(".graph-type"))
+        checkbox.checked=visible.has(checkbox.value);
+    }
+    if(route.limit)get("graphLimit").value=String(route.limit);
+    await refresh(true);
+    if(route.kind&&route.entityId && ui.graph?.nodes) {
+      const key=route.kind+":"+route.entityId;
+      const node=ui.renderer?.graphData().nodes.find(entry=>entry.id===key) ||
+        ui.graph.nodes.find(entry=>entry.id===key);
+      if(node)select(node,false);
+      else status("The linked graph node has not been cached in this neighborhood.");
+    }
   }
   function prepareSearch() {
     get("graphLimit").disabled=false;
@@ -525,7 +563,7 @@ window.GraphUI = (() => {
   window.addEventListener("resize",resize);
   window.addEventListener("pagehide",saveNow);
   return {
-    enter,leave:()=>{saveNow();ui.active=false;ui.renderer?.pauseAnimation();},
+    enter,openRoute,leave:()=>{saveNow();ui.active=false;ui.renderer?.pauseAnimation();},
     refresh,reset
   };
 })();
