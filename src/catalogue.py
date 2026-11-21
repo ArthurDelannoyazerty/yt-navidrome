@@ -407,8 +407,10 @@ class Catalogue:
                 ).fetchone()
                 if cached and cached["checked_at"] >= threshold:
                     continue
-                new += bool(self._queue_scope(con, "release", rid, "lookup",
-                                              priority=10 if rid in focused else 120))
+                new += bool(self._queue_scope(
+                    con, "release", rid, "lookup",
+                    force=True,  # missing/stale tracklist marker overrides a stale scope completion
+                    priority=10 if rid in focused else 120))
         return {"known": len(ids), "new_requests": new}
 
     def index_recordings(self, recording_ids):

@@ -1504,3 +1504,28 @@ def test_catalogue_contradictions_are_verified_limited_and_per_user(db, environm
                               params={"user_id": "admin"})
         assert response.status_code == 200
         assert response.json()["total"] == 0
+
+
+def test_album_prefetch_repairs_old_completed_scope_without_tracklist_marker(db, environment):
+    from album_clusters import AlbumClusters
+    cat, albums = setup_catalogue(db)
+    clusters=AlbumClusters(albums)
+    clusters.init()
+    tid,_,_=add_audio_track(db,environment,RECORDING_1)
+    with cat.db() as con:
+        con.execute("DELETE FROM fetched_releases WHERE release_id=?", (RELEASE_A,))
+        con.execute("""INSERT INTO scopes(scope_key,kind,entity_id,section,state,cursor,
+                     total,requested_at,last_complete_at,retry_after,priority)
+                     VALUES (?,?,?,'lookup','COMPLETE',1,1,?,?,0,100)
+                     ON CONFLICT(scope_key) DO UPDATE SET state='COMPLETE',
+                        last_complete_at=excluded.last_complete_at""",
+                    ("release:"+RELEASE_A+":lookup","release",RELEASE_A,
+                     utcnow(),utcnow()))
+    clusters.list("admin",include_assigned=True,focus_id=tid)
+    with cat.db() as con:
+        scope=con.execute(
+            "SELECT state,priority FROM scopes WHERE scope_key=?",
+            ("release:"+RELEASE_A+":lookup",),
+        ).fetchone()
+    assert scope["state"]=="PENDING"
+    assert scope["priority"]==10
