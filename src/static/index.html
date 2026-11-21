@@ -33,11 +33,11 @@
 <nav class="tabs" aria-label="Application sections">
   <a class="tab active" data-tab="music" href="/">Music</a>
   <a class="tab" data-tab="approval" href="/">Approval</a>
-  <a class="tab" data-tab="catalogue" href="/">Catalogue</a>
   <a class="tab" data-tab="album" href="/">Album</a>
-  <a class="tab" data-tab="language" href="/">Language</a>
-  <a class="tab" data-tab="graph" href="/">Graph</a>
   <a class="tab" data-tab="sources" href="/">Sources</a>
+  <a class="tab" data-tab="language" href="/">Language</a>
+  <a class="tab" data-tab="catalogue" href="/">Catalogue</a>
+  <a class="tab" data-tab="graph" href="/">Graph</a>
   <a class="tab" data-tab="activity" href="/">Activity</a>
   <a class="tab" data-tab="maintenance" href="/">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></a>
   <a class="tab" data-tab="help" href="/">Help</a>
@@ -622,11 +622,11 @@
         <strong>Navigate help</strong>
         <a href="#help-music">Music</a>
         <a href="#help-approval">Approval</a>
-        <a href="#help-catalogue">Catalogue</a>
         <a href="#help-album">Album</a>
-        <a href="#help-language">Language</a>
-        <a href="#help-graph">Graph</a>
         <a href="#help-sources">Sources</a>
+        <a href="#help-language">Language</a>
+        <a href="#help-catalogue">Catalogue</a>
+        <a href="#help-graph">Graph</a>
         <a href="#help-activity">Activity</a>
         <a href="#help-maintenance">Maintenance</a>
         <a href="#help-help">Help</a>
@@ -692,21 +692,21 @@
             <p>Use <strong>Review metadata</strong> to find the right artist and recording, or <strong>Original source metadata</strong> to undo a wrong name. If unrelated uploads were combined, separate the incorrect source URL from Sources &amp; details. A protected currently-playing URL may need to be replaced before separating it.</p>
           </details>
         </section>
-        <section id="help-catalogue" class="help-topic" aria-labelledby="help-catalogue-title">
-          <h3 id="help-catalogue-title">Catalogue</h3>
-          <p>Explore the shared public MusicBrainz cache: artists, recordings, album families, specific release editions and compositions. Cached entries are not necessarily downloaded.</p>
-          <p><strong>Cache synchronization</strong> also displays Approval metadata prefetch progress, the queue and cooldown, cached data size and overall Catalogue database size. Expand <strong>Failed searches and metadata requests</strong> to inspect disabled jobs and retry each for three more low-priority attempts. Use <strong>Clean unused cache</strong> to preview removing obsolete searches while retaining metadata for already approved music and recordings still awaiting approval. Music and Catalogue graph entities are never deleted.</p>
-          <p><strong>Search cache</strong> uses saved metadata; <strong>Search MusicBrainz</strong> requests new data. <strong>Only items linked to my library</strong> filters by confirmed MusicBrainz IDs and their cached links, not similar names.</p>
-          <p><strong>Index downloaded recordings</strong> synchronizes recording and credited-artist metadata in the background. It is metadata-only: it never edits or downloads audio. Use <strong>Refresh progress</strong> for the shared queue; its totals can grow as more relationships are discovered.</p>
-          <p><strong>Album family cache</strong> shows completed, queued, deferred, and running release-group discovery and release-tracklist tasks. This is a growing queue: newly discovered editions increase the total. Album changes still require verified exact MusicBrainz recording IDs.</p>
-          <p><strong>Album organization</strong> has moved to the dedicated Album tab. Catalogue is for exploring and synchronizing MusicBrainz metadata.</p>
-        </section>
         <section id="help-album" class="help-topic" aria-labelledby="help-album-title">
           <h3 id="help-album-title">Album</h3>
           <p>Album groups downloaded recordings into MusicBrainz release-group workspaces. Compilations and featured artists never merge unrelated families. A recording may appear in more than one family. Already-assigned recordings remain visible; they are not preselected unless you enable <strong>Preselect already-assigned recordings</strong>, but you can always manually check an eligible local recording. Search a song to find its album families.</p>
           <p>Three columns stay on the same screen on desktop: clusters, editions sorted by exact recording coverage, and the complete official tracklist of the selected edition. Green means local, orange means local but in another album, red means no exact local MusicBrainz recording, a separate candidate state suggests a same-title local recording with another recording ID, gray means album locked, and purple/blue mean other local recordings in the cluster but absent from the edition. Green and orange songs are checked by default; red, gray and cluster-only songs are unchecked and unavailable. The compact legend is below the music panel.</p>
           <p>MusicBrainz release tracklists are prefetched automatically in the durable local catalogue, prioritizing the selected family. A possible local recording with another MusicBrainz recording ID appears directly in its official track row with a checkbox. Checking it explicitly selects that official position and will update its recording ID together with album metadata after confirmation. For local songs without a suggested position, choose an official position from the dropdown in Other local music. <strong>Select all</strong> checks every eligible local song with an identified official position (including alternative IDs); it skips locked songs and unavailable official tracks. The <strong>Green tracks only</strong> filter hides other colors without changing selection. <strong>Validate Album</strong> previews old and new recording IDs. The reversible job preserves existing song title, artist, audio path and source links, and Undo restores the original tags and MBID. Playlist membership is unchanged.</p>
           <p>On the Music tab, open the track's <strong>Album / lock</strong> entry to manually search and review a different album for that one recording, or lock its album against automatic and manual reassignment until explicitly unlocked. The Artwork editor remains responsible for covers.</p>
+        </section>
+        <section id="help-sources" class="help-topic" aria-labelledby="help-sources-title">
+          <h3 id="help-sources-title">Sources</h3>
+          <p>Add a YouTube video or playlist, or a public Spotify playlist. Monitoring a playlist imports later additions. Spotify provides song metadata, not downloadable audio; the app finds a matching YouTube source and uses the same Approval process.</p>
+          <p>Open source details to inspect origins, playlist memberships, disabled URLs and source history. A disabled download URL stays blocked until explicitly re-enabled; existing audio is retained.</p>
+          <details class="help-detail"><summary>Optional Spotify connection and private playlists</summary>
+            <p>Public Spotify playlists do not require an account connection. To connect supported account playlists, configure <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code>, then restart. Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code>.</p>
+            <p>Use HTTPS, or an explicit loopback IP for local development. Spotify development-mode rules and playlist ownership can limit which playlists are accessible. This is read-only access and does not modify Spotify.</p>
+          </details>
         </section>
         <section id="help-language" class="help-topic" aria-labelledby="help-language-title">
           <h3 id="help-language-title">Language</h3>
@@ -723,19 +723,19 @@
           <p><strong>Reverse an accepted change:</strong> when the importer has a verified pre-change Opus backup and the track has not been edited since, the row's <strong>Change</strong> button becomes a light-red <strong>Reverse</strong> button. Reverse restores the exact previous audio tags, including the earlier display names and the language-policy marker, without changing recording IDs or audio paths. The restoration runs as a background job; details appear in Activity. If the backup is missing, ambiguous or the file was edited, reversal is unavailable.</p>
           <p><strong>Important:</strong> “Safe for review” never means that every title needs changing. A track with unchanged English names may need only original-name tags, or no update at all. Navidrome may not display custom ORIGINAL* tags without configuration.</p>
         </section>
+        <section id="help-catalogue" class="help-topic" aria-labelledby="help-catalogue-title">
+          <h3 id="help-catalogue-title">Catalogue</h3>
+          <p>Explore the shared public MusicBrainz cache: artists, recordings, album families, specific release editions and compositions. Cached entries are not necessarily downloaded.</p>
+          <p><strong>Cache synchronization</strong> also displays Approval metadata prefetch progress, the queue and cooldown, cached data size and overall Catalogue database size. Expand <strong>Failed searches and metadata requests</strong> to inspect disabled jobs and retry each for three more low-priority attempts. Use <strong>Clean unused cache</strong> to preview removing obsolete searches while retaining metadata for already approved music and recordings still awaiting approval. Music and Catalogue graph entities are never deleted.</p>
+          <p><strong>Search cache</strong> uses saved metadata; <strong>Search MusicBrainz</strong> requests new data. <strong>Only items linked to my library</strong> filters by confirmed MusicBrainz IDs and their cached links, not similar names.</p>
+          <p><strong>Index downloaded recordings</strong> synchronizes recording and credited-artist metadata in the background. It is metadata-only: it never edits or downloads audio. Use <strong>Refresh progress</strong> for the shared queue; its totals can grow as more relationships are discovered.</p>
+          <p><strong>Album family cache</strong> shows completed, queued, deferred, and running release-group discovery and release-tracklist tasks. This is a growing queue: newly discovered editions increase the total. Album changes still require verified exact MusicBrainz recording IDs.</p>
+          <p><strong>Album organization</strong> has moved to the dedicated Album tab. Catalogue is for exploring and synchronizing MusicBrainz metadata.</p>
+        </section>
         <section id="help-graph" class="help-topic" aria-labelledby="help-graph-title">
           <h3 id="help-graph-title">Graph</h3>
           <p>Visualize artist, recording, release, album-family and work relationships. <strong>Downloaded library</strong> starts with confirmed local recording IDs; <strong>Entire cached catalogue</strong> may include music you do not own.</p>
           <p>Filter node types, search names or focus on an exact MusicBrainz ID. Choose 180, 400 or 800 nodes per bounded request. Free physics lets connected nodes move naturally; Soft layers gently arrange them by graph distance rather than fixing each entity type in one column. Scroll over the canvas to zoom, drag to pan or reposition nodes, and use the node picker for keyboard access. Graph browsing never changes local files or identities.</p>
-        </section>
-        <section id="help-sources" class="help-topic" aria-labelledby="help-sources-title">
-          <h3 id="help-sources-title">Sources</h3>
-          <p>Add a YouTube video or playlist, or a public Spotify playlist. Monitoring a playlist imports later additions. Spotify provides song metadata, not downloadable audio; the app finds a matching YouTube source and uses the same Approval process.</p>
-          <p>Open source details to inspect origins, playlist memberships, disabled URLs and source history. A disabled download URL stays blocked until explicitly re-enabled; existing audio is retained.</p>
-          <details class="help-detail"><summary>Optional Spotify connection and private playlists</summary>
-            <p>Public Spotify playlists do not require an account connection. To connect supported account playlists, configure <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code>, then restart. Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code>.</p>
-            <p>Use HTTPS, or an explicit loopback IP for local development. Spotify development-mode rules and playlist ownership can limit which playlists are accessible. This is read-only access and does not modify Spotify.</p>
-          </details>
         </section>
         <section id="help-activity" class="help-topic" aria-labelledby="help-activity-title">
           <h3 id="help-activity-title">Activity</h3>
