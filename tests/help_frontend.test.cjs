@@ -157,7 +157,7 @@ test("Help covers the recording-first workflow, safe album overrides and recover
     language:["Optional finishing step","three tracks","Navidrome","Reverse"],
     catalogue:["Cache synchronization","Album family cache","Index downloaded recordings"],
     graph:["shareable URL","never changes local files"],
-    activity:["Follow latest","failed","retry"],
+    activity:["Follow latest","failure","retry"],
     maintenance:["Verify library","current items needing attention","Navidrome"],
     help:["Approval → Album","browser Back / Forward","authentication"]
   };
