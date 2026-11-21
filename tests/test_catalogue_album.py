@@ -1547,6 +1547,6 @@ def test_album_edition_knows_downloaded_songs_excluded_by_unassigned_only_scope(
     assert assigned not in by_recording[RECORDING_2]["local_track_ids"]
     assert by_recording[RECORDING_2]["local_copies"] == [
         {"id": assigned, "current_release_id": RELEASE_A,
-         "locked": False, "display_title": "Track Recording 2"}
+         "locked": False, "display_title": "Track"}
     ]
     assert unassigned in by_recording[RECORDING_4]["local_track_ids"]
