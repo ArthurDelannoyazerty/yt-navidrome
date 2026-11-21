@@ -180,9 +180,14 @@ async function fixtureServer(t, data) {
           const plans = payload.decisions.map(d => {
             const track = (data.albumTracks || []).find(t=>t.id===d.track_id);
             const target = (data.albumEditions || []).find(r=>r.id===d.release_id);
+            const oldRecording=track.mbid||track.recording_id;
+            const targetRecording=d.target_recording_id||oldRecording;
             const status = d.action==="not_found" ? "MARK_NOT_FOUND" :
-              d.release_id===track.current_release_id ? "UNCHANGED" : "COMPATIBLE";
-            return {...d, title:track.title, old_release_id:track.current_release_id,
+              d.release_id===track.current_release_id && targetRecording===oldRecording
+                ? "UNCHANGED" : "COMPATIBLE";
+            return {...d, title:track.title||track.display_title,
+              recording_id:oldRecording,target_recording_id:targetRecording,
+              old_release_id:track.current_release_id,
               target_album:target?.name||"No Album Found",status};
           });
           result = {preview_token:"plan-test-token",items:plans,
@@ -1511,5 +1516,74 @@ test("real browser: Music details allows a manual album choice and persistent al
   await chrome.evaluate("document.querySelector('.album-track-change-preview button').click()");
   await chrome.until("document.querySelector('.album-track-editor').textContent.includes('album change queued')");
   assert.equal(data.writes.filter(w=>w.path==="/api/albums/plan-apply").length,1);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: Select all includes alternate recording IDs and manual position overrides", {timeout:60000}, async t => {
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures(), release="66666666-6666-4666-8666-666666666666";
+  const oldA="11111111-1111-4111-8111-111111111111";
+  const oldC="33333333-3333-4333-8333-333333333333";
+  const oldD="44444444-4444-4444-8444-444444444444";
+  const officialA="aaaa1111-1111-4111-8111-111111111111";
+  const officialB="bbbb2222-2222-4222-8222-222222222222";
+  const officialC="cccc3333-3333-4333-8333-333333333333";
+  const officialD="dddd4444-4444-4444-8444-444444444444";
+  const make=(id,mbid,title,assigned=null)=>({
+    id,mbid,recording_id:mbid,display_title:title,original_title:title,
+    english_title:title,current_release_id:assigned,locked:false,not_found:false,
+    in_scope:!assigned,
+  });
+  data.albumTracks=[
+    make("first",oldA,"Business as Usual"),
+    make("second",officialB,"Black Velvet"),
+    make("third",oldC,"Boss La Rosh","55555555-5555-4555-8555-555555555555"),
+    make("fourth",oldD,"Untitled local track"),
+  ];
+  data.albumFamilies=[{id:"family",title:"IM25",ids:["first","second","third","fourth"]}];
+  const song=(id,title,pos,alternatives=[])=>({
+    recording_id:id,title,original_title:title,english_title:title,medium:1,position:pos,
+    possible_local_matches:alternatives.map(t=>({id:t})),local_track_ids:[],
+  });
+  data.albumEditions=[{
+    id:release,name:"IM25",original_title:"IM25",english_title:"IM25",
+    complete:true,track_count:4,status:"Official",linked_track_count:4,matched_count:1,
+    matched_track_ids:["second"],tracks:[
+      song(officialA,"Business as Usual",1,["first"]),
+      song(officialB,"Black Velvet",2),
+      song(officialC,"Boss La Rosh",3,["third"]),
+      song(officialD,"Serious Times",4),
+    ]
+  }];
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]')");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=album]').click()");
+  await chrome.until("document.querySelectorAll('.album-edition-choice').length===1");
+  await chrome.evaluate("document.querySelector('.album-edition-choice').click()");
+  await chrome.until("document.querySelectorAll('.album-music-candidate').length===2");
+  assert.equal(await chrome.evaluate("document.querySelector('.album-recording-alternatives')"),null);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-candidate input:checked').length"),0);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-red input:enabled').length"),0);
+  await chrome.evaluate("document.querySelector('#albumSelectAll').click()");
+  await chrome.until("document.querySelector('#albumSelectedTitle').textContent.includes('3 selected')");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-candidate input:checked').length"),2);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-green input:checked').length"),1);
+  assert.match(await chrome.evaluate("document.querySelector('#albumMusicContext').textContent"),/2 local candidates/);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-purple,.album-music-blue').length"),1);
+  await chrome.evaluate("document.querySelector('.album-track-manual-target select').value='"+officialD+"';document.querySelector('.album-track-manual-target select').dispatchEvent(new Event('change',{bubbles:true}))");
+  await chrome.until("document.querySelector('#albumSelectedTitle').textContent.includes('4 selected')");
+  await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
+  await chrome.until("document.querySelector('#albumValidateDialog').open");
+  assert.match(await chrome.evaluate("document.querySelector('#albumValidateSummary').textContent"),/3 recording ID changes/);
+  const request=data.writes.filter(x=>x.path==="/api/albums/plan-preview").at(-1).body;
+  const byId=new Map(request.decisions.map(x=>[x.track_id,x.target_recording_id]));
+  assert.equal(byId.get("first"),officialA);
+  assert.equal(byId.get("second"),officialB);
+  assert.equal(byId.get("third"),officialC);
+  assert.equal(byId.get("fourth"),officialD);
+  assert.match(await chrome.evaluate("document.querySelector('#albumValidateDetails').textContent"),/Recording MBID/);
   assert.deepEqual(chrome.errors,[]);
 });
