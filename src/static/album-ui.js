@@ -68,7 +68,7 @@ window.AlbumUI = (() => {
     const edition=activeEdition(),work=ui.detail&&clusterWork();
     const rows=ui.detail?.tracks||[];
     if(!edition?.complete)return {selected:[],moves:[],newTracks:[],unchanged:[],hiddenOrange:0};
-    const selected=rows.filter(t=>t.in_scope&&edition.matched_track_ids.includes(t.id)&&chosenForEdition(t,edition));
+    const selected=rows.filter(t=>t.in_scope!==false&&edition.matched_track_ids.includes(t.id)&&chosenForEdition(t,edition));
     const moves=selected.filter(t=>t.current_release_id && t.current_release_id!==edition.id);
     const newTracks=selected.filter(t=>!t.current_release_id);
     const unchanged=selected.filter(t=>t.current_release_id===edition.id);
