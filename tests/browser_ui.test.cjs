@@ -659,8 +659,11 @@ test("real browser: Help lazily renders the workflow with local Pele and fits na
   assert.equal(await chrome.evaluate("Array.from(document.scripts).filter(script=>script.src.includes('pele-flowchart.js')).every(script=>new URL(script.src).origin===location.origin)"),true);
   assert.equal(await chrome.evaluate("document.querySelectorAll('.transition-table tbody tr').length>=7"),true);
   assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.getAttribute('href'))"),
-    ["#help-music","#help-approval","#help-catalogue","#help-album","#help-language","#help-graph",
-     "#help-sources","#help-activity","#help-maintenance","#help-help"]);
+    ["/libraries/admin/help/music","/libraries/admin/help/approval",
+     "/libraries/admin/help/catalogue","/libraries/admin/help/album",
+     "/libraries/admin/help/language","/libraries/admin/help/graph",
+     "/libraries/admin/help/sources","/libraries/admin/help/activity",
+     "/libraries/admin/help/maintenance","/libraries/admin/help/help"]);
   assert.equal(await chrome.evaluate("document.querySelectorAll('.help-topic').length"),10);
   await chrome.evaluate("document.querySelector('.workflow-diagram').scrollIntoView({block:'start'})");
   await chrome.screenshot("help-workflow-desktop");
@@ -1309,11 +1312,12 @@ test("real browser: Graph canvas loads with strict CSP, switches layers and supp
   await chrome.evaluate("document.querySelector('#graphZoomReset').click()");
   await chrome.screenshot("graph-physics-canvas");
   const count=data.reads.filter(path=>path.startsWith("/api/catalogue/graph?")).length;
+  // The selected graph node is now a direct URL. A reload refetches that
+  // exact neighborhood instead of silently displaying an unrelated snapshot.
+  assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/graph/artist/b");
   await chrome.send("Page.reload",{ignoreCache:true});
-  await chrome.until("document.querySelector('#user').value==='admin'");
-  await chrome.evaluate("document.querySelector('[data-tab=graph]').click()");
-  await chrome.until("document.querySelector('#graphStatus').textContent.includes('Restored from this browser')");
-  assert.equal(data.reads.filter(path=>path.startsWith("/api/catalogue/graph?")).length,count);
+  await chrome.until("document.querySelector('#user').value==='admin' && document.querySelector('#graphStatus').textContent.includes('3 nodes')");
+  assert.equal(data.reads.filter(path=>path.startsWith("/api/catalogue/graph?")).length,count+1);
   assert.equal(await chrome.evaluate("document.querySelector('#graphRepelForce').value"),"11");
   assert.equal(await chrome.evaluate("document.querySelector('#graphLayout').value"),"layers");
   assert.equal(await chrome.evaluate("document.querySelector('#graphNodeSelect').value"),"artist:b");
