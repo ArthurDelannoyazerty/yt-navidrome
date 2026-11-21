@@ -1,7 +1,8 @@
 /* Load only the flowchart renderer, and only when the Help tab is opened. */
 "use strict";
 (() => {
-  // Native anchor navigation; no script dependency for moving between topics.
+  // Keep the active Help topic consistent with clicks, bookmarked URLs and
+  // browser history; the application router owns scrolling.
   const links = document.querySelectorAll?.(".help-sidebar a") || [];
   const selectTopic = target => {
     for (const link of links) {
