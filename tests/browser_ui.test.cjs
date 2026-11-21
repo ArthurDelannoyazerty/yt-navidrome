@@ -717,7 +717,7 @@ test("real browser: the collapsed music picker is bounded, searchable and indepe
   assert.equal(await chrome.evaluate("document.querySelector('#filter').value"),"ALL");
   await chrome.evaluate("document.querySelector('[data-tab=music]').click(); document.querySelector('#tracks tr button').focus()");
   await chrome.evaluate("Array.from(document.querySelectorAll('#tracks tr button')).find(b=>b.textContent==='Review metadata').click()");
-  await chrome.until("state.tab==='approval' && !document.querySelector('#approvalWorkspace').hidden");
+  await chrome.until("typeof state!=='undefined' && state.tab==='approval' && document.querySelector('#approvalWorkspace') && !document.querySelector('#approvalWorkspace').hidden");
   assert.equal(await chrome.evaluate("!!document.querySelector('dialog[open]')"),false);
   assert.deepEqual(chrome.errors,[]);
 });
@@ -1656,7 +1656,7 @@ test("real browser: direct catalogue, approval, source and music links restore c
   assert.equal(await chrome.evaluate("state.tab"),"sources");
   assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/sources/"+source);
   await chrome.send("Page.navigate",{url:origin+"/libraries/admin/music/track-1"});
-  await chrome.until("document.querySelector('#detailsDialog').open");
+  await chrome.until("document.querySelector('#detailsDialog')?.open");
   assert.equal(await chrome.evaluate("state.tab"),"music");
   assert.equal(await chrome.evaluate("location.pathname"),"/libraries/admin/music/track-1");
   await chrome.evaluate("document.querySelector('#closeDetails').click()");
