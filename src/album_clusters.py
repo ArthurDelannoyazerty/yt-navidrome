@@ -99,7 +99,7 @@ class AlbumClusters:
                    FROM tracks t
                    LEFT JOIN album_track_locks l ON l.track_id=t.id AND l.user_id=t.user_id
                    LEFT JOIN album_review_decisions d ON d.track_id=t.id AND d.user_id=t.user_id
-                   WHERE t.user_id=? AND t.mbid IS NOT NULL AND t.mbid<>''
+                   WHERE t.user_id=?
                      AND t.current_asset_id IS NOT NULL
                      AND t.health='AVAILABLE' """ + where +
                 " ORDER BY t.id",
@@ -108,7 +108,7 @@ class AlbumClusters:
         return [dict(row) for row in rows]
 
     def _catalogue_data(self, tracks):
-        rec_ids = sorted({row["mbid"] for row in tracks})
+        rec_ids = sorted({row["mbid"] for row in tracks if row["mbid"]})
         release_rec = defaultdict(set)
         verified_rec = defaultdict(set)
         current_releases = {row["release_id"] for row in tracks if row["release_id"]}
@@ -197,7 +197,8 @@ class AlbumClusters:
         by_recording = defaultdict(list)
         by_id = {row["id"]: row for row in tracks}
         for row in tracks:
-            by_recording[row["mbid"]].append(row["id"])
+            if row["mbid"]:
+                by_recording[row["mbid"]].append(row["id"])
         parent = {row["id"]: row["id"] for row in tracks}
 
         def root(tid):
@@ -250,7 +251,7 @@ class AlbumClusters:
             component[root(row["id"])].append(row)
         records = {}
         for anchor, members in component.items():
-            records[anchor] = {row["mbid"] for row in members}
+            records[anchor] = {row["mbid"] for row in members if row["mbid"]}
         release_by_component = defaultdict(dict)
         for rid, rec_ids in release_rec.items():
             roots = {root(tid) for rec in rec_ids for tid in by_recording.get(rec, ())}
@@ -270,17 +271,17 @@ class AlbumClusters:
             row["display_title"] = row["matched_title"] or english or original
             row["current_release_id"] = row.pop("release_id")
             row["locked"] = bool(row.pop("album_locked"))
-            row["not_found"] = (
-                row.pop("reviewed_recording_id") == row["mbid"] and
-                row["current_release_id"] is None
-            )
+            row["unidentified"] = not bool(row["mbid"])
+            reviewed = row.pop("reviewed_recording_id")
+            row["not_found"] = bool(row["mbid"]) and reviewed == row["mbid"] and row["current_release_id"] is None
         summaries = []
         details = {}
         for anchor, members in component.items():
             member_ids = {row["id"] for row in members}
             rec_map = defaultdict(set)
             for row in members:
-                rec_map[row["mbid"]].add(row["id"])
+                if row["mbid"]:
+                    rec_map[row["mbid"]].add(row["id"])
             editions = []
             for rid, rec_ids in release_by_component.get(anchor, {}).items():
                 album = self._album(

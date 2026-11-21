@@ -84,7 +84,7 @@ window.AlbumUI = (() => {
       : "Cluster reviewed. Confirm the pending changes, then continue to the next cluster.";
     $("albumPlanPreview").disabled=work.decisions.size===0;
     $("albumPlanClear").disabled=!work.decisions.size&&!work.resolved.size;
-    $("albumMarkUnfound").disabled=!left.some(t=>!t.current_release_id);
+    $("albumMarkUnfound").disabled=!left.some(t=>!t.current_release_id&&t.mbid);
     $("albumKeepAssigned").disabled=!left.some(t=>t.current_release_id);
   }
   function renderNavigation(){
@@ -234,7 +234,7 @@ window.AlbumUI = (() => {
       card.append(bilingual(track));
       const meta=element("div",null,"album-music-info");
       const proposal=work.decisions.get(track.id);
-      const stateText=track.locked?"Album locked":
+      const stateText=track.unidentified?"Recording ID missing — identify in Music tab":track.locked?"Album locked":
         proposal?.action==="not_found"?"No Album Found planned":
         proposal?.action==="release"?"Planned: "+(releases().find(a=>a.id===proposal.release_id)?.name||"selected edition"):
         track.not_found?"Previously reviewed: No Album Found":
@@ -243,6 +243,15 @@ window.AlbumUI = (() => {
       const current=track.current_release_id?"Current album: "+track.current_release_id.slice(0,8)+"…":"No current album";
       meta.append(element("small",current),element("small",stateText));
       card.append(meta);
+      if(track.unidentified){
+        card.append(button("Identify recording in Music",()=>{
+          const tab=document.querySelector('[data-tab="music"]');
+          tab?.click();
+          const search=document.getElementById("search");
+          if(search){search.value=track.display_title||track.title||"";
+            search.dispatchEvent(new Event("input"));}
+        }));
+      }
       if(track.not_found){
         card.append(button("Search again",async()=>{
           const user=ui.user;
@@ -263,7 +272,7 @@ window.AlbumUI = (() => {
     if(!ui.detail)return;
     const work=clusterWork();
     for(const track of remaining()){
-      if(action==="not_found" && !track.current_release_id){
+      if(action==="not_found" && !track.current_release_id && track.mbid){
         work.decisions.set(track.id,{action:"not_found"});work.resolved.add(track.id);
       }else if(action==="keep" && track.current_release_id){
         work.resolved.add(track.id);
