@@ -105,7 +105,7 @@ window.AlbumUI = (() => {
       info.append(element("small",cluster.track_count+" tracks · "+cluster.candidate_count+" editions"+
         (cluster.locked?" · "+cluster.locked+" locked":"")));
       row.append(info);list.append(row);
-      if(cluster.id===ui.focus)row.scrollIntoView?.({block:"nearest"});
+      if(cluster.id===ui.focus)list.scrollTop=Math.max(0,index*65-100);
     }
   }
   async function loadClusters(focus=ui.focus){
@@ -521,7 +521,16 @@ window.AlbumUI = (() => {
           preview.append(element("p","This recording already has that edition.","hint"));
         }else preview.append(element("p",
           "This edition cannot be used. The recording must appear in its complete cached tracklist, and the current audio must be idle.","hint"));
-      }catch(error){message.textContent=error.message;}
+      }catch(error){
+        message.textContent=error.message;
+        if(/tracklist|release.*cached/i.test(error.message||"")){
+          preview.append(button("Sync full MusicBrainz tracklist",async()=>{
+            await apiRequest("/api/catalogue/sync",{
+              user_id:user,kind:"release",id:release_id,sections:["lookup"]});
+            message.textContent="Tracklist lookup queued. Check this edition again after synchronization.";
+          }));
+        }
+      }
     }
     async function search(remote=false){
       const q=input.value.trim();
@@ -553,6 +562,11 @@ window.AlbumUI = (() => {
 
   $("albumRefresh").addEventListener("click",()=>loadClusters(ui.focus));
   $("albumIncludeAssigned").addEventListener("change",()=>{
+    const hasDraft=[...ui.work.values()].some(w=>w.decisions.size);
+    if(hasDraft&&!confirm("Changing the scope rebuilds clusters and discards unfinished album drafts. Continue?")){
+      $("albumIncludeAssigned").checked=!$("albumIncludeAssigned").checked;
+      return;
+    }
     ui.work.clear();ui.focus=null;ui.detail=null;void loadClusters(null);
   });
   $("albumClusterSearch").addEventListener("input",()=>{
