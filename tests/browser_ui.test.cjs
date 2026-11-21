@@ -1,4 +1,5 @@
 "use strict";
+const {TABS, helpPaths} = require("./navigation_contract.cjs");
 // Run the real, dependency-free UI in the Chrome shipped on GitHub's runner.
 // API fixtures keep layout and interaction regressions independent of providers.
 const test = require("node:test");
@@ -594,7 +595,7 @@ test("real browser: Approval is a two-column page with automatic search and one-
   await chrome.evaluate("document.querySelector('#user').value='admin'; document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
   assert.equal(await chrome.evaluate("!!document.querySelector('.review-toolbar,#startReview,#approveSelected,#metadataDialog')"),false);
-  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),["music","approval","catalogue","album","language","graph","sources","activity","maintenance","help"]);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.tab')).map(x=>x.dataset.tab)"),TABS);
   await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
   await chrome.until("!document.querySelector('#approvalWorkspace').hidden && document.querySelectorAll('#mbResults tbody tr').length===1");
   assert.equal(await chrome.evaluate("document.querySelector('#approvalFilter').value"),"NEEDS_APPROVAL");
@@ -658,12 +659,7 @@ test("real browser: Help lazily renders the workflow with local Pele and fits na
   assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#workflowDiagram .pele-node[data-id=queued] rect')).fill"),"rgb(247, 248, 246)");
   assert.equal(await chrome.evaluate("Array.from(document.scripts).filter(script=>script.src.includes('pele-flowchart.js')).every(script=>new URL(script.src).origin===location.origin)"),true);
   assert.equal(await chrome.evaluate("document.querySelectorAll('.transition-table tbody tr').length>=7"),true);
-  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.getAttribute('href'))"),
-    ["/libraries/admin/help/music","/libraries/admin/help/approval",
-     "/libraries/admin/help/catalogue","/libraries/admin/help/album",
-     "/libraries/admin/help/language","/libraries/admin/help/graph",
-     "/libraries/admin/help/sources","/libraries/admin/help/activity",
-     "/libraries/admin/help/maintenance","/libraries/admin/help/help"]);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.getAttribute('href'))"),helpPaths("admin"));
   assert.equal(await chrome.evaluate("document.querySelectorAll('.help-topic').length"),10);
   await chrome.evaluate("document.querySelector('.workflow-diagram').scrollIntoView({block:'start'})");
   await chrome.screenshot("help-workflow-desktop");
@@ -1683,5 +1679,29 @@ test("real browser: tab links are real URLs with Back/Forward and library isolat
   assert.equal(await chrome.evaluate("document.querySelector('[data-tab=album]').getAttribute('href')"),"/libraries/guest/albums");
   await chrome.evaluate("history.back()");
   await chrome.until("location.pathname==='/libraries/admin/music' && document.querySelector('#user').value==='admin'");
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: Help topics keep canonical URLs, selection and scroll through history", {timeout:60000}, async t=>{
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures();
+  const origin=await fixtureServer(t,data),base="/libraries/admin/help";
+  await chrome.send("Page.navigate",{url:origin+base+"/album"});
+  await chrome.until("document.querySelector('#user')?.value==='admin' && document.querySelector('.help-sidebar a[data-topic=album]')?.getAttribute('aria-current')==='location'");
+  assert.equal(await chrome.evaluate("location.pathname"),base+"/album");
+  assert.equal(await chrome.evaluate("document.querySelector('#help-album').closest('[data-panel]').hidden"),false);
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-sidebar [aria-current=location]').length"),1);
+  await chrome.evaluate("document.querySelector('.help-sidebar a[data-topic=approval]').click()");
+  await chrome.until("location.pathname.endsWith('/help/approval') && document.querySelector('.help-sidebar a[data-topic=approval]')?.getAttribute('aria-current')==='location'");
+  await chrome.evaluate("history.back()");
+  await chrome.until("location.pathname.endsWith('/help/album') && document.querySelector('.help-sidebar a[data-topic=album]')?.getAttribute('aria-current')==='location'");
+  await chrome.send("Page.reload",{ignoreCache:true});
+  await chrome.until("document.querySelector('#user')?.value==='admin' && document.querySelector('.help-sidebar a[data-topic=album]')?.getAttribute('aria-current')==='location'");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-sidebar [aria-current=location]').length"),1);
+  assert.deepEqual(await chrome.evaluate("Array.from(document.querySelectorAll('.help-sidebar a')).map(a=>a.dataset.topic)"),TABS);
+  await chrome.send("Page.navigate",{url:origin+base+"/not-a-topic"});
+  await chrome.until("document.querySelector('#user')?.value==='admin' && document.querySelector('#notice')?.textContent.includes('Unknown Help topic')");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.help-sidebar [aria-current=location]').length"),1);
   assert.deepEqual(chrome.errors,[]);
 });

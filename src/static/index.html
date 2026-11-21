@@ -33,11 +33,11 @@
 <nav class="tabs" aria-label="Application sections">
   <a class="tab active" data-tab="music" href="/">Music</a>
   <a class="tab" data-tab="approval" href="/">Approval</a>
-  <a class="tab" data-tab="catalogue" href="/">Catalogue</a>
   <a class="tab" data-tab="album" href="/">Album</a>
-  <a class="tab" data-tab="language" href="/">Language</a>
-  <a class="tab" data-tab="graph" href="/">Graph</a>
   <a class="tab" data-tab="sources" href="/">Sources</a>
+  <a class="tab" data-tab="language" href="/">Language</a>
+  <a class="tab" data-tab="catalogue" href="/">Catalogue</a>
+  <a class="tab" data-tab="graph" href="/">Graph</a>
   <a class="tab" data-tab="activity" href="/">Activity</a>
   <a class="tab" data-tab="maintenance" href="/">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></a>
   <a class="tab" data-tab="help" href="/">Help</a>
@@ -616,17 +616,17 @@
   </section>
   <section class="panel help-panel" data-panel="help" hidden>
     <div class="panel-heading"><div><span class="eyebrow">USER GUIDE</span><h2>Help</h2>
-      <p class="hint">Choose a tab on the left. Each section describes the corresponding part of Music Ingestor.</p></div></div>
+      <p class="hint">Start with <strong>Approval</strong> to identify a recording, then use <strong>Album</strong> to choose its edition. Sources imports music; the other sections help you inspect, refine, and maintain it. Choose a topic below for detailed instructions.</p></div></div>
     <div class="help-layout">
       <nav class="help-sidebar" aria-label="Help topics">
         <strong>Navigate help</strong>
         <a href="#help-music">Music</a>
         <a href="#help-approval">Approval</a>
-        <a href="#help-catalogue">Catalogue</a>
         <a href="#help-album">Album</a>
-        <a href="#help-language">Language</a>
-        <a href="#help-graph">Graph</a>
         <a href="#help-sources">Sources</a>
+        <a href="#help-language">Language</a>
+        <a href="#help-catalogue">Catalogue</a>
+        <a href="#help-graph">Graph</a>
         <a href="#help-activity">Activity</a>
         <a href="#help-maintenance">Maintenance</a>
         <a href="#help-help">Help</a>
@@ -635,11 +635,14 @@
         <section id="help-music" class="help-topic" aria-labelledby="help-music-title">
           <h3 id="help-music-title">Music</h3>
           <p>Your library shows locally imported tracks, playback availability, approval state and actions. Choose a library user at the top of the page; each user has separate audio and playlists.</p>
-          <ol class="quick-start" aria-label="Getting started">
-            <li><strong>1. Import</strong><p>Open Sources, add a YouTube or public Spotify playlist and optionally monitor it.</p></li>
-            <li><strong>2. Listen</strong><p>Music is playable in Navidrome after its next library scan, even while a track waits for metadata approval.</p></li>
-            <li><strong>3. Approve</strong><p>Go to Approval to confirm its MusicBrainz identity and metadata.</p></li>
+          <ol class="quick-start" aria-label="Recommended recording and album workflow">
+            <li><strong>1. Import and inspect</strong><p>Add YouTube or Spotify sources in Sources, then check the downloaded songs in Music. You can listen in Navidrome after its library scan even before metadata approval.</p></li>
+            <li><strong>2. Approve the recording</strong><p>In Approval, listen and confirm the right MusicBrainz recording, title, and artist. If you are unsure of the album edition, leave the album unset; you can still approve the recording.</p></li>
+            <li><strong>3. Choose the album</strong><p>In Album, open the release-group family and the specific edition, select eligible local recordings, inspect the preview, and confirm. Do not rely on matching names alone when replacing a recording ID.</p></li>
+            <li><strong>4. Refine, only if needed</strong><p>Use Language for reviewed name changes, Catalogue to index missing MusicBrainz data, Activity to follow jobs, and Maintenance for integrity checks.</p></li>
           </ol>
+          <p><strong>Recording identity first, album edition second.</strong> Album is a separate review step, not a requirement for approving an individual song. Existing, correct song/artist metadata can remain unchanged when assigning an album.</p>
+          <p><strong>Every page has a link:</strong> Music tracks, Approval entries, album families and editions, catalogue entities, sources, graph nodes and Help topics have library-specific URLs. Copy a URL to resume that view; browser Back and Forward work. Unsaved selections and confirmation drafts are not encoded in links.</p>
           <p><strong>Two independent states:</strong> Audio availability and operation progress are different. Playable/AVAILABLE means audio exists; Missing/MISSING means a previously present file is absent. Queued, Running, Deferred, Waiting for approval, Failed, Stopped and Idle describe work states.</p>
           <div class="workflow-guide" role="group" aria-label="Music ingestion workflow">
             <h4>How work progresses</h4>
@@ -679,37 +682,62 @@
         </section>
         <section id="help-approval" class="help-topic" aria-labelledby="help-approval-title">
           <h3 id="help-approval-title">Approval</h3>
+          <p><strong>First metadata step: identify the song, not necessarily its album.</strong> Open a recording from Music or use the Approval queue. Listen to the current audio, compare the source title and artist with Beets suggestions or MusicBrainz search, then select <strong>Use</strong> for the correct recording. Only clicking Use applies a suggestion; highlighting a row does not.</p>
+          <ol>
+            <li><strong>Review recording and artist.</strong> Check the song, version and featured performers. A matching title alone is not proof; compare the audio and duration where available.</li>
+            <li><strong>Approve without an album when uncertain.</strong> A recording-only approval is valid. Do not choose a random release just to complete the approval.</li>
+            <li><strong>Continue in Album.</strong> Once recording identities are confirmed, select the correct release-group family and release edition there. An album change may explicitly replace a recording ID after your review.</li>
+          </ol>
+          <p><strong>Recovery:</strong> A wrong candidate can be corrected by reviewing metadata again or restoring source metadata. Failed or deferred operations can be checked in Activity; a MusicBrainz cooldown delays lookups, not the ability to inspect local audio.</p>
+          <details class="help-detail"><summary>Advanced: background MusicBrainz name cache, progress, and cleanup</summary>
           <p><strong>Cached names and background prefetch:</strong> Beets matches appear immediately; canonical MusicBrainz spellings and verified English aliases are filled from the shared persistent Catalogue cache. A background worker prefetches searches for <em>every</em> recording awaiting approval, including every stored Beets match and all results on each MusicBrainz search page. It also fetches credited artists once by MusicBrainz ID. This work survives restarts, uses the same shared MusicBrainz cooldown as normal searches and never changes music without your approval.</p>
           <p><strong>Progress &amp; storage:</strong> The prefetch panel in Catalogue → Cache synchronization shows cached / discovered tasks, queued / total tasks, retrying items and the approximate saved Approval-cache data size. The physical Catalogue SQLite file also stores unrelated MusicBrainz graph data; its size appears in the detail line. The known total can increase when searches discover more candidates, so progress is not a fixed library-song count. MusicBrainz-wide HTTP 503 cooldowns pause the worker; individual lookup errors do not. Jobs have three normal-priority failed executions, then three back-of-queue executions before being disabled. The expandable failed-requests list has per-item Retry 3 times actions.</p>
           <p><strong>Clean unused cache:</strong> Use the two-step button in Catalogue → Cache synchronization to preview and remove obsolete prefetched search results and jobs. Data for locally approved music, its credited artists, MusicBrainz candidates awaiting approval, and searches associated with pending approvals is retained across all library users. The main Catalogue/Graph database entities, audio files, approvals and local metadata are never deleted. Cleanup reports the logical amount freed; the shared SQLite file may not immediately shrink on disk. Names in a currently open table may be re-fetched if they are no longer associated with pending music.</p>
           <p>If a name is still missing, you can listen, compare the available characters and approve normally; metadata enriches as the background queue completes. A temporary MusicBrainz cooldown delays only background metadata, not Approval controls. Search page size is unchanged.</p>
+          </details>
           <p>Approve one recording at a time. Current audio and its source appear on the left; Beets suggestions, MusicBrainz search and album-edition choices appear on the right.</p>
           <p><strong>Recording aliases versus pseudo-release titles:</strong> Some MusicBrainz recordings have a direct English recording alias. Others, such as a Japanese game soundtrack, have English track titles only on an English <em>pseudo-release</em>. Approval checks the exact recording IDs on those pseudo-release tracklists, shows the English name with a labelled source link, and keeps the original Japanese name on the first line. Pseudo-release titles do not change the recording ID or imply that this pseudo-release should be selected as an actual album.</p>
           <p><strong>Album editions:</strong> Recording-to-release lists are prefetched and stored persistently. Until the background query finishes, the picker says it is checking editions; it will populate automatically when the cache arrives. An empty completed list means MusicBrainz found no editions, not that the lookup is still queued. You can approve a recording without selecting an edition.</p>
           <p><strong>Official MusicBrainz spelling first:</strong> recording titles and artist credits show their exact canonical characters (including Japanese) on the first line and a known English alias or Beets display name just below. This makes it possible to read English while comparing the source video's native characters with MusicBrainz. Beets suggestions load exact-ID official spellings without changing your choice. When a name is unavailable, the interface says so rather than inventing a translation. Selecting <strong>Use</strong> keeps the exact MusicBrainz recording ID. Search relevance is not proof of an audio match.</p>
-          <p>Choose a specific album edition only when you know it is correct. A recording-only approval does not invent an album. You can retain original source tags, manually correct fields, or reject a wrong candidate; manually edited tags are protected from automatic Language updates.</p>
+          <p>Choose a specific album edition here only if you already know it is correct; otherwise defer that decision to Album. A recording-only approval does not invent an album. You can retain original source tags, manually correct fields, or reject a wrong candidate. Manually edited tags are protected from automatic Language updates.</p>
           <details class="help-detail"><summary>Wrong matches and merged recordings</summary>
             <p>Use <strong>Review metadata</strong> to find the right artist and recording, or <strong>Original source metadata</strong> to undo a wrong name. If unrelated uploads were combined, separate the incorrect source URL from Sources &amp; details. A protected currently-playing URL may need to be replaced before separating it.</p>
           </details>
         </section>
-        <section id="help-catalogue" class="help-topic" aria-labelledby="help-catalogue-title">
-          <h3 id="help-catalogue-title">Catalogue</h3>
-          <p>Explore the shared public MusicBrainz cache: artists, recordings, album families, specific release editions and compositions. Cached entries are not necessarily downloaded.</p>
-          <p><strong>Cache synchronization</strong> also displays Approval metadata prefetch progress, the queue and cooldown, cached data size and overall Catalogue database size. Expand <strong>Failed searches and metadata requests</strong> to inspect disabled jobs and retry each for three more low-priority attempts. Use <strong>Clean unused cache</strong> to preview removing obsolete searches while retaining metadata for already approved music and recordings still awaiting approval. Music and Catalogue graph entities are never deleted.</p>
-          <p><strong>Search cache</strong> uses saved metadata; <strong>Search MusicBrainz</strong> requests new data. <strong>Only items linked to my library</strong> filters by confirmed MusicBrainz IDs and their cached links, not similar names.</p>
-          <p><strong>Index downloaded recordings</strong> synchronizes recording and credited-artist metadata in the background. It is metadata-only: it never edits or downloads audio. Use <strong>Refresh progress</strong> for the shared queue; its totals can grow as more relationships are discovered.</p>
-          <p><strong>Album family cache</strong> shows completed, queued, deferred, and running release-group discovery and release-tracklist tasks. This is a growing queue: newly discovered editions increase the total. Album changes still require verified exact MusicBrainz recording IDs.</p>
-          <p><strong>Album organization</strong> has moved to the dedicated Album tab. Catalogue is for exploring and synchronizing MusicBrainz metadata.</p>
-        </section>
         <section id="help-album" class="help-topic" aria-labelledby="help-album-title">
           <h3 id="help-album-title">Album</h3>
-          <p>Album groups downloaded recordings into MusicBrainz release-group workspaces. Compilations and featured artists never merge unrelated families. A recording may appear in more than one family. Already-assigned recordings remain visible; they are not preselected unless you enable <strong>Preselect already-assigned recordings</strong>, but you can always manually check an eligible local recording. Search a song to find its album families.</p>
-          <p>Three columns stay on the same screen on desktop: clusters, editions sorted by exact recording coverage, and the complete official tracklist of the selected edition. Green means local, orange means local but in another album, red means no exact local MusicBrainz recording, a separate candidate state suggests a same-title local recording with another recording ID, gray means album locked, and purple/blue mean other local recordings in the cluster but absent from the edition. Green and orange songs are checked by default; red, gray and cluster-only songs are unchecked and unavailable. The compact legend is below the music panel.</p>
-          <p>MusicBrainz release tracklists are prefetched automatically in the durable local catalogue, prioritizing the selected family. A possible local recording with another MusicBrainz recording ID appears directly in its official track row with a checkbox. Checking it explicitly selects that official position and will update its recording ID together with album metadata after confirmation. For local songs without a suggested position, choose an official position from the dropdown in Other local music. <strong>Select all</strong> checks every eligible local song with an identified official position (including alternative IDs); it skips locked songs and unavailable official tracks. The <strong>Green tracks only</strong> filter hides other colors without changing selection. <strong>Validate Album</strong> previews old and new recording IDs. The reversible job preserves existing song title, artist, audio path and source links, and Undo restores the original tags and MBID. Playlist membership is unchanged.</p>
-          <p>On the Music tab, open the track's <strong>Album / lock</strong> entry to manually search and review a different album for that one recording, or lock its album against automatic and manual reassignment until explicitly unlocked. The Artwork editor remains responsible for covers.</p>
+          <p><strong>Second metadata step: select the correct album edition.</strong> After reviewing recording identities in Approval, use Album to assign a release to one or more downloaded songs. MusicBrainz <em>release groups</em> collect editions of an album; an edition is one specific release and its official tracklist. Compilations and featured-artist credits do not merge unrelated families.</p>
+          <ol>
+            <li><strong>Find the family.</strong> Search a song or choose a release group. Its editions appear together; a recording can be present in more than one family.</li>
+            <li><strong>Choose the edition.</strong> Compare its official track order and the local recordings. The catalogue caches sibling editions and tracklists in the background; wait for the complete tracklist before validating.</li>
+            <li><strong>Select the local songs.</strong> Use individual checkboxes or <strong>Select all</strong> to include eligible local copies matched to official positions. This skips album-locked recordings and tracks with no available local candidate. To place an otherwise unmatched local song, explicitly choose its official track position.</li>
+            <li><strong>Review and apply.</strong> Choose <strong>Validate Album</strong>, inspect the proposed album and any old/new recording-ID changes, and confirm. Work is queued; follow results in Activity, and use Album history to undo an eligible completed change.</li>
+          </ol>
+          <p><strong>Reading the colors:</strong> Green indicates an exact-MBID local song; orange indicates a local song assigned to a different album; candidate means a possible same-title/duration local song with a <em>different</em> recording ID; red means no exact local recording and no identified local candidate; gray is locked; purple or blue indicates a local family song outside this edition (assigned elsewhere or unassigned). A red official song cannot be selected without a local copy. The <strong>Green tracks only</strong> switch changes display, not the current selection.</p>
+          <p><strong>Important for different IDs:</strong> A possible match is not automatically considered the same recording. Checking it explicitly maps your local music to that edition position; applying can change its MusicBrainz recording ID and album tags. Listen and compare the source, duration, track number and version before accepting. <strong>Select all</strong> does not make an uncertain match trustworthy. One official position cannot receive two local recordings, and duplicate owned recording IDs are blocked.</p>
+          <p><strong>Already assigned songs:</strong> All downloaded family recordings stay visible. The checkbox for including assigned music changes <em>automatic preselection</em>; already-assigned songs can still be selected manually. A correct assigned song may need no update. Album locks prevent reassignment until you unlock them.</p>
+          <p><strong>What changes:</strong> Confirmed album actions update the release metadata, and can update an explicitly chosen recording ID. Existing song title, artist, source/origin links, audio path and playlist membership are preserved. The original file tags and recording identity are backed up. Undo is available only while the required backup and file state remain valid; review the result before making subsequent metadata changes.</p>
+          <details class="help-detail"><summary>Missing songs, ambiguous matches, and recovery</summary>
+            <p>If an official track has no local copy (for example, one missing song out of an 11-track album), leave that track unselected. A recording with a different MBID may instead appear as a selectable candidate, but you must verify it yourself. A song appearing in another edition does not prove that its recording ID belongs to the selected edition.</p>
+            <p><strong>No Album Found</strong> is a reversible review marker for an individual local song, not an audio tag. If a release is missing from MusicBrainz cache, allow indexing or search for another edition. If Validate Album reports an incompatible, duplicate, busy, locked or stale track, resolve that condition and review the preview again; no change is made for blocked items.</p>
+            <p>For a single song, Music also provides <strong>Album assignment &amp; lock</strong>. You can explicitly lock an album or review a different edition there. Album changes do not edit cover art; the separate Artwork editor handles it.</p>
+          </details>
+        </section>
+        <section id="help-sources" class="help-topic" aria-labelledby="help-sources-title">
+          <h3 id="help-sources-title">Sources</h3>
+          <p><strong>Import step:</strong> Add a YouTube video or playlist, or a public Spotify playlist. A monitored playlist brings in future additions; one-off imports do not automatically monitor updates. Spotify provides track metadata, not downloadable audio: the importer searches for a suitable YouTube audio source, and you review the result in Approval.</p>
+          <p>After importing, open Music to check what arrived, use Approval to identify the recording, and finish the album edition in Album. A source can have multiple recordings and some recordings can be shared by sources; source membership is not the same as MusicBrainz identity.</p>
+          <p><strong>Source controls:</strong> Use Sync / retry to check for new items; Pause / Resume monitoring changes future checks. Open a source's shareable URL to return to it. A disabled download URL stays blocked until explicitly re-enabled; existing audio is retained.</p>
+          <p><strong>Archive versus permanent removal:</strong> Archiving a source retains imported music. Removing a source <em>and its music</em> is a separate destructive action: exclusive audio may be deleted, while shared tracks stay in other sources. Read both confirmation dialogs and the purge preview; permanent deletion cannot be undone.</p>
+          <p>If the wrong video was selected or two unrelated uploads were combined, inspect the track's origin details in Music. You can stop or disable the incorrect URL and review source separation rather than changing unrelated tracks.</p>
+          <details class="help-detail"><summary>Optional Spotify connection and private playlists</summary>
+            <p>Public Spotify playlists do not require an account connection. To connect supported account playlists, configure <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code>, then restart. Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code>.</p>
+            <p>Use HTTPS, or an explicit loopback IP for local development. Spotify development-mode rules and playlist ownership can limit which playlists are accessible. This is read-only access and does not modify Spotify.</p>
+          </details>
         </section>
         <section id="help-language" class="help-topic" aria-labelledby="help-language-title">
           <h3 id="help-language-title">Language</h3>
+          <p><strong>Optional finishing step:</strong> Use this after Approval and Album if you want to review English display names and preserve the original MusicBrainz spelling. It is not required for successful recording identification or album assignment.</p>
           <p>Use Language to review and optionally update existing approved music. The global policy prefers an English alias for Title, Artist and confirmed Album where MusicBrainz provides one. No English alias means the canonical spelling remains. The original canonical names are kept in the <code>ORIGINALTITLE</code>, <code>ORIGINALARTIST</code> and <code>ORIGINALALBUM</code> Opus tags; their canonical names are not historical first editions.</p>
           <ol>
             <li><strong>Review existing music.</strong> This reads file tags and compares them with the local MusicBrainz cache. It can take time on large libraries but never writes files. Possible name changes, original-tag repairs, no detectable changes and incomplete cache entries are counted separately. The counts are <em>estimates</em>: the worker checks authoritative MusicBrainz data again before applying.</li>
@@ -723,35 +751,40 @@
           <p><strong>Reverse an accepted change:</strong> when the importer has a verified pre-change Opus backup and the track has not been edited since, the row's <strong>Change</strong> button becomes a light-red <strong>Reverse</strong> button. Reverse restores the exact previous audio tags, including the earlier display names and the language-policy marker, without changing recording IDs or audio paths. The restoration runs as a background job; details appear in Activity. If the backup is missing, ambiguous or the file was edited, reversal is unavailable.</p>
           <p><strong>Important:</strong> “Safe for review” never means that every title needs changing. A track with unchanged English names may need only original-name tags, or no update at all. Navidrome may not display custom ORIGINAL* tags without configuration.</p>
         </section>
+        <section id="help-catalogue" class="help-topic" aria-labelledby="help-catalogue-title">
+          <h3 id="help-catalogue-title">Catalogue</h3>
+          <p><strong>MusicBrainz reference and cache, not the album editor.</strong> Use it when Approval or Album cannot yet show a recording, release group, edition or tracklist. Metadata indexing and search are separate from making changes to your music.</p>
+          <p>Explore the shared public MusicBrainz cache: artists, recordings, album families, specific release editions and compositions. Cached entries are not necessarily downloaded.</p>
+          <p><strong>Cache synchronization</strong> also displays Approval metadata prefetch progress, the queue and cooldown, cached data size and overall Catalogue database size. Expand <strong>Failed searches and metadata requests</strong> to inspect disabled jobs and retry each for three more low-priority attempts. Use <strong>Clean unused cache</strong> to preview removing obsolete searches while retaining metadata for already approved music and recordings still awaiting approval. Music and Catalogue graph entities are never deleted.</p>
+          <p><strong>Search cache</strong> uses saved metadata; <strong>Search MusicBrainz</strong> requests new data. <strong>Only items linked to my library</strong> filters by confirmed MusicBrainz IDs and their cached links, not similar names.</p>
+          <p><strong>Index downloaded recordings</strong> synchronizes recording and credited-artist metadata in the background. It is metadata-only: it never edits or downloads audio. Use <strong>Refresh progress</strong> for the shared queue; its totals can grow as more relationships are discovered.</p>
+          <p><strong>Album family cache</strong> shows completed, queued, deferred and running release-group discovery and release-tracklist tasks. This is a growing queue: newly discovered editions increase the total. A tracklist being cached is not a missing album, and a public recording does not mean that its audio is downloaded. Album assignments and explicit recording-ID overrides are reviewed in Album, not automatically inferred by Catalogue.</p>
+          <p><strong>Album organization</strong> has moved to the dedicated Album tab. Catalogue is for exploring and synchronizing MusicBrainz metadata.</p>
+        </section>
         <section id="help-graph" class="help-topic" aria-labelledby="help-graph-title">
           <h3 id="help-graph-title">Graph</h3>
           <p>Visualize artist, recording, release, album-family and work relationships. <strong>Downloaded library</strong> starts with confirmed local recording IDs; <strong>Entire cached catalogue</strong> may include music you do not own.</p>
+          <p>Choose a node to inspect its relationships or open the corresponding MusicBrainz entry in Catalogue. The focused node has a shareable URL. Graph is an exploration tool, not a way to join album families through all credited artists.</p>
           <p>Filter node types, search names or focus on an exact MusicBrainz ID. Choose 180, 400 or 800 nodes per bounded request. Free physics lets connected nodes move naturally; Soft layers gently arrange them by graph distance rather than fixing each entity type in one column. Scroll over the canvas to zoom, drag to pan or reposition nodes, and use the node picker for keyboard access. Graph browsing never changes local files or identities.</p>
-        </section>
-        <section id="help-sources" class="help-topic" aria-labelledby="help-sources-title">
-          <h3 id="help-sources-title">Sources</h3>
-          <p>Add a YouTube video or playlist, or a public Spotify playlist. Monitoring a playlist imports later additions. Spotify provides song metadata, not downloadable audio; the app finds a matching YouTube source and uses the same Approval process.</p>
-          <p>Open source details to inspect origins, playlist memberships, disabled URLs and source history. A disabled download URL stays blocked until explicitly re-enabled; existing audio is retained.</p>
-          <details class="help-detail"><summary>Optional Spotify connection and private playlists</summary>
-            <p>Public Spotify playlists do not require an account connection. To connect supported account playlists, configure <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_REDIRECT_URI</code>, then restart. Register this exact callback: <code id="spotifyRedirect">https://YOUR-INGESTOR-HOST/api/spotify/callback</code>.</p>
-            <p>Use HTTPS, or an explicit loopback IP for local development. Spotify development-mode rules and playlist ownership can limit which playlists are accessible. This is read-only access and does not modify Spotify.</p>
-          </details>
         </section>
         <section id="help-activity" class="help-topic" aria-labelledby="help-activity-title">
           <h3 id="help-activity-title">Activity</h3>
           <p>Activity displays detailed importer, MusicBrainz, Beets, download and maintenance events, including Language review progress and per-track tagging results.</p>
           <p>Disable <strong>Warnings and errors only</strong> to see INFO entries such as successful English tag updates. <strong>Follow latest</strong> keeps the log at its newest entry. Clearing the view does not delete stored server events.</p>
-          <p>Temporary provider errors (for example HTTP 503) may be followed by a successful retry. The operation's final success or failure is what matters.</p>
+          <p>Temporary provider errors (for example HTTP 503) may be followed by a successful retry. The operation's final success or failure is what matters. If an Album or Language update remains pending, check Activity before retrying; the queue may still be completing the first request.</p>
         </section>
         <section id="help-maintenance" class="help-topic" aria-labelledby="help-maintenance-title">
           <h3 id="help-maintenance-title">Maintenance</h3>
           <p>Use <strong>Verify library</strong> to check missing files, track identities, tags and other integrity issues. <strong>Repair eligible tags</strong> preserves audio and confirmed IDs; unexpected asset hashes are excluded.</p>
           <p>Updates and rollbacks for yt-dlp and spotDL affect future operations without replacing running audio files. Read recent Activity errors if a provider or worker operation fails.</p>
-          <p>Navidrome reads file and playlist changes on its next library scan. ReplayGain tags are preserved; enable playback normalization in your player if desired.</p>
+          <p>Navidrome reads file and playlist changes on its next library scan. If a confirmed tag change is not visible there, check the Activity job result and Navidrome scanning before reapplying it. ReplayGain tags are preserved; enable playback normalization in your player if desired.</p>
+          <p>The numeric badge beside Maintenance reflects current items needing attention; it is not a permanent item count. Run verification before repairs and inspect any skipped or unsafe entries individually.</p>
         </section>
         <section id="help-help" class="help-topic" aria-labelledby="help-help-title">
           <h3 id="help-help-title">Help</h3>
-          <p>This page has one section per app tab. Use the topic menu to jump directly to a section. Open the relevant app tab to perform the described action.</p>
+          <p>This page has one section per app tab, in the same order as the main navigation. The recommended metadata sequence is <strong>Approval → Album</strong>, after music has been imported. Use the topic menu to jump directly to a section, then open that app tab to perform the action.</p>
+          <p><strong>Bookmarks and links:</strong> Every Help topic, selected recording, album edition and supported catalogue item has a library-specific URL. Refresh and browser Back / Forward restore the selected view. A bookmark does not save unchecked album plans, confirmation dialogs or pending manual edits.</p>
+          <p><strong>If something is missing:</strong> First verify that the URL selects the intended library. A MusicBrainz candidate can be waiting in Catalogue cache; a missing official album track may simply not be downloaded. For incomplete or failed background jobs, check Activity and the appropriate cache status. No item should be silently reassigned based on similar titles alone.</p>
           <p>Each library user has separate folders and playlists, but selecting a user is not authentication. Keep the administration interface behind an authenticated reverse proxy.</p>
         </section>
       </div>

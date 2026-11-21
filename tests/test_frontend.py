@@ -102,13 +102,14 @@ def test_help_and_bulk_maintenance_have_accessible_dom_targets():
     assert html.index('/static/ui-state.js?v=') < html.index('/static/app.js?v=')
 
 
-def test_approval_is_a_page_between_music_and_sources_with_no_old_toolbar():
+def test_approval_and_album_are_separate_pages_before_sources_with_no_old_toolbar():
     html = (ROOT / "src/static/index.html").read_text()
     js = (ROOT / "src/static/metadata-ui.js").read_text()
     html_ids = set(re.findall(r'\bid="([^"]+)"', html))
     referenced = set(re.findall(r'\$\("([^"]+)"\)', js))
     assert referenced <= html_ids, sorted(referenced - html_ids)
-    assert html.index('data-tab="music"') < html.index('data-tab="approval"') < html.index('data-tab="sources"')
+    assert (html.index('data-tab="music"') < html.index('data-tab="approval"')
+            < html.index('data-tab="album"') < html.index('data-tab="sources"'))
     assert '<section id="approvalPanel"' in html
     assert 'data-panel="approval"' in html
     for removed in ("startReview", "reviewSort", "selectReviewPage", "approveSelected", "metadataDialog", "metadataSaveNext"):

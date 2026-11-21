@@ -1,7 +1,8 @@
 /* Load only the flowchart renderer, and only when the Help tab is opened. */
 "use strict";
 (() => {
-  // Native anchor navigation; no script dependency for moving between topics.
+  // Keep the active Help topic consistent with clicks, bookmarked URLs and
+  // browser history; the application router owns scrolling.
   const links = document.querySelectorAll?.(".help-sidebar a") || [];
   const selectTopic = target => {
     for (const link of links) {
@@ -9,6 +10,19 @@
       else link.removeAttribute("aria-current");
     }
   };
+  const selectTopicById = id => {
+    if (!/^[a-z-]{1,40}$/.test(String(id))) return false;
+    const link = [...links].find(item =>
+      item.dataset?.topic === id ||
+      item.getAttribute("href") === "#help-" + id ||
+      item.getAttribute("href")?.endsWith("/help/" + id));
+    if (!link) return false;
+    selectTopic(link);
+    return true;
+  };
+  // The router restores topic selection on direct loading and Back/Forward.
+  // This only updates the active Help link; scrolling stays with navigation.
+  window.HelpUI = Object.freeze({selectTopic: selectTopicById});
   for (const link of links) link.addEventListener("click", () => selectTopic(link));
   if (links.length) selectTopic(links[0]);
   const panel = document.querySelector('[data-panel="help"]');

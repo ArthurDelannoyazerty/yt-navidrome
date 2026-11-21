@@ -36,8 +36,10 @@ an expandable table of every documented operation transition.
 
 ## Approval page
 
-Approval is a full-width application panel between Music and Sources. It is not
-a dialog. A desktop two-column grid keeps the current track on the left and
+Approval is a full-width application panel immediately after Music and before
+Album; Sources follows Album. Approval identifies a recording (without requiring
+an album choice), and Album separately reviews the release-group edition. It is
+not a dialog. A desktop two-column grid keeps the current track on the left and
 matching controls on the right. Beets suggestions are table rows, the source-tag
 choice is a separate button, and MusicBrainz search is visible and automatic.
 Both result tables place **Use** in the first column and show separate track,

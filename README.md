@@ -185,9 +185,9 @@ not silently delete or repair music.
 
 ## Interface and direct links
 
-The browser interface has ten sections: **Music**, **Approval**, **Catalogue**,
-**Album**, **Language**, **Graph**, **Sources**, **Activity**, **Maintenance**,
-and **Help**. It is a small, framework-free JavaScript application served by
+The browser interface has ten sections, ordered by workflow: **Music**,
+**Approval**, **Album**, **Sources**, **Language**, **Catalogue**, **Graph**,
+**Activity**, **Maintenance**, and **Help**. It is a small, framework-free JavaScript application served by
 FastAPI; all existing media queues, undo flows, provider imports and metadata
 controls remain server-owned.
 
@@ -213,10 +213,18 @@ Direct links to a library do not bypass the authenticated reverse proxy or API
 ownership checks. If the requested library is unavailable, choose a valid library
 rather than silently opening a different user's entries.
 
+**Recommended metadata sequence:** import audio through Sources, inspect it in
+Music, **identify each recording in Approval**, then **select its release-group
+edition in Album**. Approval may finish without an album assignment. Album can
+explicitly remap an approved recording ID after review and confirmation; this
+operation is reversible when the original file/tag backup is still valid. Use
+Language afterward only if display names need review. The Help tab documents
+the full process, missing tracks, cache states, source cleanup and recovery.
+
 The Music screen provides search, server-side pagination, status filters and an
 Ignored music view. Approval keeps its one-recording-at-a-time full-width workflow.
 Sources support one-off links and monitored playlists; Activity follows recent
-events; Maintenance contains integrity and repair tools. Help documents workflows.
+events; Maintenance contains integrity and repair tools.
 
 See [frontend navigation and route contracts](docs/frontend-routing.md) and
 [interface decisions](docs/interface.md) for implementation boundaries.

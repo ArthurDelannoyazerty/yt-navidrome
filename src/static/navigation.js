@@ -52,10 +52,14 @@ async function restoreBrowserRoute(route) {
     await loadSources(state.generation, false);
     if (route.sourceId && !focusSource(route.sourceId, true))
       notice("This source is unavailable in the selected library.", true);
-  } else if (route.tab === "help" && route.topic) {
-    const topic = document.getElementById("help-" + route.topic);
-    if (topic) topic.scrollIntoView?.({block:"start"});
-    else notice("Unknown Help topic.", true);
+  } else if (route.tab === "help") {
+    if (route.topic) {
+      const topic = document.getElementById("help-" + route.topic);
+      if (topic) {
+        window.HelpUI?.selectTopic(route.topic);
+        topic.scrollIntoView?.({block:"start"});
+      } else notice("Unknown Help topic.", true);
+    } else window.HelpUI?.selectTopic("music");
   }
 }
 
