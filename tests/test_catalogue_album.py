@@ -1424,3 +1424,83 @@ def test_cluster_api_is_user_scoped_and_exposes_explicit_lock(db, environment):
             "user_id":"admin","track_id":tid}).json()["locked"] is True
         assert client.post("/api/albums/lock",json={
             "user_id":"admin","track_id":tid,"locked":False}).json()["locked"] is False
+
+
+def test_album_edition_returns_full_official_tracklist_and_cluster_only_music(db, environment):
+    from album_clusters import AlbumClusters
+    cat, albums = setup_catalogue(db)
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    first, _, _ = add_audio_track(db, environment, RECORDING_1)
+    second, _, _ = add_audio_track(db, environment, RECORDING_2)
+    third, _, _ = add_audio_track(db, environment, RECORDING_4)
+    guest, _, _ = add_audio_track(db, environment, RECORDING_4, user="guest")
+    result = clusters.list("admin", include_assigned=True)
+    detail = result["detail"]
+    assert {t["id"] for t in detail["tracks"]} == {first, second, third}
+    edition = clusters.edition("admin", detail["id"], RELEASE_A, include_assigned=True)
+    assert edition["complete"]
+    assert edition["track_count"] == 2
+    assert len(edition["tracks"]) == 2
+    assert {t["recording_id"] for t in edition["tracks"]} == {RECORDING_1, RECORDING_2}
+    assert sorted([tid for item in edition["tracks"] for tid in item["local_track_ids"]]) == sorted([first,second])
+    assert edition["cluster_only"] == [third]
+    assert guest not in str(edition)
+    assert all("original_title" in item and "english_title" in item for item in edition["tracks"])
+
+
+def test_album_cluster_prefetches_missing_tracklists_without_duplicate_queue_entries(db, environment):
+    from album_clusters import AlbumClusters
+    cat, albums = setup_catalogue(db)
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    first, _, _ = add_audio_track(db, environment, RECORDING_1)
+    with cat.db() as con:
+        con.execute("DELETE FROM fetched_releases WHERE release_id=?", (RELEASE_A,))
+        con.execute("DELETE FROM scopes WHERE kind='release' AND entity_id=?", (RELEASE_A,))
+    initial = clusters.list("admin", include_assigned=True, focus_id=first)
+    assert initial["detail"]["id"] == first
+    assert initial["detail"]["cache_progress"]["complete"] < initial["detail"]["cache_progress"]["total"]
+    with cat.db() as con:
+        request = con.execute(
+            "SELECT state,priority FROM scopes WHERE kind='release' AND entity_id=? AND section='lookup'",
+            (RELEASE_A,),
+        ).fetchone()
+        assert request["state"] == "PENDING"
+        assert request["priority"] == 10
+        before = con.execute("SELECT COUNT(*) FROM scopes").fetchone()[0]
+    clusters.list("admin", include_assigned=True, focus_id=first)
+    with cat.db() as con:
+        assert con.execute("SELECT COUNT(*) FROM scopes").fetchone()[0] == before
+    assert not clusters.edition("admin",first,RELEASE_A,include_assigned=True)["complete"]
+
+
+def test_catalogue_contradictions_are_verified_limited_and_per_user(db, environment):
+    from album_clusters import AlbumClusters
+    cat, albums = setup_catalogue(db)
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    right, _, _ = add_audio_track(db, environment, RECORDING_1)
+    wrong, _, _ = add_audio_track(db, environment, RECORDING_4)
+    db.execute("UPDATE tracks SET release_id=? WHERE id=?", (RELEASE_A, wrong))
+    guest, _, _ = add_audio_track(db, environment, RECORDING_4, user="guest")
+    db.execute("UPDATE tracks SET release_id=? WHERE id=?", (RELEASE_A, guest))
+    result = clusters.contradictions("admin")
+    assert result["total"] == 1
+    assert result["items"][0]["track_id"] == wrong
+    assert result["items"][0]["release_id"] == RELEASE_A
+    assert right not in str(result)
+    assert guest not in str(result)
+    assert clusters.contradictions("admin", offset=1, limit=1)["items"] == []
+    assert clusters.contradictions("guest")["total"] == 1
+    with cat.db() as con:
+        con.execute("DELETE FROM fetched_releases WHERE release_id=?", (RELEASE_A,))
+    assert clusters.contradictions("admin")["total"] == 0, (
+        "An incomplete MusicBrainz release must never yield a contradiction")
+    with TestClient(create_app(db, start_workers=False)) as client:
+        assert client.get("/api/albums/contradictions",
+                          params={"user_id": "nonexistent"}).status_code == 400
+        response = client.get("/api/albums/contradictions",
+                              params={"user_id": "admin"})
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
