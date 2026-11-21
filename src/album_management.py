@@ -89,8 +89,10 @@ class AlbumManager:
                 return []
             rows = con.execute(f"""SELECT t.id,t.user_id,t.mbid,t.release_id,t.updated_at,
                 t.current_asset_id,t.file_path,t.health,t.operation_state,
-                a.path,a.sha256,a.state AS asset_state
+                a.path,a.sha256,a.state AS asset_state,
+                CASE WHEN locks.track_id IS NULL THEN 0 ELSE 1 END AS album_locked
                 FROM tracks t LEFT JOIN assets a ON a.id=t.current_asset_id
+                LEFT JOIN album_track_locks locks ON locks.track_id=t.id AND locks.user_id=t.user_id
                 WHERE t.user_id=? AND t.id IN ({marks})""", (user_id, *track_ids)).fetchall()
             if len(rows) != len(track_ids):
                 raise LookupError("Some selected music does not belong to this library")
@@ -118,10 +120,12 @@ class AlbumManager:
                AND user_id=? AND state IN ('PENDING','RUNNING') AND
                (target=? OR target IN (SELECT id FROM album_changes WHERE track_id=?)) LIMIT 1""",
                (user_id, track["id"], track["id"]))
-            if not tags:
-                status = "INCOMPATIBLE"
-            elif track["release_id"] == release_id:
+            if track["release_id"] == release_id:
                 status = "UNCHANGED"
+            elif track["album_locked"]:
+                status = "LOCKED"
+            elif not tags:
+                status = "INCOMPATIBLE"
             elif not track["mbid"] or track["health"] != "AVAILABLE" or track["operation_state"] != "IDLE" or existing_job:
                 status = "BUSY"
             elif not stable:
@@ -165,6 +169,11 @@ class AlbumManager:
                     t.operation_state,t.health,a.sha256,a.path FROM tracks t
                     JOIN assets a ON a.id=t.current_asset_id AND a.state='CURRENT'
                     WHERE t.user_id=? AND t.id=?""", (user_id, item["track_id"])).fetchone()
+                if con.execute(
+                    "SELECT 1 FROM album_track_locks WHERE user_id=? AND track_id=?",
+                    (user_id,item["track_id"]),
+                ).fetchone():
+                    raise ValueError("Album locked: unlock this recording before reassignment")
                 if not row or row["updated_at"] != item["revision"] or row["release_id"] != item["old_release_id"] or row["current_asset_id"] != item["asset_id"] or row["sha256"] != item["sha256"] or row["path"] != item["path"] or row["operation_state"] != "IDLE" or row["health"] != "AVAILABLE":
                     raise ValueError("A track or its audio changed since preview; review again")
                 if con.execute("""SELECT 1 FROM jobs j LEFT JOIN album_changes c ON j.kind='album' AND c.id=j.target
@@ -323,6 +332,11 @@ class AlbumManager:
         self._require_completed_migration()
         change = self._load_change(change_id, user_id)
         destination, backup, staged = self._paths(change)
+        if self.store.one(
+            "SELECT 1 FROM album_track_locks WHERE user_id=? AND track_id=?",
+            (user_id,change["track_id"]),
+        ):
+            raise ValueError("Album locked: unlock this recording before changing its album")
         digest = sha256_file(destination) if destination.is_file() else None
         if mode == "apply":
             if change["status"] == "DONE":

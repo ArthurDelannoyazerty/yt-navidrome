@@ -110,6 +110,7 @@ class AlbumClusters:
     def _catalogue_data(self, tracks):
         rec_ids = sorted({row["mbid"] for row in tracks})
         release_rec = defaultdict(set)
+        verified_rec = defaultdict(set)
         current_releases = {row["release_id"] for row in tracks if row["release_id"]}
         release_data = {}
         recording_data = {}
@@ -125,6 +126,7 @@ class AlbumClusters:
                         WHERE recording_id IN ({qs})""", chunk,
                 ):
                     release_rec[row["release_id"]].add(row["recording_id"])
+                    verified_rec[row["release_id"]].add(row["recording_id"])
                 # Even before a full release tracklist is fetched, a recording's
                 # explicit 'appears-on' edge can connect its release family.
                 for row in con.execute(
@@ -168,7 +170,7 @@ class AlbumClusters:
                 group = data.get("release-group") or {}
                 if isinstance(group, dict) and group.get("id"):
                     groups.setdefault(rid, group["id"])
-        return release_rec, release_data, recording_data, groups, fetched, track_counts
+        return release_rec, verified_rec, release_data, recording_data, groups, fetched, track_counts
 
     @staticmethod
     def _album(rid, ids, data, group, complete, track_count, track_map):
@@ -190,7 +192,7 @@ class AlbumClusters:
         tracks = self._local_tracks(user_id, include_assigned)
         if not tracks:
             return {"clusters": [], "total_clusters": 0, "total_tracks": 0, "detail": None}
-        (release_rec, release_data, recording_data,
+        (release_rec, verified_rec, release_data, recording_data,
          groups, fetched, track_counts) = self._catalogue_data(tracks)
         by_recording = defaultdict(list)
         by_id = {row["id"]: row for row in tracks}
@@ -282,10 +284,14 @@ class AlbumClusters:
             editions = []
             for rid, rec_ids in release_by_component.get(anchor, {}).items():
                 album = self._album(
-                    rid, rec_ids, release_data.get(rid) or {},
+                    rid, verified_rec.get(rid, set()) & records[anchor] if rid in fetched else rec_ids,
+                    release_data.get(rid) or {},
                     groups.get(rid), rid in fetched, track_counts.get(rid, 0),
                     rec_map,
                 )
+                album["linked_track_count"] = len({
+                    tid for rec in rec_ids for tid in rec_map.get(rec, ())
+                })
                 editions.append(album)
             editions.sort(key=lambda a:(
                 -a["matched_count"], -a["linked_track_count"],

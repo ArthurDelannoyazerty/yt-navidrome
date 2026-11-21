@@ -128,6 +128,7 @@ def create_app(store=None, start_workers=True):
             catalogue.init()
             albums.init()
             app.state.album_workspace.init()
+            app.state.album_clusters.init()
             prefetch.init()
             pipeline.lifecycle = SERVICE.send(pipeline.lifecycle, "migrated")
             handler = EventHandler(store)

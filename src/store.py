@@ -1368,6 +1368,18 @@ class Store:
                     raise ValueError("Metadata editing requires an available audio file")
             elif mode not in {"delete", "delete_ignore", "delete_ignore_urls", "comment", "ingest", "resume", "replace_source"}:
                 raise ValueError("Unsupported track action")
+            # The album lock is a server-side guard, not only a disabled UI
+            # button. Operations capable of rewriting the album or recording
+            # identity need an explicit unlock first.
+            if mode in {"retag","restore_source","select_recording","approve",
+                        "ingest","resume","redownload","reprocess","replace_source",
+                        "retry"} and con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='album_track_locks'"
+            ).fetchone() and con.execute(
+                "SELECT 1 FROM album_track_locks WHERE user_id=? AND track_id=?",
+                (user,track_id),
+            ).fetchone():
+                raise ValueError("Album locked: unlock this recording before changing its metadata")
             if payload.get("mode") in {"ingest", "replace_source"}:
                 # A retry with a retained candidate can finish review even when
                 # future network use of its URL has been disabled.
