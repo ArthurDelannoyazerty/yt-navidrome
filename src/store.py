@@ -86,6 +86,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_track_per_recording
  ON tracks(user_id, mbid) WHERE mbid IS NOT NULL AND mbid <> '';
 CREATE INDEX IF NOT EXISTS track_user_health
  ON tracks(user_id, health, operation_state);
+CREATE TABLE IF NOT EXISTS album_track_locks (
+ user_id TEXT NOT NULL REFERENCES users(name),
+ track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+ locked_at TEXT NOT NULL,
+ PRIMARY KEY(user_id,track_id)
+);
 
 CREATE TABLE IF NOT EXISTS track_origins (
  id TEXT PRIMARY KEY,
@@ -2125,9 +2131,12 @@ class Store:
         total = self.one(f"SELECT COUNT(*) AS n FROM tracks t WHERE {where}", params)["n"]
         rows = self.rows(
             f"""SELECT t.*,a.sha256,a.size_bytes,a.mtime_ns,a.downloader_name,a.downloader_version,
-                       a.source_url AS asset_source_url,o.provider AS current_provider,o.url AS current_url
+                       a.source_url AS asset_source_url,o.provider AS current_provider,o.url AS current_url,
+                       CASE WHEN al.track_id IS NULL THEN 0 ELSE 1 END AS album_locked
                 FROM tracks t LEFT JOIN assets a ON a.id=t.current_asset_id
-                LEFT JOIN track_origins o ON o.id=t.current_origin_id WHERE {where}
+                LEFT JOIN track_origins o ON o.id=t.current_origin_id
+                LEFT JOIN album_track_locks al ON al.track_id=t.id AND al.user_id=t.user_id
+                WHERE {where}
                 ORDER BY t.updated_at DESC,t.id LIMIT ? OFFSET ?""", (*params, limit, (page - 1) * limit),
         )
         # Page-batched associations avoid four new database connections per row

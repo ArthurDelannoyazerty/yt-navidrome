@@ -191,7 +191,7 @@ window.AlbumUI = (() => {
     if(!album.complete){
       try{
         await api("/api/catalogue/sync",{user_id:ui.user,kind:"release",id:album.id,sections:["lookup"]});
-        notice("Release lookup queued. Refresh clusters after MusicBrainz synchronization.","false","albumReleaseStatus");
+        notice("Release lookup queued. Refresh clusters after MusicBrainz synchronization.",false,"albumReleaseStatus");
       }catch(error){notice(error.message,true,"albumReleaseStatus");}
       return;
     }
@@ -309,7 +309,7 @@ window.AlbumUI = (() => {
       $("albumPlanConfirm").hidden=!result.can_apply&&!result.can_mark;
       notice(result.can_apply+" album updates and "+result.can_mark+
         " No Album Found reviews are eligible. "+
-        (result.items.length-result.can_apply-result.can_mark)+" unchanged or blocked.","false","albumPlanStatus");
+        (result.items.length-result.can_apply-result.can_mark)+" unchanged or blocked.",false,"albumPlanStatus");
       $("albumPlanResults").scrollIntoView?.({block:"nearest"});
     }catch(error){if(active(user,serial))notice(error.message,true,"albumPlanStatus");}
   }
