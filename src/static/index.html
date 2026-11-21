@@ -296,79 +296,98 @@
 
   <section class="panel album-panel" data-panel="album" id="albumPanel" hidden>
     <div class="panel-heading">
-      <div><span class="eyebrow">ORGANIZE YOUR MUSIC</span><h2>Album</h2>
-        <p class="hint">Compare exact MusicBrainz recording IDs against release editions. Draft assignments here; audio tags change only after reviewing and confirming a plan.</p>
+      <div><span class="eyebrow">MUSICBRAINZ</span><h2>Album clusters</h2>
+        <p class="hint">Review connected album families across your library. Albums are ordered by exact MusicBrainz recording coverage; higher coverage does not guarantee the correct edition.</p>
+      </div>
+      <button id="albumRefresh" type="button" class="secondary">Refresh clusters</button>
+    </div>
+    <div class="album-cluster-toolbar">
+      <label class="check"><input type="checkbox" id="albumIncludeAssigned"> Include recordings already assigned to an album (entire library)</label>
+      <label class="control-field album-cluster-search">Filter by music title
+        <input type="search" id="albumClusterSearch" placeholder="Find a song's complete cluster" maxlength="100"></label>
+      <div class="album-cluster-pagination" aria-label="Cluster navigation">
+        <button id="albumPrev" type="button" class="secondary">Previous</button>
+        <output id="albumClusterPosition" aria-live="polite">0 / 0</output>
+        <button id="albumNext" type="button" class="secondary">Next</button>
       </div>
     </div>
-    <div class="album-workspace">
-      <section class="album-workspace-card" aria-labelledby="albumMusicTitle">
-        <div class="album-card-heading"><h3 id="albumMusicTitle">Your recordings</h3>
-          <button type="button" class="secondary" id="albumRefresh">Reload music</button></div>
-        <label class="control-field">Filter by source
-          <select id="albumSource"><option value="">All library sources</option></select></label>
-        <label class="check album-include"><input type="checkbox" id="albumIncludeAssigned"> Include recordings with an existing album (including other sources)</label>
-        <label class="control-field">Filter titles
-          <input type="search" id="albumTrackSearch" placeholder="Search all local recording titles"></label>
-        <div class="row album-card-heading"><p id="albumTrackCount" class="hint" role="status"></p>
-          <button id="albumSelectVisible" class="secondary" type="button">Select visible</button>
-          <button id="albumClearSelection" class="secondary" type="button">Clear selection</button></div>
-        <div id="albumTracks" class="album-track-list" role="group" aria-label="Recordings available for assignment"></div>
-        <button id="albumLoadMore" type="button" class="secondary" hidden>Load more recordings</button>
+    <p class="hint" id="albumClusterStatus" role="status" aria-live="polite">Loading connected recording and album families…</p>
+    <div class="album-cluster-grid" aria-label="Album cluster workspace">
+      <section class="album-cluster-column album-cluster-sidebar" aria-labelledby="albumClustersHeading">
+        <div class="album-column-heading"><h3 id="albumClustersHeading">Clusters</h3>
+          <small id="albumClusterCount"></small></div>
+        <div id="albumClusterList" class="album-column-scroll" role="listbox" aria-label="Music and album clusters"></div>
       </section>
-      <section class="album-workspace-card" aria-labelledby="albumCandidatesTitle">
-        <div class="album-card-heading"><h3 id="albumCandidatesTitle">Candidate albums</h3>
-          <button id="albumRecommend" type="button">Suggest from selected recordings</button></div>
-        <p class="hint">Album families contain individual release editions. Exact membership matters more than matching titles or coverage percentages.</p>
-        <p id="albumRecommendStatus" class="hint" role="status" aria-live="polite"></p>
-        <div id="albumCandidates" class="album-candidate-list"></div>
-        <form id="albumSearchForm" class="album-extra-search">
-          <h4>Find more albums</h4>
-          <p class="hint">For unmatched songs, search more releases or add an exact MusicBrainz release ID. Adding candidates never resets your plan.</p>
-          <label class="control-field">Album title or release UUID
-            <input type="search" id="albumSearchQuery" placeholder="Album name, or MusicBrainz release ID" maxlength="180"></label>
-          <div class="row"><button type="submit" class="secondary">Search cached albums</button>
-            <button type="button" class="secondary" id="albumOnlineSearch">Search MusicBrainz</button></div>
-          <p id="albumSearchStatus" class="hint" role="status"></p>
-          <div id="albumSearchResults" class="album-candidate-list"></div>
-        </form>
+      <section class="album-cluster-column album-edition-column" aria-labelledby="albumEditionsHeading">
+        <div class="album-column-heading"><h3 id="albumEditionsHeading">Album editions</h3>
+          <small id="albumClusterSummary"></small></div>
+        <div id="albumReleaseList" class="album-column-scroll" role="listbox" aria-label="Candidate albums in this cluster"></div>
+        <div class="album-edition-footer">
+          <p id="albumSelectedTitle" class="hint">Choose an edition to inspect the differences.</p>
+          <button id="albumEditionUse" type="button" disabled>Use for remaining matching songs</button>
+          <details id="albumMoreEditions">
+            <summary>Find another album edition</summary>
+            <form id="albumReleaseSearchForm">
+              <label class="control-field">Album title or exact MusicBrainz release ID
+                <input id="albumReleaseSearchInput" type="search" maxlength="180" placeholder="Name or release UUID"></label>
+              <div class="row">
+                <button id="albumReleaseSearchCache" class="secondary" type="submit">Search cache</button>
+                <button id="albumReleaseSearchOnline" class="secondary" type="button">Search MusicBrainz</button>
+              </div>
+            </form>
+            <p class="hint" id="albumReleaseStatus" role="status"></p>
+            <div id="albumReleaseSearchResults" class="album-more-results"></div>
+          </details>
+        </div>
+      </section>
+      <section class="album-cluster-column album-music-column" aria-labelledby="albumMusicHeading">
+        <div class="album-column-heading">
+          <h3 id="albumMusicHeading">Recordings outside this edition</h3>
+          <label class="check album-show-included"><input id="albumShowIncluded" type="checkbox"> Show included songs</label>
+        </div>
+        <p class="hint album-music-context" id="albumMusicContext"></p>
+        <div id="albumMusicList" class="album-column-scroll album-track-cards" aria-label="Matching and excluded recordings"></div>
+        <div class="album-music-footer">
+          <p class="hint" id="albumRemainingStatus" role="status"></p>
+          <div class="row">
+            <button id="albumMarkUnfound" type="button" class="secondary">No Album Found for remaining albumless songs</button>
+            <button id="albumKeepAssigned" type="button" class="secondary">Keep current for remaining assigned songs</button>
+          </div>
+        </div>
       </section>
     </div>
-    <section class="album-workspace-card album-comparison-section" aria-labelledby="albumCompareTitle">
-      <div class="album-card-heading"><h3 id="albumCompareTitle">Compare and assign</h3>
-        <button id="albumCompareRefresh" type="button" class="secondary">Refresh comparison</button>
-        <p id="albumCompareStatus" class="hint" role="status"></p></div>
-      <p class="hint">Compare up to four editions at once. Green checks indicate an exact recording ID. A question mark means its release tracklist has not been fetched. Recordings already assigned elsewhere are never moved automatically.</p>
-      <div id="albumCompared" class="album-compared-chips"></div>
-      <div id="albumMatrix" class="table-scroll album-matrix"></div>
-    </section>
-    <section class="album-workspace-card album-plan-card" aria-labelledby="albumPlanTitle">
-      <div class="album-card-heading"><h3 id="albumPlanTitle">Assignment plan</h3>
-        <button id="albumPlanPreview" type="button">Review changes</button></div>
-      <p id="albumPlanSummary" class="hint" role="status">No changes planned yet. Unresolved recordings remain unchanged.</p>
-      <div id="albumPlanResults"></div>
-      <div class="row album-plan-confirm" id="albumPlanConfirm" hidden>
-        <button type="button" id="albumPlanApply">Confirm and queue eligible changes</button>
-        <button type="button" class="secondary" id="albumPlanCancel">Return to comparison</button>
+    <section class="album-workspace-card album-cluster-plan" aria-labelledby="albumPlanTitle">
+      <div class="album-card-heading"><h3 id="albumPlanTitle">Cluster assignment plan</h3>
+        <div class="row">
+          <button id="albumPlanClear" type="button" class="secondary">Reset this cluster</button>
+          <button id="albumPlanPreview" type="button">Review changes</button>
+        </div></div>
+      <p id="albumPlanSummary" class="hint" role="status">Choose an edition to build an assignment plan. Excluded songs remain for the next edition.</p>
+      <div id="albumPlanResults" class="album-plan-results"></div>
+      <div id="albumPlanConfirm" class="row" hidden>
+        <button id="albumPlanApply" type="button">Confirm album changes</button>
+        <button id="albumPlanCancel" type="button" class="secondary">Back to comparison</button>
       </div>
-      <p id="albumPlanStatus" class="hint" role="status" aria-live="polite"></p>
+      <p id="albumPlanStatus" class="hint" aria-live="polite"></p>
     </section>
     <details class="album-workspace-card album-history" id="albumPreferenceSection">
-      <summary>Advanced: preference for future music from a source</summary>
-      <p class="hint">Optional. Only use this when a source genuinely belongs to one exact album edition. Saving a preference does not reassign existing songs. Automatic use for future compatible recordings is off unless you explicitly enable it.</p>
-      <label class="control-field">Release edition
-        <select id="albumPreferredRelease"><option value="">Choose an edition from the comparison</option></select>
-      </label>
-      <label class="check album-include"><input id="albumPreferAuto" type="checkbox"> Automatically use this exact release for future compatible recordings from the selected source</label>
+      <summary>Advanced: preferences for future recordings from a source</summary>
+      <p class="hint">Optional. Preferences affect future compatible recordings only, not existing assignments. This is not a filter for the cluster workspace.</p>
+      <label class="control-field">Source
+        <select id="albumPreferenceSource"><option value="">Choose a source</option></select></label>
+      <label class="control-field">Exact album edition
+        <select id="albumPreferredRelease"><option value="">Choose an edition</option></select></label>
+      <label class="check"><input type="checkbox" id="albumPreferAuto"> Auto-apply this edition to future compatible songs in this source</label>
       <div class="row">
-        <button type="button" id="albumPreferenceSave" class="secondary">Save source preference</button>
-        <button type="button" id="albumPreferenceClear" class="secondary">Clear preference</button>
+        <button id="albumPreferenceSave" type="button" class="secondary">Save preference</button>
+        <button id="albumPreferenceClear" type="button" class="secondary">Clear preference</button>
       </div>
-      <p id="albumPreferenceStatus" class="hint" role="status" aria-live="polite"></p>
+      <p id="albumPreferenceStatus" class="hint" role="status"></p>
     </details>
     <details class="album-workspace-card album-history" id="albumHistorySection">
       <summary>History and undo</summary>
-      <p class="hint">Completed album tag changes can be individually undone using their original audio backup.</p>
-      <button type="button" class="secondary" id="albumHistoryRefresh">Refresh history</button>
+      <p class="hint">Individual audio-tag changes keep reversible backups. Undo remains available when the track and its backup still match.</p>
+      <button id="albumHistoryRefresh" type="button" class="secondary">Refresh history</button>
       <div id="albumHistory"></div>
     </details>
   </section>
@@ -660,9 +679,10 @@
         </section>
         <section id="help-album" class="help-topic" aria-labelledby="help-album-title">
           <h3 id="help-album-title">Album</h3>
-          <p>Select local recordings, optionally include already-assigned recordings from across the library, and compare MusicBrainz release editions. Release groups are album families; specific releases are editions with potentially different tracklists.</p>
-          <p>Add more releases for an unmatched recording using the search field. Mark albumless recordings <strong>No Album Found</strong> if none is suitable; this is a reversible review decision, not a fake album audio tag. Existing assignments are preserved unless you explicitly choose a different release for that recording. The list can be paged and compared editions can be removed without losing planned assignments.</p>
-          <p>The final review shows each compatible change, unchanged or blocked recording, and exactly what will be queued. Audio changes use the same backed-up, reversible album-only jobs as the previous Catalogue organizer. The separate Artwork editor remains responsible for manual covers.</p>
+          <p>Album groups your local library's music into connected recording/album clusters using exact MusicBrainz release evidence. By default it examines music without an assigned album; enable <strong>Include recordings already assigned</strong> to review the whole library. Search a song name to find its complete cluster, and move between clusters with Previous/Next.</p>
+          <p>Three columns stay on the same screen on desktop: clusters, editions sorted by verified recording coverage, and songs outside the currently selected edition. Click an edition to see excluded recordings in red; switch on <strong>Show included songs</strong> to see exact recording matches in green. Original and preferred English titles are shown whenever both are cached. A missing full release tracklist is unknown, not a negative match.</p>
+          <p>Use an edition to stage its <em>remaining</em> matching songs. Excluded recordings stay in the cluster so you can choose another edition. Use <strong>No Album Found</strong> for remaining albumless songs or explicitly keep an existing album. Review the cluster plan and confirm before any tags change. History and undo remain available.</p>
+          <p>On the Music tab, open the track's <strong>Album / lock</strong> entry to manually search and review a different album for that one recording, or lock its album against automatic and manual reassignment until explicitly unlocked. The Artwork editor remains responsible for covers.</p>
         </section>
         <section id="help-language" class="help-topic" aria-labelledby="help-language-title">
           <h3 id="help-language-title">Language</h3>

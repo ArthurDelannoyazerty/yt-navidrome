@@ -817,6 +817,7 @@ async function showDetails(track) {
   if (values.issues?.length) tags.append(node("p", `Audit: ${values.issues.join(", ")}`, "warning-text"));
   tags.append(node("p", "These values are read from the current audio file. Playback clients may not expose every field.", "hint"));
   grid.append(tags, technical, origins, assets, history);
+  window.AlbumUI?.mountTrack(details, grid, api, () => refreshTracks(false));
   body.replaceChildren(grid);
   $("detailsDialog").showModal();
 }
@@ -857,6 +858,7 @@ function renderTrack(track) {
     originList.append(line);
   }
   music.append(originList);
+  if(track.album_locked)music.append(badge("ALBUM LOCKED"));
 
   if (track.playlists.length) {
     for (const playlist of track.playlists) {
@@ -939,6 +941,7 @@ function renderTrack(track) {
   const editMetadata = button("Edit metadata", () => window.MetadataUI ? window.MetadataUI.open(track, "manual") : showEditor(track));
   editMetadata.disabled = busy || track.health !== "AVAILABLE";
   const technicalDetails = button("Sources & details", () => showDetails(track));
+  const albumEdit = button(track.album_locked ? "Album (locked)" : "Album / lock", () => showDetails(track));
   const repairTags = button("Repair tags / loudness", async () => {
     if (!confirm("Recalculate loudness and discovery tags on this existing file? Audio and identity are preserved. No download is needed.")) return;
     await action(track, "repair");
@@ -953,7 +956,7 @@ function renderTrack(track) {
   refreshSuggestions.title = "Identify the existing audio again using its source hints. No new download.";
   const artwork = button("Artwork...", () => window.ArtworkUI.open(track));
   artwork.disabled = busy || track.health !== "AVAILABLE" || !window.ArtworkUI;
-  menuItems.append(editMetadata, artwork, technicalDetails, refreshSuggestions, repairTags, remove);
+  menuItems.append(editMetadata, albumEdit, artwork, technicalDetails, refreshSuggestions, repairTags, remove);
   const reprocess = button("Reprocess", () => openOperation(track, "reprocess"));
   const redownload = button("Redownload", () => openOperation(track, "redownload"));
   for (const operation of [reprocess, redownload]) {
@@ -977,6 +980,7 @@ function trackSignature(track) {
     matched_title: track.matched_title,
     mbid: track.mbid,
     release_id: track.release_id,
+    album_locked: track.album_locked,
     origins: track.origins,
     playlists: track.playlists,
     discovered_at: track.discovered_at,

@@ -9,6 +9,7 @@ from fastapi import Query
 
 from album_management import AlbumManager
 from album_workspace import AlbumWorkspace
+from album_clusters import AlbumClusters
 from catalogue import Catalogue, ENTITY_KINDS, MAX_GRAPH_NODES
 from language_jobs import (preview as language_preview, queue as queue_languages,
                            preview_progress, queue_progress, canary_status, verify_canary,
@@ -29,6 +30,12 @@ class AlbumSelection(BaseModel):
     release_id: str
     source_ids: list[str] = Field(default_factory=list, max_length=20)
     track_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class AlbumLockInput(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    track_id: str = Field(min_length=1, max_length=64)
+    locked: bool
 
 
 class AlbumCompareInput(BaseModel):
@@ -120,6 +127,8 @@ def install_catalogue_routes(app, store, pipeline):
     catalogue = Catalogue(store)
     albums = AlbumManager(store, catalogue)
     workspace = AlbumWorkspace(albums)
+    clusters = AlbumClusters(albums)
+    app.state.album_clusters = clusters
     app.state.album_workspace = workspace
     app.state.catalogue = catalogue
     app.state.album_manager = albums
@@ -243,6 +252,26 @@ def install_catalogue_routes(app, store, pipeline):
     def sources(user_id: str):
         store.require_user(user_id)
         return store.rows("SELECT id,title,status,is_playlist FROM sources WHERE user_id=? ORDER BY title", (user_id,))
+
+    @app.get("/api/albums/clusters")
+    def album_clusters(user_id: str, include_assigned: bool = False,
+                       q: str = Query("", max_length=100), focus_id: str | None = None):
+        return clusters.list(user_id, include_assigned=include_assigned,
+                             query=q, focus_id=focus_id)
+
+    @app.get("/api/albums/cluster-edition")
+    def album_cluster_edition(user_id: str, anchor_id: str, release_id: str,
+                              include_assigned: bool = False):
+        return clusters.edition(user_id, anchor_id, release_id,
+                                include_assigned=include_assigned)
+
+    @app.get("/api/albums/lock")
+    def album_lock(user_id: str, track_id: str):
+        return {"track_id": track_id, "locked": clusters.locked(user_id, track_id)}
+
+    @app.post("/api/albums/lock")
+    def album_toggle_lock(data: AlbumLockInput):
+        return clusters.toggle_lock(data.user_id, data.track_id, data.locked)
 
     @app.get("/api/albums/tracks")
     def album_tracks(user_id: str, source_id: str | None = None,

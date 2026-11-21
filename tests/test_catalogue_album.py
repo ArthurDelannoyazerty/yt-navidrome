@@ -1287,3 +1287,140 @@ def test_album_workspace_http_apis_remain_user_scoped(db, environment):
             "selected_track_ids": [local]})
         assert result.status_code == 200
         assert result.json()["releases"][0]["complete"] is True
+
+
+
+def test_cluster_groups_connected_release_families_and_filters_whole_group(db, environment):
+    from album_clusters import AlbumClusters
+    cat, albums = setup_catalogue(db)
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    first, _, _ = add_audio_track(db, environment, RECORDING_1)
+    second, _, _ = add_audio_track(db, environment, RECORDING_2)
+    third, _, _ = add_audio_track(db, environment, RECORDING_4)
+    db.execute("UPDATE tracks SET release_id=NULL WHERE id IN (?,?)", (second,third))
+    guest, _, _ = add_audio_track(db, environment, RECORDING_1, user="guest")
+    unassigned = clusters.list("admin")
+    assert unassigned["total_tracks"] == 2
+    assert len(unassigned["clusters"]) == 1
+    assert {x["id"] for x in unassigned["detail"]["tracks"]} == {second,third}
+    entire = clusters.list("admin", include_assigned=True)
+    assert entire["total_tracks"] == 3
+    assert len(entire["clusters"]) == 1
+    assert {x["id"] for x in entire["detail"]["tracks"]} == {first,second,third}
+    assert guest not in {x["id"] for x in entire["detail"]["tracks"]}
+    editions={x["id"]:x for x in entire["detail"]["releases"]}
+    assert set(editions) == {RELEASE_A, RELEASE_B}
+    assert editions[RELEASE_A]["matched_count"] == 2
+    assert editions[RELEASE_B]["matched_count"] == 2
+    assert editions[RELEASE_B]["track_count"] == 2
+    assert editions[RELEASE_B]["complete"] is True
+    assert {second,third} == set(editions[RELEASE_B]["matched_track_ids"])
+    # A query matches a recording but keeps the *whole* cluster for review.
+    filtered=clusters.list("admin", include_assigned=True, query="Recording 1")
+    assert filtered["total_clusters"]==1
+    assert len(filtered["detail"]["tracks"])==3
+    assert clusters.list("admin", include_assigned=True, query="nowhere")["detail"] is None
+    assert not clusters.list("guest", include_assigned=True)["detail"]["tracks"][0]["id"] == first
+    with pytest.raises(ValueError, match="Unknown user"):
+        clusters.list("missing")
+    with pytest.raises(LookupError, match="selected library scope"):
+        clusters.edition("admin", guest, RELEASE_A, include_assigned=True)
+
+
+def test_cluster_keeps_disjoint_music_separate_and_recognizes_incomplete_release(db, environment):
+    from album_clusters import AlbumClusters
+    other_rec = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    other_release = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    cat, albums = setup_catalogue(db)
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    first, _, _ = add_audio_track(db, environment, RECORDING_1)
+    outside, _, _ = add_audio_track(db, environment, other_rec)
+    db.execute("UPDATE tracks SET release_id=NULL WHERE id IN (?,?)",(first,outside))
+    # An explicit recording link without a complete release lookup must remain
+    # an *unknown* match, never green just because an incomplete link exists.
+    with cat.db() as con:
+        cat.ingest(con, "release", {
+            "id":other_release,"title":"Separate original","status":"Official",
+            "release-group":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","title":"Separate group"},
+        })
+        cat.upsert_link(con,"recording",other_rec,"release",other_release,"appears-on")
+    result=clusters.list("admin")
+    assert result["total_clusters"] == 2
+    assert {c["track_count"] for c in result["clusters"]} == {1}
+    detail=clusters.list("admin",focus_id=outside)["detail"]
+    assert detail["id"] == outside
+    candidate=detail["releases"][0]
+    assert candidate["id"] == other_release
+    assert candidate["complete"] is False
+    assert candidate["matched_count"] == 0
+    assert candidate["linked_track_count"] == 1
+    assert candidate["matched_track_ids"] == []
+    # Adding a release outside the cluster cannot make foreign recordings
+    # appear in the local membership list.
+    compared=clusters.edition("admin",outside,RELEASE_A)
+    assert compared["matched_track_ids"] == []
+
+
+def test_album_lock_prevents_bulk_manual_and_queued_edits(db, environment, monkeypatch):
+    import album_management
+    from album_clusters import AlbumClusters
+    from album_workspace import AlbumWorkspace
+    monkeypatch.setattr(album_management,"LIBRARY",environment[1])
+    cat,albums=setup_catalogue(db)
+    cluster=AlbumClusters(albums);cluster.init()
+    workspace=AlbumWorkspace(albums);workspace.init()
+    tid, path, before=add_audio_track(db,environment,RECORDING_2)
+    proposal=workspace.preview("admin",[{"track_id":tid,"action":"release","release_id":RELEASE_B}])
+    assert proposal["can_apply"]==1
+    assert cluster.toggle_lock("admin",tid,True)["locked"]
+    assert cluster.locked("admin",tid) is True
+    assert cluster.list("admin",include_assigned=True)["detail"]["tracks"][0]["locked"] is True
+    new_preview=albums.preview("admin",RELEASE_B,track_ids=[tid])
+    assert new_preview["items"][0]["status"] == "LOCKED"
+    assert workspace.preview("admin",[{
+        "track_id":tid,"action":"release","release_id":RELEASE_B
+    }])["items"][0]["status"] == "LOCKED"
+    with pytest.raises(ValueError,match="Album locked"):
+        workspace.apply("admin",proposal["preview_token"])
+    with pytest.raises(ValueError,match="Album locked"):
+        db.queue_track(tid,"admin",{"mode":"retag"})
+    assert before==sha256_file(path)
+    assert db.one("SELECT release_id FROM tracks WHERE id=?", (tid,))["release_id"]==RELEASE_A
+    with pytest.raises(LookupError):
+        cluster.toggle_lock("guest",tid,False)
+    assert cluster.toggle_lock("admin",tid,False)["locked"] is False
+    assert workspace.apply("admin",proposal["preview_token"])["queued"]==1
+    with pytest.raises(ValueError,match="active"):
+        cluster.toggle_lock("admin",tid,True)
+
+
+def test_cluster_api_is_user_scoped_and_exposes_explicit_lock(db, environment):
+    cat, albums=setup_catalogue(db)
+    tid, _, _=add_audio_track(db,environment,RECORDING_2)
+    guest,_,_=add_audio_track(db,environment,RECORDING_4,user="guest")
+    with TestClient(create_app(db,start_workers=False)) as client:
+        response=client.get("/api/albums/clusters",
+            params={"user_id":"admin","include_assigned":"true"})
+        assert response.status_code==200
+        result=response.json()
+        assert result["total_clusters"]==1
+        assert {x["id"] for x in result["detail"]["tracks"]}=={tid}
+        assert guest not in str(result)
+        rid=client.get("/api/albums/cluster-edition",params={
+            "user_id":"admin","anchor_id":tid,"release_id":RELEASE_B,"include_assigned":"true"})
+        assert rid.status_code==200
+        assert rid.json()["matched_track_ids"]==[tid]
+        assert client.get("/api/albums/cluster-edition",params={
+            "user_id":"admin","anchor_id":guest,"release_id":RELEASE_B,
+            "include_assigned":"true"}).status_code==404
+        assert client.post("/api/albums/lock",json={
+            "user_id":"admin","track_id":guest,"locked":True}).status_code==404
+        locked=client.post("/api/albums/lock",json={
+            "user_id":"admin","track_id":tid,"locked":True})
+        assert locked.status_code==200 and locked.json()["locked"] is True
+        assert client.get("/api/albums/lock",params={
+            "user_id":"admin","track_id":tid}).json()["locked"] is True
+        assert client.post("/api/albums/lock",json={
+            "user_id":"admin","track_id":tid,"locked":False}).json()["locked"] is False

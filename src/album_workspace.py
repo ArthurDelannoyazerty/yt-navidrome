@@ -325,6 +325,11 @@ class AlbumWorkspace:
                        JOIN assets a ON a.id=t.current_asset_id AND a.state='CURRENT'
                        WHERE t.user_id=? AND t.id=?""",(user_id,item["track_id"]),
                 ).fetchone()
+                if con.execute(
+                    "SELECT 1 FROM album_track_locks WHERE user_id=? AND track_id=?",
+                    (user_id,item["track_id"]),
+                ).fetchone():
+                    raise ValueError("Album locked: unlock this recording before reassignment")
                 if (not row or row["updated_at"]!=item["revision"] or
                     row["release_id"]!=item["old_release_id"] or
                     row["current_asset_id"]!=item["asset_id"] or
