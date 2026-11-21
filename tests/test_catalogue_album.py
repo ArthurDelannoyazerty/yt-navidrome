@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from album_management import AlbumManager
 from catalogue import Catalogue
-from common import sha256_file
+from common import sha256_file, utcnow
 from main import create_app
 
 ARTIST = "11111111-1111-4111-8111-111111111111"
