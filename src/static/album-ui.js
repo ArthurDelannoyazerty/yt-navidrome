@@ -354,7 +354,7 @@ window.AlbumUI = (() => {
     let officialVisible=0,clusterVisible=0,hidden=0;
     const section=element("div","OFFICIAL EDITION TRACKLIST ("+edition.tracks.length+")","album-track-section-label");
     body.append(section);
-    const addCard=(nameData,track,kind,summary,available,selected,recordingKey)=>{
+    const addCard=(nameData,track,kind,summary,available,selected,recordingKey,targetRecordingId=null)=>{
       if($("albumOnlyGreen").checked&&kind!=="green"){hidden++;return;}
       const card=element("article",null,"album-track-comparison album-music-"+kind);
       const line=element("div",null,"album-track-decision");
@@ -363,11 +363,9 @@ window.AlbumUI = (() => {
       check.setAttribute("aria-label","Include "+(track?.display_title||nameData.title||nameData.original_title||"recording")+
         " for this album");
       if(track)check.dataset.trackId=track.id;
-      if(available&&track){
+      if(available&&track&&targetRecordingId){
         check.addEventListener("change",()=>{
-          const key=edition.id+":"+track.id;
-          if(check.checked)work.unchecked.delete(key);else work.unchecked.add(key);
-          renderSelected();renderRemaining();
+          setSelection(track,edition,targetRecordingId,check.checked);
         });
       }
       const text=element("div",null,"album-track-decision-label");
@@ -376,22 +374,19 @@ window.AlbumUI = (() => {
         text.append(element("small","Disc "+nameData.medium+" · Track "+nameData.position,"hint"));
       const info=element("div",null,"album-music-info");
       info.append(element("small",summary));
+      if(kind==="candidate"&&track){
+        info.append(element("small","Local: "+track.display_title+
+          " · checking this changes its recording ID to the official edition position."));
+      }
       if(track?.current_release_id)
         info.append(element("small","Current release: "+track.current_release_id.slice(0,8)+"…"));
       text.append(info);
-      line.append(check,text);
-      card.append(line);
-      if(kind==="blue" && track?.mbid && track.in_scope!==false && !track.not_found){
-        card.append(button("No Album Found",()=>markNotFound(track),"secondary album-not-found-action"));
-      }
-      if(track?.not_found)card.append(button("Search again",async()=>{
-        const user=ui.user;
-        await api("/api/albums/not-found/clear",{user_id:user,track_id:track.id});
-        if(ui.user===user){track.not_found=false;work.resolved.delete(track.id);renderMusic();}
-      }));
-      body.append(card);
-      if(recordingKey==="official")officialVisible++;else clusterVisible++;
-    };
+      if(recordingKey==="cluster"&&track&&canChoose(track)){
+        const row=element("div",null,"album-track-manual-target");
+        const picker=element("select");
+        const none=element("option","Choose official track position…");
+        none.value="";picker.append(none);
+        const suggestions=new Set();
     for(const song of edition.tracks){
       const scoped=detail.tracks.filter(t=>t.mbid===song.recording_id);
       const scopedIds=new Set(scoped.map(t=>t.id));
@@ -399,23 +394,20 @@ window.AlbumUI = (() => {
         .map(t=>({...t,mbid:song.recording_id,out_of_scope:true}));
       const local=[...scoped,...extra];
       if(!local.length){
-        const candidates=song.possible_local_matches||[];
-        addCard(song,null,candidates.length?"candidate":"red",
-          candidates.length
-            ? "Possible local recording with a different MusicBrainz ID (not verified)"
-            : "No exact MusicBrainz recording found in this library",
-          false,false,"official");
-        if(candidates.length&&!$("albumOnlyGreen").checked){
-          const row=element("div",null,"album-recording-alternatives");
-          for(const match of candidates){
-            const item=element("div",null,"album-recording-alternative");
-            item.append(element("strong",match.display_title||"Local recording"),
-              element("small","Current release: "+
-                (match.current_release_id?match.current_release_id.slice(0,8)+"…":"unassigned")+
-                " · "+match.evidence+" · unverified (read-only)"));
-            row.append(item);
+        const candidates=(song.possible_local_matches||[])
+          .map(t=>localById.get(t.id)).filter(Boolean);
+        if(!candidates.length){
+          addCard(song,null,"red","No local recording for this official track",
+            false,false,"official");
+        }else{
+          for(const track of candidates){
+            suggestions.add(track.id);
+            const selectable=canChoose(track)&&!work.resolved.has(track.id);
+            addCard(song,track,track.locked?"gray":"candidate",
+              track.locked?"Album locked":"Possible local match · different recording ID",
+              selectable,selectedRecordingFor(track,edition)===song.recording_id,
+              "official",song.recording_id);
           }
-          body.append(row);
         }
         continue;
       }
@@ -423,36 +415,38 @@ window.AlbumUI = (() => {
         const kind=track.locked?"gray":
           track.current_release_id&&track.current_release_id!==edition.id?"orange":"green";
         const message=track.locked?"Album locked · cannot change":
-          track.out_of_scope||track.in_scope===false?"Downloaded, read-only · enable Include already assigned to change":
+          track.out_of_scope?"Downloaded outside this review family · read-only":
           kind==="orange"?"Local · currently assigned to another album":
           track.current_release_id===edition.id?"Local · already correctly assigned":
           "Local · no album assigned";
-        const editable=!track.locked&&!track.out_of_scope&&track.in_scope!==false;
+        const editable=canChoose(track)&&!work.resolved.has(track.id);
         addCard(song,track,kind,message,editable,
-          editable&&chosenForEdition(track,edition),"official");
+          selectedRecordingFor(track,edition)===song.recording_id,
+          "official",song.recording_id);
       }
     }
     const other=detail.tracks.filter(t=>!seen.has(t.mbid) &&
-      // Incorrect existing assignments are reviewed separately in Catalogue.
-      t.current_release_id!==edition.id);
+      !suggestions.has(t.id) && t.current_release_id!==edition.id);
     if(other.length&&!$("albumOnlyGreen").checked){
-      body.append(element("div","OTHER LOCAL MUSIC IN THIS CLUSTER ("+other.length+")",
+      body.append(element("div","OTHER LOCAL MUSIC IN THIS FAMILY ("+other.length+")",
         "album-track-section-label album-cluster-only-label"));
     }
     for(const track of other){
       const kind=track.locked?"gray":track.current_release_id?"purple":"blue";
+      const target=selectedRecordingFor(track,edition);
       const msg=track.locked?"Album locked · not on this edition":
-        kind==="purple"?"In this cluster · assigned to another album":
-        track.not_found?"In this cluster · previously marked No Album Found":
-        "In this cluster · unassigned · not on this edition";
-      addCard(track,track,kind,msg,false,false,"cluster");
+        kind==="purple"?"Local · assigned elsewhere · choose an official position":
+        track.not_found?"Previously marked No Album Found · choose an official position":
+        "Local · choose an official position to include it";
+      addCard(track,track,kind,msg,canChoose(track)&&!!target,!!target,
+        "cluster",target);
     }
     if(!officialVisible&&!clusterVisible)
       body.append(element("p",hidden?"No green tracks to display. Turn off Green tracks only to see the other states.":"No tracks to display.","hint"));
     $("albumMusicContext").textContent=edition.tracks.length+" official tracks · "+
       detail.tracks.length+" local family recordings · "+other.length+
       " local recordings without an exact match on this edition · "+
-      (edition.possible_match_count||0)+" possible different-MBID matches.";
+      (edition.possible_match_count||0)+" local candidates with different recording IDs.";
     renderSelected();renderRemaining();
   }
   async function markNotFound(track){
@@ -481,7 +475,8 @@ window.AlbumUI = (() => {
     const counts=selectedSummary();
     if(!counts.selected.length){notice("No eligible checked local recordings in this edition.");return;}
     const decisions=counts.selected.map(track=>({
-      track_id:track.id,action:"release",release_id:edition.id
+      track_id:track.id,action:"release",release_id:edition.id,
+      target_recording_id:track.target_recording_id
     }));
     try{
       $("albumEditionUse").disabled=true;
@@ -500,7 +495,8 @@ window.AlbumUI = (() => {
       $("albumValidateTitle").textContent="Validate Album — "+edition.name;
       $("albumValidateSummary").textContent=
         counts.newTracks.length+" unassigned · "+counts.moves.length+" moved from other albums · "+
-        counts.unchanged.length+" already correct · "+incompatible.length+" blocked"+
+        counts.unchanged.length+" already correct · "+
+        counts.identityChanges.length+" recording ID changes · "+incompatible.length+" blocked"+
         (counts.hiddenOrange?" · "+counts.hiddenOrange+" orange moves currently hidden by the green-only filter":"")+".";
       const impact=$("albumValidateImpact");impact.replaceChildren();
       for(const row of preview.impact||[]){
@@ -516,11 +512,17 @@ window.AlbumUI = (() => {
         entry.append(element("small",
           (row.old_release_id?"From "+row.old_release_id.slice(0,8)+"…":"Previously unassigned")+
           " → "+(row.target_album||edition.name)+" · "+row.status,"hint"));
+        if(row.recording_id!==row.target_recording_id){
+          entry.append(element("small","Recording MBID: "+
+            (row.recording_id?row.recording_id.slice(0,8)+"…":"unidentified")+
+            " → "+row.target_recording_id.slice(0,8)+"… · reversible","hint"));
+        }
         list.append(entry);
       }
       details.append(list);
       $("albumValidateStatus").textContent=preview.can_apply+
-        " eligible file updates. Unchecked, missing and locked recordings are never submitted.";
+        " eligible updates. Song title and artist are preserved; selected different-MBID copies "+
+        "will adopt the chosen official recording ID. Undo restores prior audio tags and ID.";
       $("albumValidateConfirm").disabled=!preview.can_apply;
       $("albumValidateDialog").showModal();
     }catch(error){if(active(user,serial))notice(error.message,true);}
@@ -809,6 +811,7 @@ window.AlbumUI = (() => {
   $("albumOnlyGreen").addEventListener("change",()=>{
     renderMusic();renderSelected();
   });
+  $("albumSelectAll").addEventListener("click",selectAll);
   $("albumEditionUse").addEventListener("click",()=>validateEdition());
   $("albumValidateConfirm").addEventListener("click",()=>confirmEdition());
   $("albumValidateCancel").addEventListener("click",()=>{$("albumValidateDialog").close();ui.preview=null;});
