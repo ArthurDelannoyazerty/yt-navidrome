@@ -1390,7 +1390,7 @@ test("real browser: cluster-first edition workflow keeps exclusions active and w
   assert.equal(await chrome.evaluate("document.querySelectorAll('.album-track-comparison').length"),3);
   await chrome.evaluate("document.querySelector('#albumIncludeAssigned').click()");
   await chrome.until("document.querySelectorAll('.album-track-comparison').length===4");
-  await chrome.evaluate("document.querySelectorAll('.album-edition-choice')[0].click()");
+  await chrome.evaluate("(()=>{[...document.querySelectorAll('.album-edition-choice')].find(x=>x.textContent.includes('Original Edition')).click()})()");
   await chrome.until("document.querySelectorAll('.album-music-excluded').length===2");
   assert.equal(await chrome.evaluate("document.querySelectorAll('.album-music-included').length"),0);
   await chrome.evaluate("document.querySelector('#albumShowIncluded').click()");
@@ -1402,7 +1402,7 @@ test("real browser: cluster-first edition workflow keeps exclusions active and w
   await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
   await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('1 new assignments')");
   assert.equal(await chrome.evaluate("document.querySelector('#albumPlanSummary').textContent.includes('0 album moves')"),true);
-  await chrome.evaluate("document.querySelectorAll('.album-edition-choice')[1].click()");
+  await chrome.evaluate("(()=>{[...document.querySelectorAll('.album-edition-choice')].find(x=>x.textContent.includes('Expanded Edition')).click()})()");
   await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
   await chrome.until("document.querySelector('#albumPlanSummary').textContent.includes('2 new assignments')");
   await chrome.evaluate("document.querySelector('#albumMarkUnfound').click()");
