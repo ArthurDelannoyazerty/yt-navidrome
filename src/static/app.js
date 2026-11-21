@@ -18,6 +18,14 @@ function updateNavigationLinks() {
     const destination = Router?.build({user: state.user, tab: tab.dataset.tab});
     if (destination) tab.href = destination;
   }
+  for (const link of document.querySelectorAll('.help-sidebar a[href]')) {
+    const topic = (link.dataset.topic || link.getAttribute("href").split("#help-")[1]);
+    if (topic) {
+      link.dataset.topic=topic;
+      const url=Router?.build({user:state.user,tab:"help",topic});
+      if (url) link.href=url;
+    }
+  }
 }
 function musicRoute(extra = {}) {
   return pageRoute("music", {
@@ -288,6 +296,17 @@ for (const tab of document.querySelectorAll(".tab")) {
         (event?.button != null && event.button !== 0)) return;
     event?.preventDefault?.();
     setTab(tab.dataset.tab);
+  });
+}
+for(const link of document.querySelectorAll(".help-sidebar a[href]")){
+  link.addEventListener("click",event=>{
+    if(event?.metaKey || event?.ctrlKey || event?.shiftKey) return;
+    event?.preventDefault?.();
+    const topic=link.dataset.topic || link.getAttribute("href").split("#help-")[1];
+    const target=document.getElementById("help-"+topic);
+    if(!target)return;
+    routeWrite(pageRoute("help",{topic}));
+    target.scrollIntoView?.({block:"start"});
   });
 }
 
