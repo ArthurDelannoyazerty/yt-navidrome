@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS scopes (
  scope_key TEXT PRIMARY KEY, kind TEXT NOT NULL, entity_id TEXT NOT NULL,
  section TEXT NOT NULL, state TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0,
  total INTEGER, requested_at TEXT NOT NULL, last_complete_at TEXT,
- last_error TEXT, retry_after REAL NOT NULL DEFAULT 0
+ last_error TEXT, retry_after REAL NOT NULL DEFAULT 0,
+ priority INTEGER NOT NULL DEFAULT 100
 );
 CREATE INDEX IF NOT EXISTS scope_queue ON scopes(state,retry_after,requested_at);
 CREATE TABLE IF NOT EXISTS staged_entities (
@@ -108,6 +109,13 @@ class Catalogue:
         with self.db() as con:
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript(SCHEMA)
+            # Existing catalogue databases predate priority-aware automatic
+            # album tracklist prefetch. Migrate without rebuilding the cache.
+            columns = {row["name"] for row in con.execute("PRAGMA table_info(scopes)")}
+            if "priority" not in columns:
+                con.execute("ALTER TABLE scopes ADD COLUMN priority INTEGER NOT NULL DEFAULT 100")
+            con.execute("""CREATE INDEX IF NOT EXISTS scope_priority_queue
+                ON scopes(state,priority,retry_after,requested_at)""")
             # Interrupted workers resume their saved cursor on startup.
             con.execute("UPDATE scopes SET state='PENDING' WHERE state='RUNNING'")
 
@@ -334,20 +342,24 @@ class Catalogue:
                     "scopes": [dict(r) for r in scopes], "relations": [dict(r) for r in related],
                     "tracks": [dict(r) for r in tracks]}
 
-    def _queue_scope(self, con, kind, identity, section, *, force=False):
+    def _queue_scope(self, con, kind, identity, section, *, force=False, priority=100):
         """Add a single follow-up to the durable paginated queue, transactionally."""
         key = f"{kind}:{identity}:{section}"
         existing = con.execute("SELECT * FROM scopes WHERE scope_key=?", (key,)).fetchone()
         if existing and existing["state"] in {"PENDING", "RUNNING"}:
+            if priority < existing["priority"]:
+                con.execute("UPDATE scopes SET priority=? WHERE scope_key=?",
+                            (priority,key))
             return False
         if (existing and not force and existing["last_complete_at"]
                 and existing["last_complete_at"] >= _iso_age(TTL_DAYS[kind])):
             return False
-        con.execute("""INSERT INTO scopes(scope_key,kind,entity_id,section,state,cursor,total,requested_at,retry_after)
-            VALUES (?,?,?,?,'PENDING',0,NULL,?,0)
+        con.execute("""INSERT INTO scopes(scope_key,kind,entity_id,section,state,cursor,total,requested_at,retry_after,priority)
+            VALUES (?,?,?,?,'PENDING',0,NULL,?,0,?)
             ON CONFLICT(scope_key) DO UPDATE SET state='PENDING',cursor=0,total=NULL,
-            requested_at=excluded.requested_at,last_error=NULL,retry_after=0""",
-            (key, kind, identity, section, utcnow()))
+            requested_at=excluded.requested_at,last_error=NULL,retry_after=0,
+            priority=excluded.priority""",
+            (key, kind, identity, section, utcnow(), priority))
         con.execute("DELETE FROM staged_entities WHERE scope_key=?", (key,))
         return True
 
@@ -377,6 +389,28 @@ class Catalogue:
                 self._queue_scope(con, kind, identity, section, force=force)
         return self.get(kind, identity)
 
+    def prefetch_album_tracklists(self, release_ids, *, focused_ids=()):
+        """Schedule complete related release tracklists without making HTTP calls.
+
+        Idempotent across requests, users and restarts. Focused cluster editions
+        outrank the normal Catalogue queue; other releases run in the background.
+        Existing complete fresh tracklists are kept, never reset.
+        """
+        ids = sorted({_id(r) for r in release_ids if _id(r)})
+        focused = {_id(r) for r in focused_ids if _id(r)}
+        new = 0
+        with self.db() as con:
+            threshold = _iso_age(TTL_DAYS["release"])
+            for rid in sorted(ids, key=lambda r:(r not in focused,r)):
+                cached = con.execute(
+                    "SELECT checked_at FROM fetched_releases WHERE release_id=?", (rid,)
+                ).fetchone()
+                if cached and cached["checked_at"] >= threshold:
+                    continue
+                new += bool(self._queue_scope(con, "release", rid, "lookup",
+                                              priority=10 if rid in focused else 120))
+        return {"known": len(ids), "new_requests": new}
+
     def index_recordings(self, recording_ids):
         """Queue a whole library in one SQLite transaction without HTTP calls."""
         valid = sorted({_id(value) for value in recording_ids if _id(value)})
@@ -391,7 +425,7 @@ class Catalogue:
     def claim(self):
         with self.db() as con:
             row = con.execute("""SELECT * FROM scopes WHERE state='PENDING' AND retry_after<=?
-                              ORDER BY requested_at,scope_key LIMIT 1""", (time.time(),)).fetchone()
+                              ORDER BY priority,requested_at,scope_key LIMIT 1""", (time.time(),)).fetchone()
             if row:
                 con.execute("UPDATE scopes SET state='RUNNING' WHERE scope_key=?", (row["scope_key"],))
             return dict(row) if row else None

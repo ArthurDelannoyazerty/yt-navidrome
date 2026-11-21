@@ -345,6 +345,20 @@ class AlbumClusters:
                 "total_releases": len(editions),
                 "releases_truncated": len(editions)>MAX_CLUSTER_EDITIONS,
             }
+        # Reuse the durable Catalogue scopes instead of inventing a second
+        # MusicBrainz cache or making synchronous HTTP calls from the Album tab.
+        # Prioritize the currently displayed cluster; the rest catch up quietly.
+        release_ids = {rid for values in release_by_component.values() for rid in values}
+        if release_ids:
+            self.catalogue.prefetch_album_tracklists(
+                release_ids, focused_ids=release_by_component.get(focus_id, {}),
+            )
+        if detail is not None:
+            focus_releases = release_by_component.get(focus_id, {})
+            detail["cache_progress"] = {
+                "complete": len(set(focus_releases) & fetched),
+                "total": len(focus_releases),
+            }
         return {"clusters": summaries, "total_clusters": len(summaries),
                 "total_tracks": len(tracks), "detail": detail}
 
@@ -368,12 +382,37 @@ class AlbumClusters:
             fetched = bool(con.execute(
                 "SELECT 1 FROM fetched_releases WHERE release_id=?", (rid,)
             ).fetchone())
-            rec_ids = {r["recording_id"] for r in con.execute(
-                "SELECT DISTINCT recording_id FROM release_tracks WHERE release_id=?", (rid,)
-            )} if fetched else set()
-            count = con.execute("SELECT COUNT(*) FROM release_tracks WHERE release_id=?", (rid,)).fetchone()[0]
+            release_rows = con.execute(
+                """SELECT r.medium,r.position,r.recording_id,r.title,
+                          e.data AS recording_data
+                   FROM release_tracks r LEFT JOIN entities e
+                     ON e.kind='recording' AND e.id=r.recording_id
+                   WHERE r.release_id=? ORDER BY r.medium,r.position""",
+                (rid,),
+            ).fetchall() if fetched else []
+            rec_ids = {r["recording_id"] for r in release_rows}
+            count = len(release_rows)
         if not entity:
             raise ValueError("Release is not cached. Search and synchronize the edition first.")
         data = json.loads(entity["data"])
-        return self._album(rid, rec_ids, data, (data.get("release-group") or {}).get("id"),
-                           fetched, count, track_map)
+        edition = self._album(rid, rec_ids, data, (data.get("release-group") or {}).get("id"),
+                              fetched, count, track_map)
+        # Exact MusicBrainz recording IDs join official album positions with
+        # the selected user's local copies. A missing local copy is NOT checked.
+        official = []
+        for row in release_rows:
+            recording = json.loads(row["recording_data"]) if row["recording_data"] else {}
+            original = row["title"] or _canonical_name(recording) or "Unknown track"
+            english = preferred_english_name(recording) if recording else original
+            official.append({
+                "recording_id": row["recording_id"], "medium": row["medium"],
+                "position": row["position"], "title": original,
+                "original_title": original, "english_title": english or original,
+                "local_track_ids": sorted(track_map.get(row["recording_id"], ())),
+            })
+        edition["tracks"] = official
+        edition["cluster_only"] = [
+            row["id"] for row in result["detail"]["tracks"]
+            if fetched and row["mbid"] not in rec_ids
+        ]
+        return edition
