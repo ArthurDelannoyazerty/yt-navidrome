@@ -351,8 +351,10 @@ window.CatalogueUI = (() => {
       if (result.entity) await openEntity(kind, id);
     }));
     actionRow.append(button("Show in graph", () => {
-      byId("graphFocus").value = id;
-      setTab("graph"); window.GraphUI?.refresh();
+      setTab("graph",true,{noHistory:true,skipEnter:true});
+      const route={user:state.user,tab:"graph",kind,entityId:id,focus:id};
+      window.IngestorRouter?.write(route);
+      window.GraphUI?.openRoute(route);
     }));
     box.append(actionRow);
     const scopes = data.scopes || [];
