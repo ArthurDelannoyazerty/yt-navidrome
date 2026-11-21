@@ -4,8 +4,8 @@
   "use strict";
 
   const pages = Object.freeze({
-    music: "music", approval: "approval", catalogue: "catalogue",
-    album: "albums", language: "language", graph: "graph", sources: "sources",
+    music: "music", approval: "approval", album: "albums", sources: "sources",
+    language: "language", catalogue: "catalogue", graph: "graph",
     activity: "activity", maintenance: "maintenance", help: "help",
   });
   const kinds = new Set(["artist", "recording", "release", "release-group", "work"]);
