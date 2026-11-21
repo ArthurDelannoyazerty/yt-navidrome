@@ -8,7 +8,16 @@ tokens, album selections, audio mutation requests or other unsaved data into
 the address bar.
 
 The frontend remains dependency-free, framework-free and served from
-\`src/static/\`. The existing feature screens are retained.
+`src/static/`. The existing feature screens are retained.
+
+## Recommended workflow
+
+For normal metadata review, identify the song (MusicBrainz recording, title and
+artist) in **Approval** first. The release edition is optional at this stage.
+Then assign a specific album family/edition in **Album**. Its explicit selection
+and confirmation can remap a recording MBID, without silently replacing song or
+artist metadata. Help explains the exact-match, alternative-ID, lock, cache and
+undo cases. The tab navigation and Help topics follow the same sequence.
 
 ## URL contract
 
@@ -16,47 +25,49 @@ All normal navigation is scoped to a selected library user:
 
 | Content | Address |
 | --- | --- |
-| Music list | \`/libraries/<user>/music\` |
-| Music filters | \`/libraries/<user>/music?status=NEEDS_APPROVAL&q=title&page=2\` |
-| Ignored music | \`/libraries/<user>/music/ignored\` |
-| Local track details | \`/libraries/<user>/music/<track-id>\` |
-| Approve / review a track | \`/libraries/<user>/approval/<track-id>\` |
-| MusicBrainz entity | \`/libraries/<user>/catalogue/<kind>/<mbid>\` |
-| Album family | \`/libraries/<user>/albums/<release-group-id>\` |
-| Specific album edition | \`/libraries/<user>/albums/<release-group-id>/editions/<release-id>\` |
-| Source card | \`/libraries/<user>/sources/<source-id>\` |
-| Graph selected node | \`/libraries/<user>/graph/<kind>/<mbid>\` |
-| Help topic | \`/libraries/<user>/help/<topic>\` |
-| Other pages | \`/libraries/<user>/{language,activity,maintenance}\` |
+| Music list | `/libraries/<user>/music` |
+| Music filters | `/libraries/<user>/music?status=NEEDS_APPROVAL&q=title&page=2` |
+| Ignored music | `/libraries/<user>/music/ignored` |
+| Local track details | `/libraries/<user>/music/<track-id>` |
+| Approve / review a recording | `/libraries/<user>/approval/<track-id>` |
+| Album family | `/libraries/<user>/albums/<release-group-id>` |
+| Specific album edition | `/libraries/<user>/albums/<release-group-id>/editions/<release-id>` |
+| Source card | `/libraries/<user>/sources/<source-id>` |
+| Language page | `/libraries/<user>/language` |
+| MusicBrainz entity | `/libraries/<user>/catalogue/<kind>/<mbid>` |
+| Graph selected node | `/libraries/<user>/graph/<kind>/<mbid>` |
+| Activity page | `/libraries/<user>/activity` |
+| Maintenance page | `/libraries/<user>/maintenance` |
+| Help topic | `/libraries/<user>/help/<topic>` |
 
-Catalogue supports \`q\`, \`kind\` and \`local=1\` query parameters. The Album
-workspace supports \`q\` and \`include_assigned=1\`. Graph supports \`view\`,
-\`focus\`, \`q\`, \`kinds\` and \`limit\` as well as selected-node paths.
+Catalogue supports `q`, `kind` and `local=1` query parameters. The Album
+workspace supports `q` and `include_assigned=1`. Graph supports `view`,
+`focus`, `q`, `kinds` and `limit` as well as selected-node paths.
 
-The root \`/\` stays a valid entry point, including Spotify's
-\`?spotify=connected\` callback. After an explicit library selection, navigation
+The root `/` stays a valid entry point, including Spotify's
+`?spotify=connected` callback. After an explicit library selection, navigation
 uses the corresponding canonical library URL. URL library names **select a
 context**, not an authentication credential. Data access is still verified by
 each backend endpoint and the reverse proxy must remain authenticated.
 
 ## Code ownership
 
-- \`router.js\` — pure URL parser/builder and history writer. No DOM, API calls
+- `router.js` — pure URL parser/builder and history writer. No DOM, API calls
   or domain-specific selection state; Node tests exercise the contract.
-- \`navigation.js\` — startup, library-from-URL resolution, Back/Forward and
+- `navigation.js` — startup, library-from-URL resolution, Back/Forward and
   direct-route restoration. Runs last, after feature scripts are initialized.
-- \`app.js\` — shared application shell, user management, Music list and source,
+- `app.js` — shared application shell, user management, Music list and source,
   activity and maintenance controls. Calls the router only for committed
   navigation actions.
-- \`ui-state.js\` — shared async-state and stale-request guards.
-- \`metadata-ui.js\`, \`album-ui.js\`, \`catalogue-ui.js\`, \`graph-ui.js\` and
-  other \`*-ui.js\` files — their own feature fetches, rendering and transient
-  state. Each deep-linkable feature exposes \`openRoute(route)\` while retaining
+- `ui-state.js` — shared async-state and stale-request guards.
+- `metadata-ui.js`, `album-ui.js`, `catalogue-ui.js`, `graph-ui.js` and
+  other `*-ui.js` files — their own feature fetches, rendering and transient
+  state. Each deep-linkable feature exposes `openRoute(route)` while retaining
   its existing public functions.
-- \`index.html\` — semantic section links, stable DOM panels and dialogs.
-  \`style.css\` retains the existing visual system.
-- FastAPI \`main.py\` — serves the **same** versioned shell on validated browser
-  routes; \`/api/\` and \`/static/\` remain independent. Browser-shell responses
+- `index.html` — semantic section links, stable DOM panels and dialogs.
+  `style.css` retains the existing visual system.
+- FastAPI `main.py` — serves the **same** versioned shell on validated browser
+  routes; `/api/` and `/static/` remain independent. Browser-shell responses
   are non-cacheable; static assets retain immutable, content-addressed URLs.
 
 Cross-feature navigation should route to the destination rather than rely on a
@@ -86,14 +97,14 @@ from Graph should produce the Catalogue entity URL.
 
 ## Validation
 
-- \`node --test tests/router.test.cjs\` — route round-trips, encoding, invalid
+- `node --test tests/router.test.cjs` — route round-trips, encoding, invalid
   paths and history operations.
-- \`node --test tests/browser_ui.test.cjs\` — real-browser deep links, refresh,
+- `node --test tests/browser_ui.test.cjs` — real-browser deep links, refresh,
   Back/Forward, source selection, and existing media workflows.
-- \`pytest tests/test_frontend_routes.py\` — FastAPI fallback, CSP, HTML
+- `pytest tests/test_frontend_routes.py` — FastAPI fallback, CSP, HTML
   no-store, immutable static files and API separation.
 - The existing full Python and JavaScript suites must pass before merge.
 
-A future migration may decompose large \`app.js\` and \`style.css\` sections into
+A future migration may decompose large `app.js` and `style.css` sections into
 domain-specific files, but it should be separate from navigation changes to
 avoid mixing media behavior with URL migration.
