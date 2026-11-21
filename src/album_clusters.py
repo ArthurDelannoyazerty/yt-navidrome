@@ -452,6 +452,28 @@ class AlbumClusters:
         data = json.loads(entity["data"])
         edition = self._album(rid, rec_ids, data, (data.get("release-group") or {}).get("id"),
                               fetched, count, track_map)
+        # An assigned local copy may be outside the chosen "unassigned only"
+        # review scope. It is still downloaded and must never be shown as red.
+        # Return it read-only; only selected cluster members can be validated.
+        all_local=defaultdict(list)
+        if rec_ids:
+            with self.store.db() as user_db:
+                for chunk in _chunks(sorted(rec_ids)):
+                    marks=",".join("?" for _ in chunk)
+                    for copy in user_db.execute(
+                        """SELECT t.id,t.mbid,t.title,t.matched_title,t.release_id,
+                                  CASE WHEN l.track_id IS NULL THEN 0 ELSE 1 END AS locked
+                           FROM tracks t LEFT JOIN album_track_locks l
+                             ON l.user_id=t.user_id AND l.track_id=t.id
+                           WHERE t.user_id=? AND t.current_asset_id IS NOT NULL
+                             AND t.mbid IN ("""+marks+")",
+                        (user_id,*chunk),
+                    ):
+                        all_local[copy["mbid"]].append({
+                            "id":copy["id"],"current_release_id":copy["release_id"],
+                            "locked":bool(copy["locked"]),
+                            "display_title":copy["matched_title"] or copy["title"],
+                        })
         # Exact MusicBrainz recording IDs join official album positions with
         # the selected user's local copies. A missing local copy is NOT checked.
         official = []
@@ -464,6 +486,7 @@ class AlbumClusters:
                 "position": row["position"], "title": original,
                 "original_title": original, "english_title": english or original,
                 "local_track_ids": sorted(track_map.get(row["recording_id"], ())),
+                "local_copies": all_local.get(row["recording_id"], []),
             })
         edition["tracks"] = official
         edition["cluster_only"] = [

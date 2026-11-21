@@ -309,7 +309,11 @@ window.AlbumUI = (() => {
       if(recordingKey==="official")officialVisible++;else clusterVisible++;
     };
     for(const song of edition.tracks){
-      const local=detail.tracks.filter(t=>t.mbid===song.recording_id);
+      const scoped=detail.tracks.filter(t=>t.mbid===song.recording_id);
+      const scopedIds=new Set(scoped.map(t=>t.id));
+      const extra=(song.local_copies||[]).filter(t=>!scopedIds.has(t.id))
+        .map(t=>({...t,mbid:song.recording_id,out_of_scope:true}));
+      const local=[...scoped,...extra];
       if(!local.length){
         addCard(song,null,"red","Not downloaded in this library",false,false,"official");
         continue;
@@ -318,11 +322,12 @@ window.AlbumUI = (() => {
         const kind=track.locked?"gray":
           track.current_release_id&&track.current_release_id!==edition.id?"orange":"green";
         const message=track.locked?"Album locked · cannot change":
+          track.out_of_scope?"Downloaded but outside this review scope · enable Include already assigned to move":
           kind==="orange"?"Local · currently assigned to another album":
           track.current_release_id===edition.id?"Local · already correctly assigned":
           "Local · no album assigned";
-        addCard(song,track,kind,message,!track.locked,
-          chosenForEdition(track,edition),"official");
+        addCard(song,track,kind,message,!track.locked&&!track.out_of_scope,
+          !track.out_of_scope&&chosenForEdition(track,edition),"official");
       }
     }
     const other=detail.tracks.filter(t=>!seen.has(t.mbid) &&
