@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/static/style.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/force-graph.css?v=__STATIC_VERSION__">
   <script src="/static/ui-state.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/router.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/app.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/spotify-ui.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/metadata-ui.js?v=__STATIC_VERSION__" defer></script>
@@ -29,16 +30,16 @@
 </header>
 
 <nav class="tabs" aria-label="Application sections">
-  <button type="button" class="tab active" data-tab="music">Music</button>
-  <button type="button" class="tab" data-tab="approval">Approval</button>
-  <button type="button" class="tab" data-tab="catalogue">Catalogue</button>
-  <button type="button" class="tab" data-tab="album">Album</button>
-  <button type="button" class="tab" data-tab="language">Language</button>
-  <button type="button" class="tab" data-tab="graph">Graph</button>
-  <button type="button" class="tab" data-tab="sources">Sources</button>
-  <button type="button" class="tab" data-tab="activity">Activity</button>
-  <button type="button" class="tab" data-tab="maintenance">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></button>
-  <button type="button" class="tab" data-tab="help">Help</button>
+  <a class="tab active" data-tab="music" href="/">Music</a>
+  <a class="tab" data-tab="approval" href="/">Approval</a>
+  <a class="tab" data-tab="catalogue" href="/">Catalogue</a>
+  <a class="tab" data-tab="album" href="/">Album</a>
+  <a class="tab" data-tab="language" href="/">Language</a>
+  <a class="tab" data-tab="graph" href="/">Graph</a>
+  <a class="tab" data-tab="sources" href="/">Sources</a>
+  <a class="tab" data-tab="activity" href="/">Activity</a>
+  <a class="tab" data-tab="maintenance" href="/">Maintenance <span id="maintenanceBadge" class="count-badge" hidden></span></a>
+  <a class="tab" data-tab="help" href="/">Help</a>
 </nav>
 
 <div id="notice" role="status" aria-live="polite" hidden></div>
