@@ -189,7 +189,7 @@ window.AlbumUI = (() => {
       clearTimeout(ui.familyTimer);ui.familyTimer=null;
       if(!$("albumValidateDialog").open)$("albumValidateDialog").close?.();
       notice(response.total_tracks+" recordings in "+response.total_clusters+
-        " release-group workspace(s). Assigned songs remain visible but read-only unless included.");
+        " release-group workspace(s). Assigned songs remain visible; manually selecting them is always possible.");
       const work=ui.detail&&clusterWork();
       if(work?.selected && !releases().some(a=>a.id===work.selected))work.selected=null;
       renderAll();
@@ -820,8 +820,8 @@ window.AlbumUI = (() => {
 
   $("albumRefresh").addEventListener("click",()=>loadClusters(ui.focus));
   $("albumIncludeAssigned").addEventListener("change",()=>{
-    const hasChoices=[...ui.work.values()].some(w=>w.unchecked.size);
-    if(hasChoices&&!confirm("Changing the scope will reset your unchecked song choices. Continue?")){
+    const hasChoices=[...ui.work.values()].some(w=>w.unchecked.size||w.manual.size);
+    if(hasChoices&&!confirm("Changing preselection will reset your manual song choices. Continue?")){
       $("albumIncludeAssigned").checked=!$("albumIncludeAssigned").checked;
       return;
     }
