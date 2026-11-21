@@ -93,6 +93,7 @@ function setFilter(value) {
   $("ignoredMusicPanel").hidden = state.musicView !== "ignored";
   for (const tab of $("stats").children) tab.setAttribute("aria-pressed", String(tab.dataset.filter === value));
   if (value === "IGNORED") {
+    routeWrite(musicRoute());
     state.ignoredPage = 1;
     guard(async () => reportErrors(await Promise.allSettled([loadIgnored(false), loadDisabledOrigins(false)])))();
     return;
@@ -100,6 +101,7 @@ function setFilter(value) {
   $("filter").value = value;
   state.page = 1;
   state.generation += 1;
+  routeWrite(musicRoute());
   guard(() => refreshTracks(false))();
 }
 
@@ -251,7 +253,7 @@ function updateKeyedChildren(container, items, {key, signature, render, backgrou
   }
 }
 
-function setTab(name, activateApproval = true, {skipEnter = false} = {}) {
+function setTab(name, activateApproval = true, {skipEnter = false, noHistory = false} = {}) {
   if (state.tab === "approval" && name !== "approval") window.MetadataUI?.leave();
   if (state.tab === "catalogue" && name !== "catalogue") window.CatalogueUI?.leave();
   if (state.tab === "album" && name !== "album") window.AlbumUI?.leave();
@@ -273,8 +275,10 @@ function setTab(name, activateApproval = true, {skipEnter = false} = {}) {
   }
   if (name === "maintenance") guard(() => refreshMaintenance(false))();
   if (name === "activity" && state.followLogs) requestAnimationFrame(followLatestEvents);
-  if (name === "music") routeWrite(musicRoute());
-  else routeWrite(pageRoute(name));
+  if (!noHistory) {
+    if (name === "music") routeWrite(musicRoute());
+    else routeWrite(pageRoute(name));
+  }
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
@@ -773,7 +777,7 @@ $("replacementForm").addEventListener("submit", async event => {
 async function showDetails(track) {
   const current = beginRequest("details");
   const details = await api(`/api/tracks/${encodeURIComponent(track.id)}?user_id=${encodeURIComponent(state.user)}`, null, null, current);
-  if (!current()) return;
+  if (!current() || state.tab !== "music") return;
   $("detailsTitle").textContent = details.matched_title || details.title;
   const body = $("detailsBody");
   const grid = node("div", null, "details-grid");
@@ -862,17 +866,21 @@ async function showDetails(track) {
   grid.append(tags, technical, origins, assets, history);
   window.AlbumUI?.mountTrack(details, grid, api, () => refreshTracks(false));
   body.replaceChildren(grid);
-  $("detailsDialog").showModal();
+  if (!$("detailsDialog").open) $("detailsDialog").showModal();
+  routeWrite(musicRoute({trackId:track.id}));
 }
 
 // Let Catalogue's rare album-mismatch review open the exact local song,
 // even when it is not on the currently visible Music page.
 window.openAlbumTrackDetails = async trackId => {
   if(!state.user||!trackId)return;
-  setTab("music");
+  setTab("music", true, {noHistory:true});
   await showDetails({id:trackId});
 };
 $("closeDetails").addEventListener("click", () => $("detailsDialog").close());
+$("detailsDialog").addEventListener("close", () => {
+  if (state.tab === "music") routeWrite(musicRoute(), true);
+});
 
 function renderTrack(track) {
   state.tracks.set(track.id, track);
@@ -1095,6 +1103,7 @@ async function refreshTracks(background = true) {
   state.maxPage = Math.max(1, Math.ceil(data.total / data.limit));
   if (state.page > state.maxPage) {
     state.page = state.maxPage;
+    routeWrite(musicRoute(), true);
     return refreshTracks(background);
   }
   for (const suffix of ["", "Bottom"]) {
@@ -1427,18 +1436,21 @@ $("search").addEventListener("input", () => {
   searchTimer = setTimeout(() => {
     state.page = 1;
     state.generation += 1;
+    routeWrite(musicRoute(), true);
     guard(() => refreshTracks(false))();
   }, 300);
 });
 $("filter").addEventListener("change", () => {
   state.page = 1;
   state.generation += 1;
+  routeWrite(musicRoute());
   guard(() => refreshTracks(false))();
 });
 for (const suffix of ["", "Bottom"]) {
   for (const [direction, delta] of [["prev", -1], ["next", 1]]) {
     $(direction + suffix).addEventListener("click", guard(async () => {
       state.page = Math.max(1, Math.min(state.maxPage, state.page + delta));
+      routeWrite(musicRoute());
       await refreshTracks(false);
       if (suffix) $("musicResults").scrollIntoView?.({block: "start"});
     }));
