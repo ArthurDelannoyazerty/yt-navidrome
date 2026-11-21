@@ -240,8 +240,24 @@ window.AlbumUI = (() => {
     }
     const work=clusterWork(),edition=activeEdition();
     if(!work.selected){
-      $("albumMusicContext").textContent="Select an edition in the middle column. Album titles and recording IDs must be verified before assigning anything.";
-      body.append(element("p","Select an edition to see its full official tracklist, plus other local music in this cluster.","hint"));
+      $("albumMusicContext").textContent="Select an edition to inspect official track membership. Unassigned songs can still be marked No Album Found after review.";
+      for(const track of detail.tracks){
+        const kind=track.locked?"gray":track.current_release_id?"purple":"blue";
+        if($("albumOnlyGreen").checked)continue;
+        const card=element("article",null,"album-track-comparison album-music-"+kind);
+        const label=element("div",null,"album-track-decision");
+        const check=element("input");check.type="checkbox";check.disabled=true;check.checked=false;
+        check.setAttribute("aria-label","Not eligible until an edition is chosen");
+        const bodyText=element("div",null,"album-track-decision-label");
+        bodyText.append(bilingual(track));
+        bodyText.append(element("small",track.locked?"Album locked":
+          track.current_release_id?"Assigned to another release":"Local song without an album","hint"));
+        label.append(check,bodyText);card.append(label);
+        if(kind==="blue"&&track.mbid&&!track.not_found)
+          card.append(button("No Album Found",()=>markNotFound(track),"secondary album-not-found-action"));
+        body.append(card);
+      }
+      if(!body.childNodes.length)body.append(element("p","Select an edition to display its green songs.","hint"));
       renderRemaining();return;
     }
     if(!edition?.complete){
@@ -364,6 +380,14 @@ window.AlbumUI = (() => {
       const preview=await api("/api/albums/plan-preview",{user_id:user,decisions});
       if(!active(user,serial)||ui.focus!==focus||clusterWork().selected!==edition.id)return;
       ui.preview={...preview,selectedIds:counts.selected.map(t=>t.id),edition_id:edition.id};
+      if(!preview.can_apply){
+        for(const row of preview.items)
+          if(row.status==="UNCHANGED")clusterWork().resolved.add(row.track_id);
+        ui.preview=null;
+        notice(counts.unchanged.length+" recordings already use this edition. "+
+          "No audio changes were needed; incompatible or locked records remain unchanged.");
+        renderMusic();return;
+      }
       const incompatible=preview.items.filter(t=>!["COMPATIBLE","UNCHANGED"].includes(t.status));
       $("albumValidateTitle").textContent="Validate Album — "+edition.name;
       $("albumValidateSummary").textContent=
