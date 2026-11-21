@@ -347,6 +347,9 @@ window.AlbumUI = (() => {
       }else notice("This recording cannot currently be marked No Album Found.",true);
     }catch(error){if(active(user,serial))notice(error.message,true);}
   }
+  function renderAll(){
+    renderNavigation();renderAlbums();renderMusic();renderPreference();
+  }
   async function validateEdition(){
     const detail=ui.detail,edition=activeEdition();
     if(!detail||!edition?.complete)return;
@@ -471,7 +474,7 @@ window.AlbumUI = (() => {
         body.append(row);
       }
       if(!rows?.length)body.append(element("p","No album changes yet.","hint"));
-    }catch(error){if(active(user,serial))notice(error.message,true,"albumPlanStatus");}
+    }catch(error){if(active(user,serial))notice(error.message,true,"albumClusterStatus");}
   }
   function renderPreference(){
     const src=$("albumPreferenceSource").value;
