@@ -4,7 +4,8 @@ window.CatalogueUI = (() => {
   const byId = id => document.getElementById(id);
   const ui = { user: null, detail: null, results: [],
     busy: false, serial: 0, prefetchTimer: null, cacheActionPending: false,
-    failedLoading: false, failedSerial: 0, failedTotal: null, failedVisible: 0 };
+    failedLoading: false, failedSerial: 0, failedTotal: null, failedVisible: 0,
+    contradictionsSerial: 0, contradictionsVisible: 0, contradictionsTotal: null };
   const current = (user, serial) => user === state.user && serial === ui.serial;
   const element = (tag, text, cls) => {
     const e = document.createElement(tag);
@@ -26,6 +27,7 @@ window.CatalogueUI = (() => {
   function leave() {
     clearTimeout(ui.prefetchTimer); ui.prefetchTimer = null;
     ui.failedSerial++; ui.failedLoading = false;
+    ui.contradictionsSerial++;
     byId("approvalCacheConfirm").hidden = true;
   }
   function reset() {
@@ -33,6 +35,12 @@ window.CatalogueUI = (() => {
     ui.user = null; ui.detail = null; ui.results = [];
     ui.serial++;
     ui.failedTotal = null; ui.failedVisible = 0;
+    ui.contradictionsTotal=null;ui.contradictionsVisible=0;
+    byId("catalogueContradictions").open=false;
+    byId("catalogueContradictionCount").textContent="0";
+    byId("catalogueContradictionStatus").textContent="";
+    byId("catalogueContradictionList").replaceChildren();
+    byId("catalogueContradictionMore").hidden=true;
     byId("approvalFailedSection").open = false;
     byId("approvalFailedList").replaceChildren();
     byId("approvalFailedMore").hidden = true;
@@ -221,15 +229,56 @@ window.CatalogueUI = (() => {
       byId("approvalCacheClean").disabled = false;
     }
   }
+  async function loadContradictions(reset=true) {
+    const user=ui.user,serial=++ui.contradictionsSerial;
+    if(!user||state.tab!=="catalogue")return;
+    const open=byId("catalogueContradictions").open;
+    const offset=reset?0:ui.contradictionsVisible;
+    const limit=open?50:1;
+    try {
+      const result=await api("/api/albums/contradictions?"+
+        new URLSearchParams({user_id:user,offset:String(offset),limit:String(limit)}));
+      if(user!==ui.user||state.user!==user||state.tab!=="catalogue"||
+         serial!==ui.contradictionsSerial)return;
+      ui.contradictionsTotal=result.total;
+      byId("catalogueContradictionCount").textContent=num(result.total);
+      if(!open)return;
+      const list=byId("catalogueContradictionList");
+      if(reset)list.replaceChildren();
+      for(const item of result.items||[]){
+        const row=element("article",null,"catalogue-contradiction-row");
+        const info=element("div",null,"catalogue-contradiction-info");
+        info.append(element("strong",item.title),
+          element("small","Currently assigned: "+item.album+
+            (item.locked?" · Album locked":"")),
+          element("small","The exact MusicBrainz recording is absent from this edition's complete tracklist."));
+        const openButton=button("Review in Music",async()=>{
+          if(user!==state.user)return;
+          await window.openAlbumTrackDetails?.(item.track_id);
+        });
+        row.append(info,openButton);list.append(row);
+      }
+      ui.contradictionsVisible=offset+(result.items||[]).length;
+      byId("catalogueContradictionMore").hidden=ui.contradictionsVisible>=result.total;
+      byId("catalogueContradictionStatus").textContent=result.total
+        ? result.total+" recorded mismatch(es) with fully cached editions. These remain unchanged until you review them."
+        : "No confirmed album mismatches detected.";
+    }catch(error){
+      if(user===ui.user&&state.tab==="catalogue"&&serial===ui.contradictionsSerial)
+        message(error.message||String(error),true,"catalogueContradictionStatus");
+    }
+  }
   async function enter() {
     if (!state.user) return;
     if (ui.user === state.user) {
       void refreshPrefetchStatus();
+      void loadContradictions(true);
       return;
     }
     reset();
     ui.user = state.user;
     void refreshPrefetchStatus();
+    void loadContradictions(true);
     const user = ui.user, serial = ui.serial;
     try {
       const progress = await api(`/api/catalogue/progress?user_id=${encodeURIComponent(user)}`);
@@ -351,6 +400,10 @@ window.CatalogueUI = (() => {
     byId("catalogueResults").style.maxHeight = `${value}px`;
     byId("catalogueResultsHeightValue").textContent = `${value} px`;
   }
+  byId("catalogueContradictions").addEventListener("toggle",()=>{
+    if(state.tab==="catalogue"&&ui.user)void loadContradictions(true);
+  });
+  byId("catalogueContradictionMore").addEventListener("click",()=>loadContradictions(false));
   byId("approvalFailedSection").addEventListener("toggle", () => {
     if (byId("approvalFailedSection").open) void refreshFailedJobs(true);
   });
