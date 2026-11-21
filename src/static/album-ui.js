@@ -15,7 +15,7 @@ window.AlbumUI = (() => {
     return el;
   };
   const ui={user:null,serial:0,clusters:[],detail:null,focus:null,work:new Map(),
-    preview:null,searchTimer:null,pollTimer:null,preferences:[],sources:[],fetching:false};
+    preview:null,searchTimer:null,pollTimer:null,familyTimer:null,preferences:[],sources:[],fetching:false};
   const active=(user,serial)=>state.user===user && ui.user===user &&
     state.tab==="album" && ui.serial===serial;
   const notice=(message,error=false,id="albumClusterStatus")=>{
@@ -120,13 +120,15 @@ window.AlbumUI = (() => {
       ui.detail=response.detail||null;
       ui.preview=null;
       clearTimeout(ui.pollTimer);ui.pollTimer=null;
-      $("albumValidateDialog").close?.();
+      clearTimeout(ui.familyTimer);ui.familyTimer=null;
+      if(!$("albumValidateDialog").open)$("albumValidateDialog").close?.();
       notice(response.total_tracks+" recordings in "+response.total_clusters+
         " release-group workspace(s). Assigned songs remain visible but read-only unless included.");
       const work=ui.detail&&clusterWork();
       if(work?.selected && !releases().some(a=>a.id===work.selected))work.selected=null;
       renderAll();
       if(work?.selected)void loadEdition(work.selected);
+      if(ui.detail?.cache_progress?.discovering_editions) scheduleFamilyRefresh();
     } catch(error){if(active(user,serial))notice(error.message,true);}
     finally{if(active(user,serial))ui.fetching=false;}
   }
@@ -207,6 +209,15 @@ window.AlbumUI = (() => {
         void loadClusters(focus);
       }
     },5000);
+  }
+  function scheduleFamilyRefresh(){
+    clearTimeout(ui.familyTimer);
+    const user=ui.user,serial=ui.serial,focus=ui.focus;
+    ui.familyTimer=setTimeout(()=>{
+      if(!active(user,serial)||ui.focus!==focus)return;
+      if($("albumValidateDialog").open){scheduleFamilyRefresh();return;}
+      void loadClusters(focus);
+    },12000);
   }
   function renderSelected(){
     const work=ui.detail&&clusterWork();
@@ -591,10 +602,12 @@ window.AlbumUI = (() => {
   }
   function leave(){
     ui.serial++;clearTimeout(ui.searchTimer);clearTimeout(ui.pollTimer);
+    clearTimeout(ui.familyTimer);ui.familyTimer=null;
     ui.pollTimer=null;$("albumValidateDialog").close?.();
   }
   function reset(){
     ui.serial++;clearTimeout(ui.searchTimer);clearTimeout(ui.pollTimer);
+    clearTimeout(ui.familyTimer);ui.familyTimer=null;
     ui.searchTimer=null;ui.pollTimer=null;
     ui.user=null;ui.clusters=[];ui.detail=null;ui.focus=null;ui.preview=null;
     ui.work.clear();ui.sources=[];ui.preferences=[];ui.fetching=false;
