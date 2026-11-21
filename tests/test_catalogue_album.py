@@ -1655,3 +1655,130 @@ def test_album_cache_progress_includes_release_group_discovery_and_tracklists(db
         assert status["total"] >= 1
         assert status["pending"] >= 1
         assert status["cached_tracklists"] >= 2
+
+
+
+def test_album_position_override_updates_recording_tags_and_undo_restores_identity(
+        db, environment, monkeypatch):
+    """An explicit different-MBID track slot updates tags, DB, and history reversibly."""
+    import album_management
+    from album_workspace import AlbumWorkspace
+    from mutagen.oggopus import OggOpus
+
+    monkeypatch.setattr(album_management, "LIBRARY", environment[1])
+    cat, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    tid, path, original_sha = add_audio_track(db, environment, RECORDING_1)
+    proposal = workspace.preview("admin", [{
+        "track_id": tid, "action": "release", "release_id": RELEASE_B,
+        "target_recording_id": RECORDING_4,
+    }])
+    assert proposal["can_apply"] == 1
+    item = proposal["items"][0]
+    assert item["recording_id"] == RECORDING_1
+    assert item["target_recording_id"] == RECORDING_4
+    assert item["release_tags"]["replace_recording_id"] == RECORDING_4
+    assert item["status"] == "COMPATIBLE"
+    assert sha256_file(path) == original_sha
+    assert db.one("SELECT mbid,release_id FROM tracks WHERE id=?", (tid,))["mbid"] == RECORDING_1
+
+    applied = workspace.apply("admin", proposal["preview_token"])
+    assert applied["queued"] == 1
+    change = db.one("SELECT * FROM album_changes WHERE group_id=?", (applied["group_id"],))
+    assert change["old_recording_id"] == RECORDING_1
+    assert change["new_recording_id"] == RECORDING_4
+    albums.prepare(change["id"], "admin", "apply")
+    audio = OggOpus(path)
+    assert audio["title"] == ["Track"]
+    assert audio["artist"] == ["Artist"]
+    assert audio["musicbrainz_trackid"] == [RECORDING_4]
+    assert audio["musicbrainz_recordingid"] == [RECORDING_4]
+    assert audio["musicbrainz_albumid"] == [RELEASE_B]
+    # Only the durable finalization step updates the database.
+    assert db.one("SELECT mbid FROM tracks WHERE id=?", (tid,))["mbid"] == RECORDING_1
+    albums.finalize(change["id"], "admin", "apply", beets_id=None)
+    updated = db.one("SELECT mbid,release_id,file_path FROM tracks WHERE id=?", (tid,))
+    assert (updated["mbid"], updated["release_id"], updated["file_path"]) == (
+        RECORDING_4, RELEASE_B, str(path))
+    assert db.one("SELECT reason FROM identity_history WHERE track_id=?", (tid,))["reason"] == "album_edition_apply"
+
+    db.execute("UPDATE jobs SET state='DONE' WHERE kind='album' AND target=?", (change["id"],))
+    assert albums.undo("admin", change["id"])["queued"]
+    albums.prepare(change["id"], "admin", "undo")
+    albums.finalize(change["id"], "admin", "undo", beets_id=None)
+    assert sha256_file(path) == original_sha
+    old = db.one("SELECT mbid,release_id FROM tracks WHERE id=?", (tid,))
+    assert (old["mbid"], old["release_id"]) == (RECORDING_1, RELEASE_A)
+    assert len(db.rows("SELECT * FROM identity_history WHERE track_id=?", (tid,))) == 2
+
+
+def test_album_override_blocks_duplicate_or_unlisted_recording_ids(db, environment, monkeypatch):
+    from album_workspace import AlbumWorkspace
+    import album_management
+    monkeypatch.setattr(album_management, "LIBRARY", environment[1])
+    cat, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    tid, _, _ = add_audio_track(db, environment, RECORDING_1)
+    duplicate, _, _ = add_audio_track(db, environment, RECORDING_4)
+    duplicate_preview = workspace.preview("admin", [{
+        "track_id": tid, "action": "release", "release_id": RELEASE_B,
+        "target_recording_id": RECORDING_4,
+    }])
+    assert duplicate_preview["can_apply"] == 0
+    assert duplicate_preview["items"][0]["status"] == "DUPLICATE_RECORDING"
+    with pytest.raises(ValueError, match="Nothing eligible"):
+        workspace.apply("admin", duplicate_preview["preview_token"])
+    invalid = workspace.preview("admin", [{
+        "track_id": tid, "action": "release", "release_id": RELEASE_B,
+        "target_recording_id": RECORDING_1,
+    }])
+    assert invalid["items"][0]["status"] == "INCOMPATIBLE"
+    with pytest.raises(ValueError, match="only receive one local track"):
+        workspace.preview("admin", [
+            {"track_id": tid, "action": "release", "release_id": RELEASE_B,
+             "target_recording_id": RECORDING_2},
+            {"track_id": duplicate, "action": "release", "release_id": RELEASE_B,
+             "target_recording_id": RECORDING_2},
+        ])
+    with pytest.raises(ValueError, match="Invalid destination MusicBrainz recording"):
+        workspace.preview("admin", [{
+            "track_id": tid, "action": "release", "release_id": RELEASE_B,
+            "target_recording_id": "not-a-uuid",
+        }])
+
+
+def test_album_override_stale_identity_is_rejected_before_queue(db, environment, monkeypatch):
+    import album_management
+    from album_workspace import AlbumWorkspace
+    monkeypatch.setattr(album_management, "LIBRARY", environment[1])
+    _, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    tid, _, _ = add_audio_track(db, environment, RECORDING_1)
+    proposal = workspace.preview("admin", [{
+        "track_id": tid, "action": "release", "release_id": RELEASE_B,
+        "target_recording_id": RECORDING_4,
+    }])
+    db.execute("UPDATE tracks SET mbid=? WHERE id=?", (RECORDING_2, tid))
+    with pytest.raises(ValueError, match="changed since preview"):
+        workspace.apply("admin", proposal["preview_token"])
+    assert not db.rows("SELECT * FROM album_changes WHERE track_id=?", (tid,))
+
+
+def test_album_override_with_same_release_still_corrects_recording_id(db, environment, monkeypatch):
+    import album_management
+    from album_workspace import AlbumWorkspace
+    monkeypatch.setattr(album_management, "LIBRARY", environment[1])
+    _, albums = setup_catalogue(db)
+    workspace = AlbumWorkspace(albums)
+    workspace.init()
+    tid, _, _ = add_audio_track(db, environment, RECORDING_1)
+    db.execute("UPDATE tracks SET release_id=? WHERE id=?", (RELEASE_B, tid))
+    proposal = workspace.preview("admin", [{
+        "track_id": tid, "action": "release", "release_id": RELEASE_B,
+        "target_recording_id": RECORDING_4,
+    }])
+    assert proposal["can_apply"] == 1
+    assert proposal["items"][0]["status"] == "COMPATIBLE"
