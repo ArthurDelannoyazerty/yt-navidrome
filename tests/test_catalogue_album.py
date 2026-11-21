@@ -1546,7 +1546,9 @@ def test_album_edition_knows_downloaded_songs_excluded_by_unassigned_only_scope(
     edition = clusters.edition("admin", unassigned, RELEASE_B)
     assert edition["complete"]
     by_recording = {r["recording_id"]: r for r in edition["tracks"]}
-    assert assigned not in by_recording[RECORDING_2]["local_track_ids"]
+    # Assigned recordings are now visible in context but remain read-only.
+    assert assigned in by_recording[RECORDING_2]["local_track_ids"]
+    assert not next(t for t in cluster["detail"]["tracks"] if t["id"] == assigned)["in_scope"]
     assert by_recording[RECORDING_2]["local_copies"] == [
         {"id": assigned, "current_release_id": RELEASE_A,
          "locked": False, "display_title": "Track"}
@@ -1576,6 +1578,8 @@ def test_release_group_workspaces_do_not_merge_compilations_or_featured_artists(
         }]})
     shared, _, _ = add_audio_track(db, environment, RECORDING_2)
     other, _, _ = add_audio_track(db, environment, independent_recording)
+    # This song is on the compilation but is not assigned to the other album.
+    db.execute("UPDATE tracks SET release_id=NULL WHERE id=?", (other,))
     clusters = AlbumClusters(albums)
     clusters.init()
     result = clusters.list("admin", include_assigned=True)
@@ -1589,21 +1593,28 @@ def test_release_group_workspaces_do_not_merge_compilations_or_featured_artists(
 def test_im25_sibling_editions_offer_read_only_different_mbid_matches(db, environment):
     """Ten songs across two releases stay visible, without unsafe automatic moves."""
     from album_clusters import AlbumClusters
-    import uuid as _uuid
-    cat, albums = setup_catalogue(db, (RELEASE_A, [RECORDING_1]), (RELEASE_B, [RECORDING_4]))
-    # Deliberately different MusicBrainz recording IDs, identical song title.
+    cat, albums = setup_catalogue(db, (RELEASE_A, [RECORDING_1]),
+                                  (RELEASE_B, [RECORDING_4, RECORDING_2]))
+    # The B release has a Business as Usual identity not owned locally, plus
+    # an unrelated local member anchoring the sibling family.
     with cat.db() as con:
-        for release, recording in ((RELEASE_A, RECORDING_1), (RELEASE_B, RECORDING_4)):
-            cat._store_release_tracks(con, {
-                "id": release, "media": [{"position": 1, "tracks": [{
-                    "position": 3, "title": "Business as Usual",
-                    "length": 175000, "recording": {
-                        "id": recording, "title": "Business As Usual", "length": 175000,
-                    },
-                }]}],
-            })
+        cat._store_release_tracks(con, {
+            "id": RELEASE_A, "media": [{"position": 1, "tracks": [{
+                "position": 3, "title": "Business as Usual", "length": 175000,
+                "recording": {"id": RECORDING_1, "title": "Business As Usual", "length": 175000},
+            }]}],
+        })
+        cat._store_release_tracks(con, {
+            "id": RELEASE_B, "media": [{"position": 1, "tracks": [{
+                "position": 3, "title": "Business as Usual", "length": 175000,
+                "recording": {"id": RECORDING_4, "title": "Business As Usual", "length": 175000},
+            }, {
+                "position": 4, "title": "Boss La Rosh", "length": 195000,
+                "recording": {"id": RECORDING_2, "title": "Boss La Rosh", "length": 195000},
+            }]}],
+        })
     first, _, _ = add_audio_track(db, environment, RECORDING_1)
-    second, _, _ = add_audio_track(db, environment, RECORDING_4)
+    second, _, _ = add_audio_track(db, environment, RECORDING_2)
     db.execute("UPDATE tracks SET release_id=NULL WHERE id=?", (first,))
     db.execute("UPDATE tracks SET release_id=? WHERE id=?", (RELEASE_B, second))
     clusters = AlbumClusters(albums)
@@ -1618,6 +1629,7 @@ def test_im25_sibling_editions_offer_read_only_different_mbid_matches(db, enviro
     assert album["tracks"][0]["local_track_ids"] == [first]
     other = clusters.edition("admin", GROUP, RELEASE_B)
     assert other["matched_track_ids"] == [second]
+    assert not other["tracks"][0]["local_track_ids"]
     assert any(m["id"] == first for m in other["tracks"][0]["possible_local_matches"])
     assert first not in other["matched_track_ids"]
     assert other["possible_match_count"] == 1
