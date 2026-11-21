@@ -324,7 +324,7 @@
         <div id="albumReleaseList" class="album-column-scroll" role="listbox" aria-label="Candidate albums in this cluster"></div>
         <div class="album-edition-footer">
           <p id="albumSelectedTitle" class="hint">Choose an edition to inspect the differences.</p>
-          <button id="albumEditionUse" type="button" disabled>Use for remaining matching songs</button>
+          <button id="albumEditionUse" type="button" disabled>Validate Album</button>
           <details id="albumMoreEditions">
             <summary>Find another album edition</summary>
             <form id="albumReleaseSearchForm">
@@ -342,34 +342,38 @@
       </section>
       <section class="album-cluster-column album-music-column" aria-labelledby="albumMusicHeading">
         <div class="album-column-heading">
-          <h3 id="albumMusicHeading">Recordings outside this edition</h3>
-          <label class="check album-show-included"><input id="albumShowIncluded" type="checkbox"> Show included songs</label>
+          <h3 id="albumMusicHeading">Tracks on this edition</h3>
+          <label class="check album-show-included"><input id="albumOnlyGreen" type="checkbox"> Green tracks only</label>
         </div>
         <p class="hint album-music-context" id="albumMusicContext"></p>
-        <div id="albumMusicList" class="album-column-scroll album-track-cards" aria-label="Matching and excluded recordings"></div>
+        <div id="albumMusicList" class="album-column-scroll album-track-cards" aria-label="Official edition tracks and related local music"></div>
         <div class="album-music-footer">
-          <p class="hint" id="albumRemainingStatus" role="status"></p>
-          <div class="row">
-            <button id="albumMarkUnfound" type="button" class="secondary">No Album Found for remaining albumless songs</button>
-            <button id="albumKeepAssigned" type="button" class="secondary">Keep current for remaining assigned songs</button>
+          <div id="albumMusicLegend" class="album-music-legend" aria-label="Track colors">
+            <span><i class="album-legend-dot album-dot-green"></i> Local</span>
+            <span><i class="album-legend-dot album-dot-orange"></i> Another album</span>
+            <span><i class="album-legend-dot album-dot-red"></i> Not local</span>
+            <span><i class="album-legend-dot album-dot-gray"></i> Locked</span>
+            <span><i class="album-legend-dot album-dot-purple"></i> Cluster / other album</span>
+            <span><i class="album-legend-dot album-dot-blue"></i> Cluster / unassigned</span>
           </div>
+          <p class="hint" id="albumRemainingStatus" role="status"></p>
         </div>
       </section>
     </div>
-    <section class="album-workspace-card album-cluster-plan" aria-labelledby="albumPlanTitle">
-      <div class="album-card-heading"><h3 id="albumPlanTitle">Cluster assignment plan</h3>
-        <div class="row">
-          <button id="albumPlanClear" type="button" class="secondary">Reset this cluster</button>
-          <button id="albumPlanPreview" type="button">Review changes</button>
-        </div></div>
-      <p id="albumPlanSummary" class="hint" role="status">Choose an edition to build an assignment plan. Excluded songs remain for the next edition.</p>
-      <div id="albumPlanResults" class="album-plan-results"></div>
-      <div id="albumPlanConfirm" class="row" hidden>
-        <button id="albumPlanApply" type="button">Confirm album changes</button>
-        <button id="albumPlanCancel" type="button" class="secondary">Back to comparison</button>
+    <dialog id="albumValidateDialog" class="album-validate-dialog" aria-labelledby="albumValidateTitle">
+      <div class="album-validate-body">
+        <h3 id="albumValidateTitle">Confirm album assignments</h3>
+        <p id="albumValidateSummary" class="hint" role="status"></p>
+        <div id="albumValidateImpact" class="album-impact"></div>
+        <div id="albumValidateDetails" class="album-validate-details"></div>
+        <p class="hint">Only eligible, checked recordings will be updated. Album locks, exact MusicBrainz membership and audio backups are verified again when you confirm.</p>
+        <div class="row album-validate-actions">
+          <button id="albumValidateConfirm" type="button">Confirm album changes</button>
+          <button id="albumValidateCancel" type="button" class="secondary">Cancel</button>
+        </div>
+        <p id="albumValidateStatus" class="hint" role="status" aria-live="polite"></p>
       </div>
-      <p id="albumPlanStatus" class="hint" aria-live="polite"></p>
-    </section>
+    </dialog>
     <details class="album-workspace-card album-history" id="albumPreferenceSection">
       <summary>Advanced: preferences for future recordings from a source</summary>
       <p class="hint">Optional. Preferences affect future compatible recordings only, not existing assignments. This is not a filter for the cluster workspace.</p>
@@ -680,8 +684,8 @@
         <section id="help-album" class="help-topic" aria-labelledby="help-album-title">
           <h3 id="help-album-title">Album</h3>
           <p>Album groups your local library's music into connected recording/album clusters using exact MusicBrainz release evidence. By default it examines music without an assigned album; enable <strong>Include recordings already assigned</strong> to review the whole library. Search a song name to find its complete cluster, and move between clusters with Previous/Next.</p>
-          <p>Three columns stay on the same screen on desktop: clusters, editions sorted by verified recording coverage, and songs outside the currently selected edition. Click an edition to see excluded recordings in red; switch on <strong>Show included songs</strong> to see exact recording matches in green. Original and preferred English titles are shown whenever both are cached. A missing full release tracklist is unknown, not a negative match.</p>
-          <p>Use an edition to stage its <em>remaining</em> matching songs. Excluded recordings stay in the cluster so you can choose another edition. Use <strong>No Album Found</strong> for remaining albumless songs or explicitly keep an existing album. Review the cluster plan and confirm before any tags change. History and undo remain available.</p>
+          <p>Three columns stay on the same screen on desktop: clusters, editions sorted by exact recording coverage, and the complete official tracklist of the selected edition. Green means local, orange means local but in another album, red means not downloaded, gray means album locked, and purple/blue mean other local recordings in the cluster but absent from the edition. Green and orange songs are checked by default; red, gray and cluster-only songs are unchecked and unavailable. The compact legend is below the music panel.</p>
+          <p>MusicBrainz release tracklists are prefetched automatically in the durable local catalogue, prioritizing the selected cluster. Use <strong>Green tracks only</strong> to filter to green songs. Uncheck individual eligible tracks you wish to exclude, including orange songs already assigned elsewhere. Click <strong>Validate Album</strong> for a concise review and confirmation; this queues reversible album-only tag jobs. Cluster-only recordings remain for the next edition. An individual albumless cluster-only song can be marked <strong>No Album Found</strong>. History and Undo remain available.</p>
           <p>On the Music tab, open the track's <strong>Album / lock</strong> entry to manually search and review a different album for that one recording, or lock its album against automatic and manual reassignment until explicitly unlocked. The Artwork editor remains responsible for covers.</p>
         </section>
         <section id="help-language" class="help-topic" aria-labelledby="help-language-title">
