@@ -1561,6 +1561,9 @@ test("real browser: Select all includes alternate recording IDs and manual posit
   await chrome.until("document.querySelector('#user option[value=admin]')");
   await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
   await chrome.evaluate("document.querySelector('[data-tab=album]').click()");
+  // The fixture's older mock API still hides assigned copies until this flag.
+  await chrome.evaluate("document.querySelector('#albumIncludeAssigned').click()");
+  await chrome.until("document.querySelector('#albumClusterSummary').textContent.includes('4 recordings')");
   await chrome.until("document.querySelectorAll('.album-edition-choice').length===1");
   await chrome.evaluate("document.querySelector('.album-edition-choice').click()");
   await chrome.until("document.querySelectorAll('.album-music-candidate').length===2");
