@@ -718,6 +718,36 @@ test("real browser: the collapsed music picker is bounded, searchable and indepe
   assert.deepEqual(chrome.errors,[]);
 });
 
+test("real browser: Music waiting rows use Review metadata to open the correct Approval entry", {timeout:60000}, async t=>{
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures(), second=structuredClone(data.tracks[0]);
+  second.id="track-2";second.title="Second waiting song";
+  second.origins[0].title="Second waiting source";
+  second.origins[0].id="origin-2";second.current_origin_id="origin-2";
+  second.approval_token="b".repeat(64);
+  data.tracks.push(second);
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]')");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===2");
+  const visible=await chrome.evaluate("Array.from(document.querySelectorAll('#tracks tr[data-key]')).map(row=>({title:row.querySelector('.metadata')?.textContent,selects:row.querySelectorAll('.actions select').length,approve:[...row.querySelectorAll('.actions button')].filter(b=>b.textContent.trim()==='Approve').length,review:[...row.querySelectorAll('.actions button')].filter(b=>b.textContent.trim()==='Review metadata').length,more:row.querySelectorAll('.actions .action-menu').length}))");
+  assert.equal(visible.length,2);
+  for(const row of visible){
+    assert.equal(row.selects,0,"quick suggestion dropdown removed");
+    assert.equal(row.approve,0,"quick approval action removed");
+    assert.equal(row.review,1,"Review metadata remains");
+    assert.equal(row.more,1,"technical source and removal actions remain available");
+  }
+  await chrome.evaluate("(()=>{const row=[...document.querySelectorAll('#tracks tr[data-key]')].find(r=>r.querySelector('.metadata')?.textContent.includes('Second waiting song'));if(!row)throw Error('Second track missing');[...row.querySelectorAll('button')].find(b=>b.textContent==='Review metadata').click()})()");
+  await chrome.until("typeof state!=='undefined' && state.tab==='approval' && document.querySelector('#metadataCurrent')?.textContent==='Second waiting source' && location.pathname==='/libraries/admin/approval/track-2'");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalWorkspace').hidden"),false);
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalFilter').value"),"NEEDS_APPROVAL");
+  assert.equal(data.writes.filter(x=>x.path.endsWith("/action")||x.path==="/api/review/approve").length,0,
+    "navigation must never queue an approval");
+  assert.deepEqual(chrome.errors,[]);
+});
+
 test("real browser: per-track cover comparison, pin, auto-selection and mobile layout", {timeout: 60000}, async t => {
   const chrome = await browser(t);
   if (!chrome) return;
