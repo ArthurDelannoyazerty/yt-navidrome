@@ -57,8 +57,11 @@ def test_music_table_keeps_origin_urls_visible():
     assert 'node("a", origin.url, "origin-url")' in javascript
     assert 'link.target = "_blank";' in javascript
     assert 'link.rel = "noopener noreferrer";' in javascript
-    # Origin links are rendered in renderTrack before the approval/action controls.
-    assert javascript.index('const originList = node("details", null, "origin-links");') < javascript.index('if (track.operation_state === "NEEDS_APPROVAL")')
+    # Source URLs are rendered in the music cell before the action buttons.
+    # Inline approval choices no longer exist; Review metadata owns that flow.
+    assert (javascript.index('const originList = node("details", null, "origin-links");')
+            < javascript.index('const controls = node("div", null, "actions");'))
+    assert 'window.MetadataUI.open(track)' in javascript
     assert ".origin-links {" in css and ".origin-url {" in css
 
 
