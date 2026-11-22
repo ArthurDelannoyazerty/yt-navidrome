@@ -346,20 +346,48 @@ test('disabled-source responses and removal cancellation do not retain stale lib
 });
 
 
-test('Music no longer exposes review selection while per-track approval keeps the displayed token', async()=>{
-  const b=browser(); b.app.state.user='admin';
-  vm.runInContext('refreshTracks=async()=>{};',b.context);
-  const shown={id:'song',user_id:'admin',title:'Song',operation_state:'NEEDS_APPROVAL',health:'AVAILABLE',
-    approval_token:'displayed-token',origins:[],playlists:[],choices:[{title:'First'},{title:'Second'}]};
-  const row=vm.runInContext('renderTrack',b.context)(shown);
-  b.app.state.tracks.set('song',{...shown,approval_token:'unseen-token'});
-  const controls=row.children[3].children[0].children;
-  assert.equal(controls.some(c=>c.tagName==='label'),false);
-  const select=controls.find(c=>c.tagName==='select'); select.value='1';
-  const approve=controls.find(c=>c.textContent==='Approve');
-  const pending=approve.listeners.click();
-  assert.deepEqual(JSON.parse(b.requests[0].options.body),{user_id:'admin',mode:'approve',index:1,approval_token:'displayed-token'});
-  b.requests[0].resolve({message:'Queued'}); await pending;
+test('waiting music has no inline approval picker or Approve button; Review metadata opens this exact track', async()=>{
+  const b=browser();b.app.state.user='admin';
+  const opened=[];
+  b.context.window.MetadataUI={open:track=>{opened.push(track);}};
+  const render=vm.runInContext('renderTrack',b.context);
+  const waiting={id:'track-2',user_id:'admin',title:'Second waiting song',
+    operation_state:'NEEDS_APPROVAL',health:'AVAILABLE',
+    approval_token:'displayed-token',origins:[],playlists:[],
+    choices:[{index:0,title:'Wrong song'},{index:1,title:'Correct song'}]};
+  const row=render(waiting);
+  const actions=row.children[3].children[0].children;
+  assert.equal(row.reviewChoice,undefined,'old inline choice callback is gone');
+  assert.equal(actions.some(c=>c.tagName==='select'),false,'no inline suggestions dropdown');
+  assert.equal(actions.some(c=>c.textContent==='Approve'),false,'no direct Approve button');
+  assert.equal(actions.filter(c=>c.textContent==='Review metadata').length,1);
+  const review=actions.find(c=>c.textContent==='Review metadata');
+  assert.equal(review.className,'primary');
+  assert.equal(review.disabled,false);
+  await review.listeners.click();
+  assert.deepEqual(opened,[waiting],'handoff carries the selected row, not a remembered queue item');
+  assert.equal(b.requests.length,0,'Music review action must not enqueue approval');
+  const more=actions.find(c=>c.tagName==='details'&&c.className==='action-menu');
+  assert.ok(more,'unrelated More actions remain available');
+  assert.ok(more.children[1].children.some(c=>c.textContent==='Sources & details'));
+});
+
+test('review remains available for a waiting track without any suggestions, and metadata corrections keep their menu',async()=>{
+  const b=browser();b.app.state.user='admin';
+  const opened=[];
+  b.context.window.MetadataUI={open:track=>opened.push(track)};
+  const render=vm.runInContext('renderTrack',b.context);
+  const waiting={id:'no-matches',title:'Unmatched',operation_state:'NEEDS_APPROVAL',
+    health:'AVAILABLE',origins:[],playlists:[],choices:[]};
+  const first=render(waiting).children[3].children[0].children;
+  assert.equal(first.some(c=>c.tagName==='select'||c.textContent==='Approve'),false);
+  await first.find(c=>c.textContent==='Review metadata').listeners.click();
+  assert.equal(opened[0],waiting);
+  const approved={...waiting,id:'tagged',operation_state:'IDLE'};
+  const normal=render(approved).children[3].children[0].children;
+  assert.equal(normal.find(c=>c.textContent==='Review metadata').className,'secondary');
+  assert.ok(normal.some(c=>c.tagName==='details'&&c.className==='action-menu'));
+  assert.equal(b.requests.length,0);
 });
 
 // Explicit state contracts are part of the production UI, not test-only models.
