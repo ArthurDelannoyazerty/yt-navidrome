@@ -73,7 +73,6 @@ const state = {
   sources: [],
   events: [],
   tracks: new Map(),
-  approvals: new Map(),
   batchSerial: 0,
   get fastPolling() { return activity.fastPoll.pending; },
   get slowPolling() { return activity.slowPoll.pending; },
@@ -430,7 +429,6 @@ function changeUser() {
   state.generation += 1;
   state.events = [];
   state.tracks.clear();
-  state.approvals.clear();
   state.batchSerial += 1;
   state.systemSignature = "";
   $("logs").replaceChildren();
@@ -622,7 +620,6 @@ async function action(track, mode, extra = {}) {
   });
   if (user !== state.user) return;
   notice(result.message);
-  state.approvals.delete(track.id);
   await refreshTracks(false);
 }
 
@@ -1005,25 +1002,13 @@ function renderTrack(track) {
 
   const controls = node("div", null, "actions");
   const busy = ["QUEUED", "RUNNING", "DEFERRED"].includes(track.operation_state);
-  if (track.operation_state === "NEEDS_APPROVAL") {
-    const select = node("select", null, "approval");
-    select.setAttribute("aria-label", `Metadata suggestion for ${track.matched_title || track.title}`);
-    track.choices.forEach((choice, index) => {
-      const option = node("option", `${choice.kind === "source" ? "Source" : choice.kind === "asis" || choice.asis ? "Current tags" : `Match ${choice.match_score ?? choice.similarity ?? "?"}/100`} | ${choice.artist ? `${choice.artist} - ` : ""}${choice.title}${choice.description ? ` | ${choice.description}` : ""}`);
-      option.value = String(choice.index ?? index);
-      select.append(option);
-    });
-    const previous = state.approvals.get(track.id);
-    select.value = previous && previous.token === track.approval_token ? previous.index : String(track.choices[0]?.index ?? 0);
-    row.reviewChoice = () => Number(select.value);
-    select.addEventListener("change", () => {
-      state.approvals.set(track.id, {index: select.value, token: track.approval_token});
-    });
-    controls.append(select, button("Approve", () => action(track, "approve", {index: Number(select.value)}), "primary"));
-  }
+  // Approve one recording in the dedicated Approval page. Keeping the
+  // suggestion picker here would allow a one-click confirmation without
+  // listening to the track or reviewing its MusicBrainz evidence.
   if (window.SpotifyUI) controls.append(...window.SpotifyUI.controls(track));
   if (window.MetadataUI) {
-    const review = button("Review metadata", () => window.MetadataUI.open(track));
+    const review = button("Review metadata", () => window.MetadataUI.open(track),
+      track.operation_state === "NEEDS_APPROVAL" ? "primary" : "secondary");
     review.disabled = busy;
     controls.append(review);
   }
