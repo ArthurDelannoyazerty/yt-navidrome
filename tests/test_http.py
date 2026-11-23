@@ -43,9 +43,14 @@ def test_bounded_retry_uses_shared_spacing(db, clock):
         calls.append(clock[0])
         return next(values)
 
-    assert policy.send(send, session, request).status_code == 200
-    assert len(calls) == 3
-    assert all(right - left >= 1.1 for left, right in zip(calls, calls[1:]))
+    with pytest.raises(ApiDeferred, match="shared provider cooldown") as deferred:
+        policy.send(send, session, request)
+    # 503 means MusicBrainz throttling or server load. The second attempt is
+    # spaced further out; the third is deferred rather than probing inside
+    # the active shared 10-second cooldown.
+    assert len(calls) == 2
+    assert calls[1] - calls[0] >= 5
+    assert deferred.value.retry_at >= clock[0] + 9.9
     assert session.get_adapter(request.url).max_retries.total == 0
 
 
