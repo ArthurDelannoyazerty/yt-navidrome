@@ -436,8 +436,9 @@ def test_v3_channel_migration_preserves_existing_tracks(db, track):
     assert db.one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION
 
 
-def test_cooling_musicbrainz_can_skip_ingestion_without_claiming_it(db, track):
+def test_cooling_musicbrainz_can_skip_metadata_retries_without_claiming_it(db, track):
     db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    db.execute("UPDATE jobs SET stage='identifying' WHERE kind='track'")
     db.enqueue("integrity", "maintenance", "admin", {})
     claimed = db.claim(skip_tracks=True)
     assert claimed is not None and claimed["kind"] == "integrity"
@@ -469,3 +470,10 @@ def test_recover_repairs_old_mixed_musicbrainz_503_thirty_minute_waits(db, track
     assert now + 49 <= after["not_before"] < now + 60
     assert after["defer_count"] == 0
     assert after["state"] == "PENDING"
+
+
+def test_new_ingest_downloads_remain_eligible_during_musicbrainz_outage(db, track):
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    row = db.claim(skip_tracks=True)
+    assert row is not None and row["kind"] == "track"
+    assert row["stage"] == "queued"
