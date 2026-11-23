@@ -1029,6 +1029,9 @@ class Store:
             return dict(con.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
 
     def recover(self):
+        # Import here to avoid a module-level dependency cycle with HttpPolicy.
+        from http_policy import is_musicbrainz_transient
+
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             for job in con.execute("SELECT * FROM jobs WHERE cancel_requested=1 AND state IN ('PENDING','RUNNING')").fetchall():
@@ -1036,23 +1039,24 @@ class Store:
             con.execute("UPDATE jobs SET state='PENDING' WHERE state='RUNNING'")
             con.execute("UPDATE tracks SET operation_state='QUEUED',updated_at=? WHERE operation_state='RUNNING'", (utcnow(),))
             con.execute("UPDATE sources SET status='PENDING' WHERE status='SYNCING'")
-            # Repair the previous release's combined 503 + slot-wait bug.
-            # It treated a temporary MusicBrainz outage as a track-specific
-            # failure and scheduled some tracks 30 minutes out. Never shorten
-            # a provider's actual global Retry-After / cooldown.
+            # Older releases sometimes treated *provider-wide* MusicBrainz
+            # outages as per-track failures, creating 30-minute retry delays.
+            # Repair only strictly classified transient MusicBrainz errors.
+            # Respect the shared provider clock (including Retry-After), so
+            # recovery cannot cause an early retry or thundering herd.
             now = time.time()
             clock = con.execute(
                 "SELECT next_at FROM api_clock WHERE host='musicbrainz.org'"
             ).fetchone()
             next_allowed = max(now + 5, float(clock["next_at"]) if clock else 0.0)
             affected = con.execute(
-                """SELECT id,not_before FROM jobs
+                """SELECT id,error,not_before FROM jobs
                    WHERE kind='track' AND state='PENDING' AND cancel_requested=0
-                     AND error LIKE '%musicbrainz.org: waiting for shared provider cooldown%'
-                     AND error LIKE '%musicbrainz.org: HTTP 503%'"""
+                     AND error LIKE 'musicbrainz.org:%'"""
             ).fetchall()
             for job in affected:
-                if float(job["not_before"]) > next_allowed + 60:
+                if (float(job["not_before"]) > next_allowed + 60
+                        and is_musicbrainz_transient(job["error"] or "")):
                     con.execute(
                         "UPDATE jobs SET not_before=?,defer_count=0 WHERE id=?",
                         (next_allowed, job["id"]),
