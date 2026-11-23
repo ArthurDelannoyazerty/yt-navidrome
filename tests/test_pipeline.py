@@ -496,7 +496,7 @@ def test_worker_does_not_defer_identification_retries_during_shared_cooldown(db,
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(run())
-    row = db.one("SELECT state,defer_count,not_before FROM jobs WHERE kind='track'")
+    row = db.one("SELECT state,defer_count,not_before FROM jobs WHERE kind='track' ORDER BY id DESC LIMIT 1")
     assert row["state"] == "PENDING"
     assert row["defer_count"] == 0
     assert row["not_before"] == 0
