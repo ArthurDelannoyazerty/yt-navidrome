@@ -19,7 +19,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from http_policy import ApiDeferred
+from http_policy import ApiDeferred, is_shared_musicbrainz_wait
 from localized_names import artist_credit, preferred_english_name
 from metadata_hints import alias_key, normalized_words, search_hints
 from musicbrainz_search import PAGE_SIZE, query_for, valid_id
@@ -581,6 +581,14 @@ class ApprovalPrefetch:
             )
         return {"tracks": tracks, "new_jobs": scheduled}
 
+    def has_ready_work(self):
+        with self.catalogue.db() as con:
+            return bool(con.execute(
+                """SELECT 1 FROM approval_prefetch_jobs
+                   WHERE state='PENDING' AND retry_at<=? LIMIT 1""",
+                (time.time(),),
+            ).fetchone())
+
     def claim(self):
         now = time.time()
         with self.catalogue.db() as con:
@@ -608,7 +616,7 @@ class ApprovalPrefetch:
         error = str(exc)[:400]
         provider_wait = isinstance(exc, ApiDeferred)
         global_pause = provider_wait and error.startswith("musicbrainz.org:")
-        clock_wait = global_pause and "waiting for shared provider cooldown" in error
+        clock_wait = global_pause and is_shared_musicbrainz_wait(error)
         attempt = int(job["attempts"]) + (0 if clock_wait else 1)
         tail = attempt >= NORMAL_FAILURE_BUDGET
         disabled = attempt >= MAX_PREFETCH_FAILURES
@@ -808,6 +816,13 @@ class ApprovalPrefetch:
                 remaining_pause = self.pause_until - time.time()
                 if remaining_pause > 0:
                     await asyncio.sleep(min(10, remaining_pause))
+                    continue
+                if not await asyncio.to_thread(self.has_ready_work):
+                    await asyncio.sleep(1.5)
+                    continue
+                wait = await asyncio.to_thread(self.store.reserve_musicbrainz_background)
+                if wait > 0:
+                    await asyncio.sleep(min(5.0, wait))
                     continue
                 job = await asyncio.to_thread(self.claim)
                 if not job:
