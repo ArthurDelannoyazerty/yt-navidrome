@@ -19,7 +19,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from http_policy import ApiDeferred, is_shared_musicbrainz_wait
+from http_policy import ApiDeferred, is_musicbrainz_transient
 from localized_names import artist_credit, preferred_english_name
 from metadata_hints import alias_key, normalized_words, search_hints
 from musicbrainz_search import PAGE_SIZE, query_for, valid_id
@@ -616,8 +616,8 @@ class ApprovalPrefetch:
         error = str(exc)[:400]
         provider_wait = isinstance(exc, ApiDeferred)
         global_pause = provider_wait and error.startswith("musicbrainz.org:")
-        clock_wait = global_pause and is_shared_musicbrainz_wait(error)
-        attempt = int(job["attempts"]) + (0 if clock_wait else 1)
+        shared_outage = global_pause and is_musicbrainz_transient(error)
+        attempt = int(job["attempts"]) + (0 if shared_outage else 1)
         tail = attempt >= NORMAL_FAILURE_BUDGET
         disabled = attempt >= MAX_PREFETCH_FAILURES
         when = (max(now + 2, float(exc.retry_at or now + 30)) if provider_wait else
