@@ -3,7 +3,7 @@ import json
 import pytest
 import requests
 
-from http_policy import ApiDeferred, HttpPolicy, retry_delay, is_shared_musicbrainz_wait
+from http_policy import ApiDeferred, HttpPolicy, retry_delay, is_shared_musicbrainz_wait, is_musicbrainz_transient
 
 
 @pytest.fixture
@@ -173,3 +173,12 @@ def test_background_musicbrainz_budget_is_shared_and_non_accumulating(db, track,
     assert db.reserve_musicbrainz_background(interval=20) == 0
     db.execute("UPDATE jobs SET state='DONE' WHERE kind='track'")
     assert db.reserve_musicbrainz_background(interval=20) == 0
+
+
+def test_musicbrainz_transient_classifier_keeps_provider_outages_retryable():
+    assert is_musicbrainz_transient("musicbrainz.org: waiting for shared provider cooldown")
+    assert is_musicbrainz_transient("musicbrainz.org: HTTP 503; automatic attempts exhausted or long provider cooldown")
+    assert is_musicbrainz_transient("musicbrainz.org: HTTP 429; automatic attempts exhausted or long provider cooldown")
+    assert is_musicbrainz_transient("musicbrainz.org: connection failed after three attempts")
+    assert not is_musicbrainz_transient("musicbrainz.org: HTTP 400; invalid lookup")
+    assert not is_musicbrainz_transient("MusicBrainz entry was not found")
