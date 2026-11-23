@@ -2278,6 +2278,36 @@ class Store:
                 "last_run": self.setting(f"integrity_last:{user}"), "repairable_tracks": len(self.repair_candidates(user)),
                 "page": page, "limit": limit, "total": total, "kinds": counts}
 
+    def reserve_musicbrainz_background(self, interval: float = 20.0) -> float:
+        """Limit total background MusicBrainz traffic while ingestion is active.
+
+        Catalogue and Approval share this small allowance. Foreground Beets and
+        interactive requests remain on the normal MusicBrainz host clock.
+        A denied reservation does NOT move the deadline into the future:
+        repeated polling cannot create an ever-growing queue.
+        """
+        now = time.time()
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            active = con.execute(
+                """SELECT 1 FROM jobs WHERE kind='track' AND cancel_requested=0
+                   AND (state='RUNNING' OR (state='PENDING' AND not_before<=?))
+                   LIMIT 1""",
+                (now + 60.0,),
+            ).fetchone()
+            if not active:
+                return 0.0
+            key = "musicbrainz.org:background-budget"
+            row = con.execute("SELECT next_at FROM api_clock WHERE host=?", (key,)).fetchone()
+            if row and row["next_at"] > now:
+                return row["next_at"] - now
+            con.execute(
+                """INSERT INTO api_clock(host,next_at) VALUES (?,?)
+                   ON CONFLICT(host) DO UPDATE SET next_at=excluded.next_at""",
+                (key, now + interval),
+            )
+        return 0.0
+
     def reserve_api(self, host, interval):
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
