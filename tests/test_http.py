@@ -3,7 +3,7 @@ import json
 import pytest
 import requests
 
-from http_policy import ApiDeferred, HttpPolicy, retry_delay, is_shared_musicbrainz_wait
+from http_policy import ApiDeferred, HttpPolicy, retry_delay, is_shared_musicbrainz_wait, is_musicbrainz_transient
 
 
 @pytest.fixture
@@ -43,9 +43,14 @@ def test_bounded_retry_uses_shared_spacing(db, clock):
         calls.append(clock[0])
         return next(values)
 
-    assert policy.send(send, session, request).status_code == 200
-    assert len(calls) == 3
-    assert all(right - left >= 1.1 for left, right in zip(calls, calls[1:]))
+    with pytest.raises(ApiDeferred, match="HTTP 503") as deferred:
+        policy.send(send, session, request)
+    # 503 means MusicBrainz throttling or server load. Retry once after 5s.
+    # A repeated 503 becomes a real provider deferral, not a harmless
+    # shared-slot wait that would erase the actual failure reason.
+    assert len(calls) == 2
+    assert calls[1] - calls[0] >= 5
+    assert deferred.value.retry_at >= clock[0] + 59.9
     assert session.get_adapter(request.url).max_retries.total == 0
 
 
@@ -152,3 +157,28 @@ def test_shared_musicbrainz_wait_classification_excludes_real_http_errors():
     assert not is_shared_musicbrainz_wait(wait + "; musicbrainz.org: HTTP 503")
     assert not is_shared_musicbrainz_wait("musicbrainz.org: HTTP 503")
     assert not is_shared_musicbrainz_wait("api.acoustid.org: HTTP 429")
+
+
+def test_background_musicbrainz_budget_is_shared_and_non_accumulating(db, track, clock):
+    # No ingestion backlog: catalogue/approval are free to populate the cache.
+    assert db.reserve_musicbrainz_background(interval=20) == 0
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    assert db.reserve_musicbrainz_background(interval=20) == 0
+    assert db.reserve_musicbrainz_background(interval=20) == pytest.approx(20)
+    assert db.reserve_musicbrainz_background(interval=20) == pytest.approx(20)
+    # Repeated denials must not push the next allowance further into the future.
+    clock[0] += 19
+    assert db.reserve_musicbrainz_background(interval=20) == pytest.approx(1)
+    clock[0] += 1
+    assert db.reserve_musicbrainz_background(interval=20) == 0
+    db.execute("UPDATE jobs SET state='DONE' WHERE kind='track'")
+    assert db.reserve_musicbrainz_background(interval=20) == 0
+
+
+def test_musicbrainz_transient_classifier_keeps_provider_outages_retryable():
+    assert is_musicbrainz_transient("musicbrainz.org: waiting for shared provider cooldown")
+    assert is_musicbrainz_transient("musicbrainz.org: HTTP 503; automatic attempts exhausted or long provider cooldown")
+    assert is_musicbrainz_transient("musicbrainz.org: HTTP 429; automatic attempts exhausted or long provider cooldown")
+    assert is_musicbrainz_transient("musicbrainz.org: connection failed after three attempts")
+    assert not is_musicbrainz_transient("musicbrainz.org: HTTP 400; invalid lookup")
+    assert not is_musicbrainz_transient("MusicBrainz entry was not found")

@@ -18,7 +18,7 @@ from common import (
     LIBRARY, ROOT, STATE, atomic_copy, atomic_json, atomic_text,
     discovery_comment, canonical_source_urls, next_nightly, safe_name, sha256_file, utcnow,
 )
-from http_policy import ApiDeferred, HttpPolicy, is_shared_musicbrainz_wait
+from http_policy import ApiDeferred, HttpPolicy, is_shared_musicbrainz_wait, is_musicbrainz_transient
 from providers import PROVIDERS
 from runtime import DeferredOperation, DownloaderRuntime, ProcessError, SourceAccessError, run_process
 from spotdl_runtime import SpotDLRuntime
@@ -116,6 +116,19 @@ class Pipeline:
         return lambda level, message: self.store.event(level, message, job["user_id"], job["target"])
 
     async def bridge_request(self, job, directory: Path, name: str, request: dict, timeout=1800):
+        # A known shared cooldown is not a reason to launch Beets and ask each
+        # metadata plugin to fail (and print a full traceback) all over again.
+        # Other bridge operations may be entirely local and must still run.
+        if name in {"identify", "metadata"}:
+            clock = self.store.one(
+                "SELECT next_at FROM api_clock WHERE host=?", ("musicbrainz.org",)
+            )
+            until = float(clock["next_at"]) if clock else 0.0
+            if until - time.time() > 5:
+                raise DeferredOperation(
+                    "musicbrainz.org: waiting for shared provider cooldown",
+                    retry_at=until,
+                )
         request_path = directory / f"{name}-request.json"
         result_path = directory / f"{name}-result.json"
         result_path.unlink(missing_ok=True)
@@ -1198,6 +1211,7 @@ class Pipeline:
                     job["id"], str(exc), retry_at=getattr(exc, "retry_at", None),
                     download_failure=getattr(exc, "download_failure", False),
                     provider_slot_wait=is_shared_musicbrainz_wait(str(exc)),
+                    provider_cooldown=is_musicbrainz_transient(str(exc)),
                 )
                 if retry_at is not None:
                     when = datetime.fromtimestamp(retry_at, UTC).isoformat()

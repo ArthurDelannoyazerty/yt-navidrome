@@ -1,7 +1,9 @@
 """Persistent catalogue, graph, album preview/commit/undo and user isolation."""
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import subprocess
 import uuid
 from pathlib import Path
@@ -1782,3 +1784,45 @@ def test_album_override_with_same_release_still_corrects_recording_id(db, enviro
     }])
     assert proposal["can_apply"] == 1
     assert proposal["items"][0]["status"] == "COMPATIBLE"
+
+
+def test_catalogue_worker_pauses_entire_backlog_during_provider_cooldown(db, caplog):
+    from catalogue_routes import cache_worker
+    from http_policy import ApiDeferred
+
+    catalogue = Catalogue(db)
+    catalogue.init()
+    catalogue.enqueue("recording", RECORDING_1, sections=["lookup"])
+    catalogue.enqueue("recording", RECORDING_2, sections=["lookup"])
+    calls = []
+
+    def blocked(*args):
+        calls.append(1)
+        raise ApiDeferred(
+            "musicbrainz.org: waiting for shared provider cooldown",
+            retry_at=time.time() + 30,
+        )
+
+    catalogue.request = blocked
+
+    async def run():
+        stopping = asyncio.Event()
+        worker = asyncio.create_task(cache_worker(catalogue, stopping))
+        try:
+            for _ in range(100):
+                if calls:
+                    break
+                await asyncio.sleep(0.01)
+            assert calls
+            await asyncio.sleep(0.15)
+        finally:
+            stopping.set()
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    asyncio.run(run())
+    assert calls == [1], "Must not try every pending Catalogue scope during one cooldown"
+    assert caplog.text.count("MusicBrainz catalogue paused") == 1
+    with catalogue.db() as con:
+        remaining = con.execute("SELECT COUNT(*) FROM scopes WHERE state='PENDING'").fetchone()[0]
+    assert remaining == 2

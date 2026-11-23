@@ -814,3 +814,33 @@ def test_failed_search_labels_do_not_expose_unowned_library_queries(db):
         assert "Private video title" not in str(guest)
         assert admin["items"][0]["label"].startswith("Search request #")
         assert guest["items"][0]["label"].startswith("Search request #")
+
+
+def test_upstream_musicbrainz_503_never_disables_approval_cache_task(db):
+    from http_policy import ApiDeferred
+
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch = app.state.approval_prefetch
+        prefetch.enqueue_names(recordings=[RECORDING])
+        for _ in range(8):
+            job = prefetch.claim()
+            assert job is not None
+            prefetch.defer(
+                job,
+                ApiDeferred(
+                    "musicbrainz.org: HTTP 503; automatic attempts exhausted or long provider cooldown",
+                    retry_at=time.time() + 60,
+                ),
+            )
+            with prefetch.catalogue.db() as con:
+                row = con.execute(
+                    "SELECT state,attempts FROM approval_prefetch_jobs WHERE kind=? AND cache_key=?",
+                    (job["kind"], job["cache_key"]),
+                ).fetchone()
+                assert row["state"] == "PENDING"
+                assert row["attempts"] == 0
+                con.execute(
+                    "UPDATE approval_prefetch_jobs SET retry_at=0 WHERE kind=? AND cache_key=?",
+                    (job["kind"], job["cache_key"]),
+                )

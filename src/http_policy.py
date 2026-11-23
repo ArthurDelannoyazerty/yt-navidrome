@@ -49,6 +49,22 @@ def is_shared_musicbrainz_wait(message: str) -> bool:
     )
 
 
+def is_musicbrainz_transient(message: str) -> bool:
+    """A shared MusicBrainz outage/slot wait, not a defect in one track.
+
+    A real 503 still has a distinct error reason and enforces a global HTTP
+    cooldown; it should not permanently poison individual cache jobs.
+    """
+    return is_shared_musicbrainz_wait(message) or str(message).startswith((
+        "musicbrainz.org: HTTP 429;",
+        "musicbrainz.org: HTTP 500;",
+        "musicbrainz.org: HTTP 502;",
+        "musicbrainz.org: HTTP 503;",
+        "musicbrainz.org: HTTP 504;",
+        "musicbrainz.org: connection failed after three attempts",
+    ))
+
+
 class HttpPolicy:
     def __init__(self, store: Store, report=None):
         self.store = store
@@ -189,10 +205,20 @@ class HttpPolicy:
                     self.failures.append(f"{host}: HTTP {status}")
                 return response
             delay = max(retry_delay(response.headers.get("Retry-After")), 2 ** (attempt + 1) + random.random())
+            if host == "musicbrainz.org" and status == 503:
+                # MusicBrainz uses HTTP 503 for IP/application/global throttling,
+                # often without Retry-After. Do not probe again after only 2s
+                # when the whole provider is already under pressure.
+                delay = max(delay, 5.0 * (2 ** attempt))
             self.store.defer_api(host, time.time() + delay)
             self.report("ERROR", f"{host}: HTTP {status}; attempt {attempt + 1}/3, cooldown {delay:.1f}s")
             response.close()
-            if attempt == 2 or delay > 60:
+            if (attempt == 2 or delay > 60 or
+                    (host == "musicbrainz.org" and status == 503 and attempt >= 1)):
+                # Preserve the *actual* 503 in the durable retry reason. Otherwise
+                # the next slot check turns the failure into a misleading "waiting"
+                # error, allowing repeated provider failures to masquerade as
+                # harmless slot contention.
                 message = f"{host}: HTTP {status}; automatic attempts exhausted or long provider cooldown"
                 retry_at = time.time() + max(delay, 60)
                 self.store.defer_api(host, retry_at)

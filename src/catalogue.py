@@ -441,6 +441,14 @@ class Catalogue:
         return {"recordings": len(valid), "new_requests": queued,
                 "note": "One request at a time, cached and resumable; no library-wide recomputation."}
 
+    def has_ready_work(self):
+        """Cheap readiness probe before spending shared background API allowance."""
+        with self.db() as con:
+            return bool(con.execute(
+                "SELECT 1 FROM scopes WHERE state='PENDING' AND retry_after<=? LIMIT 1",
+                (time.time(),),
+            ).fetchone())
+
     def claim(self):
         with self.db() as con:
             row = con.execute("""SELECT * FROM scopes WHERE state='PENDING' AND retry_after<=?

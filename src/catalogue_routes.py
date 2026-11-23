@@ -12,6 +12,7 @@ from album_management import AlbumManager
 from album_workspace import AlbumWorkspace
 from album_clusters import AlbumClusters
 from catalogue import Catalogue, ENTITY_KINDS, MAX_GRAPH_NODES
+from http_policy import ApiDeferred
 from language_jobs import (preview as language_preview, queue as queue_languages,
                            preview_progress, queue_progress, canary_status, verify_canary,
                            review_state, batch_status, name_changes,
@@ -108,12 +109,18 @@ class LanguageReverseInput(BaseModel):
 
 
 async def cache_worker(catalogue, stopping):
-    """Index local recording IDs periodically; process remote requests one at a time."""
+    """Keep remote Catalogue work durable, bounded and below ingestion priority."""
     next_local_scan = 0.0
+    pause_until = 0.0
     while not stopping.is_set():
+        now = time.time()
+        if pause_until > now:
+            # A provider-wide cooldown applies to the whole backlog, not just
+            # the one scope that happened to lose the MusicBrainz request slot.
+            await asyncio.sleep(min(10.0, pause_until - now))
+            continue
         if time.monotonic() >= next_local_scan:
-            # Discover imports even if no browser ever opens Catalogue.
-            # The durable queue deduplicates already indexed recording IDs.
+            # Discover imports without relying on a browser action.
             try:
                 ids = await asyncio.to_thread(
                     catalogue.store.rows,
@@ -127,14 +134,31 @@ async def cache_worker(catalogue, stopping):
             except Exception:
                 logging.exception("Automatic MusicBrainz recording indexing failed")
             next_local_scan = time.monotonic() + 60
+        if not await asyncio.to_thread(catalogue.has_ready_work):
+            await asyncio.sleep(2)
+            continue
+        # Catalogue and Approval share a small background request allowance
+        # when the ingestion queue is busy. Neither worker can monopolize the
+        # host-level limiter or manufacture thousands of cooldown errors.
+        wait = await asyncio.to_thread(catalogue.store.reserve_musicbrainz_background)
+        if wait > 0:
+            await asyncio.sleep(min(5.0, wait))
+            continue
         scope = await asyncio.to_thread(catalogue.claim)
         if not scope:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             continue
         try:
             await asyncio.to_thread(catalogue.process_page, scope)
         except asyncio.CancelledError:
             raise
+        except ApiDeferred as exc:
+            await asyncio.to_thread(catalogue.fail, scope, exc)
+            pause_until = max(time.time() + 2, float(exc.retry_at or 0))
+            logging.warning(
+                "MusicBrainz catalogue paused for %.0fs; queued scopes retained: %s",
+                max(0, pause_until - time.time()), exc,
+            )
         except Exception as exc:
             await asyncio.to_thread(catalogue.fail, scope, exc)
             logging.warning("MusicBrainz catalogue sync deferred: %s", exc)

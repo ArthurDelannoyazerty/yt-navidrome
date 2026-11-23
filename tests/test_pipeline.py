@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -443,3 +444,37 @@ def test_shared_musicbrainz_slot_wait_does_not_exponentially_delay_ingest(db, tr
     assert 50 < scheduled - time.time() < 70
     row = db.one("SELECT defer_count FROM jobs WHERE id=?", (job["id"],))
     assert row["defer_count"] == 1
+
+
+def test_beets_metadata_preflight_avoids_subprocess_when_musicbrainz_is_cooling(db, tmp_path, monkeypatch):
+    import pipeline as pipeline_module
+
+    bridge = Pipeline(db)
+    db.defer_api("musicbrainz.org", time.time() + 60)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Must not launch Beets during a known MusicBrainz cooldown")
+
+    monkeypatch.setattr(pipeline_module, "run_process", forbidden)
+    with pytest.raises(DeferredOperation, match="shared provider cooldown") as exc:
+        asyncio.run(bridge.bridge_request(
+            {"id": 1, "user_id": "admin", "target": "track"},
+            tmp_path, "identify", {"track": {}},
+        ))
+    assert exc.value.retry_at > time.time() + 40
+    assert not (tmp_path / "identify-request.json").exists()
+
+
+def test_provider_wide_musicbrainz_503_does_not_grow_per_track_backoff(db, track):
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    job = db.claim()
+    until = time.time() + 75
+    result = db.defer_job(
+        job["id"], "musicbrainz.org: HTTP 503; automatic attempts exhausted",
+        retry_at=until, provider_cooldown=True,
+    )
+    assert result >= until
+    assert result < until + 1
+    queued = db.one("SELECT defer_count,state FROM jobs WHERE id=?", (job["id"],))
+    assert queued["defer_count"] == 0
+    assert queued["state"] == "PENDING"
