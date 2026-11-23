@@ -416,3 +416,30 @@ def test_metadata_deferral_reuses_downloaded_candidate(db, track, environment, m
     assert updated["operation_state"] == "NEEDS_APPROVAL"
     assert Path(updated["file_path"]).read_bytes() == b"candidate"
     assert not final.exists()
+
+
+def test_shared_musicbrainz_slot_wait_does_not_exponentially_delay_ingest(db, track):
+    import time
+
+    message = "musicbrainz.org: waiting for shared provider cooldown"
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    for _ in range(6):
+        job = db.claim()
+        assert job is not None
+        scheduled = db.defer_job(
+            job["id"], message + "; " + message,
+            retry_at=time.time() + 7, provider_slot_wait=True,
+        )
+        assert 4 < scheduled - time.time() < 11
+        row = db.one("SELECT defer_count FROM jobs WHERE id=?", (job["id"],))
+        assert row["defer_count"] == 0
+        db.update("jobs", job["id"], not_before=0)
+
+    # Actual provider failures still use the normal bounded backoff.
+    job = db.claim()
+    scheduled = db.defer_job(
+        job["id"], "musicbrainz.org: HTTP 503", retry_at=time.time() + 7,
+    )
+    assert 50 < scheduled - time.time() < 70
+    row = db.one("SELECT defer_count FROM jobs WHERE id=?", (job["id"],))
+    assert row["defer_count"] == 1

@@ -3,7 +3,7 @@ import json
 import pytest
 import requests
 
-from http_policy import ApiDeferred, HttpPolicy, retry_delay
+from http_policy import ApiDeferred, HttpPolicy, retry_delay, is_shared_musicbrainz_wait
 
 
 @pytest.fixture
@@ -143,3 +143,12 @@ def test_acoustid_application_error_is_not_a_successful_no_match(db, clock):
         request,
     )
     assert policy.failures == ["api.acoustid.org: Invalid client"]
+
+
+def test_shared_musicbrainz_wait_classification_excludes_real_http_errors():
+    wait = "musicbrainz.org: waiting for shared provider cooldown"
+    assert is_shared_musicbrainz_wait(wait)
+    assert is_shared_musicbrainz_wait(wait + "; " + wait)
+    assert not is_shared_musicbrainz_wait(wait + "; musicbrainz.org: HTTP 503")
+    assert not is_shared_musicbrainz_wait("musicbrainz.org: HTTP 503")
+    assert not is_shared_musicbrainz_wait("api.acoustid.org: HTTP 429")

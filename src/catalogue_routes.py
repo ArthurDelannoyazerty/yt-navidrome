@@ -108,8 +108,25 @@ class LanguageReverseInput(BaseModel):
 
 
 async def cache_worker(catalogue, stopping):
-    """One paginated task at a time; shared HTTP limiter handles 1.1s pacing."""
+    """Index local recording IDs periodically; process remote requests one at a time."""
+    next_local_scan = 0.0
     while not stopping.is_set():
+        if time.monotonic() >= next_local_scan:
+            # Discover imports even if no browser ever opens Catalogue.
+            # The durable queue deduplicates already indexed recording IDs.
+            try:
+                ids = await asyncio.to_thread(
+                    catalogue.store.rows,
+                    """SELECT DISTINCT mbid FROM tracks
+                       WHERE mbid IS NOT NULL AND current_asset_id IS NOT NULL
+                         AND health='AVAILABLE' AND temporary_candidate_sha256 IS NULL"""
+                )
+                await asyncio.to_thread(catalogue.index_recordings, (row["mbid"] for row in ids))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("Automatic MusicBrainz recording indexing failed")
+            next_local_scan = time.monotonic() + 60
         scope = await asyncio.to_thread(catalogue.claim)
         if not scope:
             await asyncio.sleep(2)

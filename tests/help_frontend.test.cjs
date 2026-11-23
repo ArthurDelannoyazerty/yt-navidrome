@@ -155,7 +155,7 @@ test("Help covers the recording-first workflow, safe album overrides and recover
     album:["Second metadata step","Select all","different","Validate Album","Undo","locked","duplicate"],
     sources:["Spotify","Archive versus permanent removal","cannot be undone","monitoring"],
     language:["Optional finishing step","three tracks","Navidrome","Reverse"],
-    catalogue:["Cache synchronization","Album family cache","Index downloaded recordings"],
+    catalogue:["Background cache activity","Album family cache","Automatic indexing"],
     graph:["shareable URL","never changes local files"],
     activity:["Follow latest","failure","retry"],
     maintenance:["Verify library","current items needing attention","Navidrome"],

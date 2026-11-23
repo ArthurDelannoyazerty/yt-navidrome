@@ -47,16 +47,14 @@
 
 <main id="main">
   <section class="panel" data-panel="music">
-    <div class="panel-heading">
-      <div><span class="eyebrow">LIBRARY</span><h2>Your music</h2></div>
-      <div class="row">
+    <h2 class="sr-only">Your music</h2>
+    <div class="row library-actions">
         <details class="action-menu library-menu"><summary>Advanced library actions</summary><div class="action-menu-items">
           <button id="approveAll" class="secondary" type="button" disabled>Approve all</button>
           <button id="retryAll" class="secondary" type="button" disabled>Retry all failed</button>
           <button id="verifyFromMusic" class="secondary" type="button">Verify library</button>
         </div></details>
         <button id="addMusic" type="button">+ Import music</button>
-      </div>
     </div>
     <h3 id="libraryScope" class="sr-only">Library totals</h3>
     <div id="stats" class="stats" role="group" aria-label="Quick filters for this library"></div>
@@ -122,7 +120,7 @@
   </section>
 
   <section id="approvalPanel" class="panel" data-panel="approval" aria-labelledby="approvalHeading" hidden>
-    <h2 id="approvalHeading">Approval</h2>
+    <h2 id="approvalHeading" class="sr-only">Approval</h2>
     <div class="approval-toolbar">
       <label>Show<select id="approvalFilter">
           <option value="ALL">All music</option>
@@ -222,8 +220,7 @@
   </section>
 
   <section class="panel catalogue-panel" data-panel="catalogue" id="cataloguePanel" hidden>
-    <div class="panel-heading"><div><span class="eyebrow">MUSICBRAINZ</span><h2>Catalogue</h2>
-      <p class="hint">Explore cached artists, recordings, works, albums and editions. Cached music does not mean downloaded music.</p></div></div>
+    <h2 class="sr-only">Catalogue</h2>
     <div class="catalogue-explorer">
       <section class="catalogue-search-card" aria-label="Search MusicBrainz catalogue">
         <h3>Find music</h3>
@@ -258,46 +255,54 @@
       </section>
     </div>
     <section class="catalogue-details" aria-label="MusicBrainz synchronization">
-      <h3>Cache synchronization</h3>
-      <div class="row"><button id="catalogueRefreshProgress" type="button" class="secondary">Refresh progress</button>
-      <button id="catalogueIndexLibrary" type="button" class="secondary">Index downloaded recordings</button></div>
-      <p id="catalogueProgress" class="hint" role="status"></p>
-      <div class="catalogue-album-cache-progress">
-        <strong>Album family and edition cache</strong>
-        <p id="catalogueAlbumCacheStatus" class="hint" role="status">Checking MusicBrainz release-group discovery and tracklist queue…</p>
-        <progress id="catalogueAlbumCacheBar" max="1" value="0"
-          aria-label="Completed album release-group discovery and release tracklist tasks"></progress>
-      </div>
-          <div class="approval-cache-panel catalogue-prefetch-merged" aria-labelledby="approvalCacheHeading">
-            <div class="approval-cache-heading">
-              <div><h3 id="approvalCacheHeading">MusicBrainz cache &amp; prefetch</h3>
-                <p id="approvalPrefetchStatus" class="hint" role="status">Checking saved metadata and background queue…</p></div>
-              <button type="button" id="approvalCacheClean" class="secondary">Clean unused cache</button>
-            </div>
-            <div class="approval-cache-metrics">
-              <div><strong id="approvalCacheCompleted">—</strong><small>Cached / known tasks</small></div>
-              <div><strong id="approvalCacheQueue">—</strong><small>Queued / total tasks</small></div>
-              <div><strong id="approvalCacheDeferred">—</strong><small>Waiting for retry</small></div>
-              <div><strong id="approvalCacheSize">—</strong><small>Approval cache data</small></div>
-            </div>
-            <progress id="approvalCacheProgress" max="1" value="0" aria-label="Background MusicBrainz prefetch completed out of discovered work"></progress>
-            <p id="approvalCacheDetail" class="hint">The total grows as searches discover more candidate recordings. Counts are shared across library users.</p>
-             <details id="approvalFailedSection" class="approval-cache-failures">
-               <summary>Failed searches and metadata requests (<span id="approvalFailedCount">0</span>)</summary>
-               <p class="hint">After 3 failed executions an item moves to the back of the queue. After 3 further failures it is disabled. Retry 3 times gives a disabled item three additional low-priority attempts. Shared MusicBrainz limiter waits do not count as failures.</p>
-               <p id="approvalFailedNotice" class="hint" role="status" aria-live="polite"></p>
-               <div id="approvalFailedList" class="approval-failed-list"></div>
-               <button id="approvalFailedMore" type="button" class="secondary" hidden>Show more failed requests</button>
-             </details>
-            <div id="approvalCacheConfirm" class="approval-cache-confirm" hidden>
-              <p id="approvalCacheImpact"></p>
-              <div class="row">
-                <button type="button" id="approvalCacheConfirmButton" class="danger">Confirm cleanup</button>
-                <button type="button" id="approvalCacheCancel" class="secondary">Cancel</button>
-              </div>
-            </div>
-            <p id="approvalCacheNotice" class="hint" role="status" aria-live="polite"></p>
+      <h3>Background cache activity</h3>
+      <p class="hint cache-explanation">These bars track <strong>discovered metadata tasks</strong>, not storage capacity or complete coverage of a playlist. New songs and album editions can add requests even after a bar reaches 100%.</p>
+      <div class="cache-workstreams">
+        <section class="cache-workstream" aria-labelledby="catalogueAlbumCacheHeading">
+          <div class="cache-workstream-heading">
+            <h4 id="catalogueAlbumCacheHeading">1. Album discovery and edition tracklists</h4>
+            <strong id="catalogueAlbumCacheCount">—</strong>
           </div>
+          <progress id="catalogueAlbumCacheBar" max="1" value="0" aria-label="Completed known album discovery and tracklist tasks"></progress>
+          <p id="catalogueAlbumCacheStatus" class="hint" role="status">Checking known album discovery and tracklist tasks…</p>
+        </section>
+        <section class="cache-workstream" aria-labelledby="approvalCacheHeading">
+          <div class="cache-workstream-heading">
+            <h4 id="approvalCacheHeading">2. Approval names and MusicBrainz searches</h4>
+            <strong id="approvalCacheCompleted">—</strong>
+          </div>
+          <progress id="approvalCacheProgress" max="1" value="0" aria-label="Completed known Approval prefetch tasks"></progress>
+          <p id="approvalPrefetchStatus" class="hint" role="status">Checking background metadata requests…</p>
+          <div class="approval-cache-metrics">
+            <div><strong id="approvalCacheQueue">—</strong><small>Queued / known tasks</small></div>
+            <div><strong id="approvalCacheDeferred">—</strong><small>Waiting for retry</small></div>
+            <div><strong id="approvalCacheWaiting">—</strong><small>Tracks awaiting Approval</small></div>
+            <div><strong id="approvalCacheSize">—</strong><small>Stored Approval metadata</small></div>
+          </div>
+          <p id="approvalCacheDetail" class="hint">The cache is shared across libraries. Tracks awaiting Approval can have complete metadata or still be waiting for discovery.</p>
+        </section>
+      </div>
+      <p id="catalogueProgress" class="hint cache-background" role="status"></p>
+      <details id="approvalFailedSection" class="approval-cache-failures">
+        <summary>Failed searches and metadata requests (<span id="approvalFailedCount">0</span>)</summary>
+        <p class="hint">After 3 failed executions a request moves to the queue tail; after 3 more it is disabled. Retry an individual disabled request below. Shared MusicBrainz limiter waits do not count as failures.</p>
+        <p id="approvalFailedNotice" class="hint" role="status" aria-live="polite"></p>
+        <div id="approvalFailedList" class="approval-failed-list"></div>
+        <button id="approvalFailedMore" type="button" class="secondary" hidden>Show more failed requests</button>
+      </details>
+      <details class="cache-maintenance" id="cacheMaintenance">
+        <summary>Cache maintenance</summary>
+        <p class="hint">Review the impact before removing obsolete prefetch data. Local music, active requests and Catalogue data stay protected.</p>
+        <button type="button" id="approvalCacheClean" class="secondary">Review unused cache cleanup</button>
+        <div id="approvalCacheConfirm" class="approval-cache-confirm" hidden>
+          <p id="approvalCacheImpact"></p>
+          <div class="row">
+            <button type="button" id="approvalCacheConfirmButton" class="danger">Confirm cleanup</button>
+            <button type="button" id="approvalCacheCancel" class="secondary">Cancel</button>
+          </div>
+        </div>
+        <p id="approvalCacheNotice" class="hint" role="status" aria-live="polite"></p>
+      </details>
       <details id="catalogueContradictions" class="catalogue-contradictions">
         <summary>Review album metadata mismatches (<span id="catalogueContradictionCount">0</span>)</summary>
         <p class="hint">Only complete MusicBrainz release tracklists are checked. These rare exceptions are never mixed into the Album comparison. Review each song in Music and correct its release manually.</p>
@@ -310,21 +315,12 @@
 
 
   <section class="panel album-panel" data-panel="album" id="albumPanel" hidden>
-    <div class="panel-heading">
-      <div><span class="eyebrow">MUSICBRAINZ</span><h2>Album families</h2>
-        <p class="hint">Review separate MusicBrainz release-group families across your library. Assigned songs remain visible; the checkbox controls automatic preselection. Different-recording matches can be explicitly selected after review.</p>
-      </div>
-      <button id="albumRefresh" type="button" class="secondary">Refresh families</button>
-    </div>
+    <h2 class="sr-only">Album families</h2>
+    <div class="row album-actions"><button id="albumRefresh" type="button" class="secondary">Refresh families</button></div>
     <div class="album-cluster-toolbar">
       <label class="check"><input type="checkbox" id="albumIncludeAssigned"> Preselect already-assigned recordings (manual selection is always possible)</label>
       <label class="control-field album-cluster-search">Filter by music title
         <input type="search" id="albumClusterSearch" placeholder="Find a song's album families" maxlength="100"></label>
-      <div class="album-cluster-pagination" aria-label="Cluster navigation">
-        <button id="albumPrev" type="button" class="secondary">Previous</button>
-        <output id="albumClusterPosition" aria-live="polite">0 / 0</output>
-        <button id="albumNext" type="button" class="secondary">Next</button>
-      </div>
     </div>
     <p class="hint" id="albumClusterStatus" role="status" aria-live="polite">Loading MusicBrainz release-group families…</p>
     <div class="album-cluster-grid" aria-label="Album family workspace">
@@ -416,12 +412,8 @@
   </section>
 
   <section class="panel language-panel" data-panel="language" hidden>
-    <div class="panel-heading">
-      <div><span class="eyebrow">METADATA</span><h2>Language</h2>
-        <p class="hint">Prefer English MusicBrainz aliases for display, keep canonical names in original-name tags. No invented translations, new downloads or recording-ID changes.</p>
-      </div>
-      <button id="languageOpenActivity" type="button" class="secondary">Open Activity logs</button>
-    </div>
+    <h2 class="sr-only">Language</h2>
+    <div class="row language-actions"><button id="languageOpenActivity" type="button" class="secondary">Open Activity logs</button></div>
     <div class="language-stepbar" aria-label="Language update workflow">
       <span>1. Review</span><span>2. Test 3 tracks</span><span>3. Verify in Navidrome</span><span>4. Apply remaining</span>
     </div>
@@ -495,8 +487,7 @@
   </section>
 
   <section class="panel" data-panel="graph" id="graphPanel" hidden>
-    <div class="panel-heading"><div><span class="eyebrow">RELATIONSHIPS</span><h2>Music graph</h2>
-      <p class="hint">Explore a bounded neighborhood of the cached MusicBrainz graph. Graph controls do not modify metadata.</p></div></div>
+    <h2 class="sr-only">Music graph</h2>
     <form id="graphSearchForm" class="graph-controls">
       <label>View<select id="graphView"><option value="downloaded">Downloaded library</option>
         <option value="catalogue">Entire cached catalogue</option></select></label>
@@ -548,7 +539,8 @@
   </section>
 
   <section class="panel" data-panel="sources" hidden>
-    <div class="panel-heading"><div><h2>Sources</h2><p class="hint">Import a link once, or keep a playlist in sync.</p></div><button id="syncAll" class="secondary">Sync monitored sources</button></div>
+    <h2 class="sr-only">Sources</h2>
+    <div class="row sources-actions"><button id="syncAll" class="secondary">Sync monitored sources</button></div>
     <details class="subpanel spotify-panel"><summary>Optional Spotify account connection &amp; audio recovery</summary>
       <div class="panel-heading compact"><div><h3>Spotify sources</h3><p id="spotifyStatus" class="hint">Loading Spotify connection...</p></div>
         <div class="row"><button id="spotifyConnect" type="button" class="secondary" disabled>Connect Spotify</button><button id="spotifyDisconnect" type="button" class="secondary" disabled>Disconnect</button></div>
@@ -580,10 +572,8 @@
   </section>
 
   <section class="panel" data-panel="activity" hidden>
-    <div class="panel-heading">
-      <div><h2>Activity</h2><p class="hint">Recent application, provider, beets, downloader, and maintenance events.</p></div>
-      <div class="row"><label class="check"><input id="followLogs" type="checkbox" checked> Follow latest</label><button id="jumpLatest" type="button" class="secondary" hidden>Jump to latest</button><label class="check"><input id="errorsOnly" type="checkbox"> Warnings and errors only</label><button id="clearLogs" class="secondary" title="Clears this browser view only. Stored server logs are retained.">Clear view</button></div>
-    </div>
+    <h2 class="sr-only">Activity</h2>
+    <div class="row activity-actions"><label class="check"><input id="followLogs" type="checkbox" checked> Follow latest</label><button id="jumpLatest" type="button" class="secondary" hidden>Jump to latest</button><label class="check"><input id="errorsOnly" type="checkbox"> Warnings and errors only</label><button id="clearLogs" class="secondary" title="Clears this browser view only. Stored server logs are retained.">Clear view</button></div>
     <div id="logs" role="log" aria-label="Event log"></div>
   </section>
 
@@ -615,8 +605,7 @@
 
   </section>
   <section class="panel help-panel" data-panel="help" hidden>
-    <div class="panel-heading"><div><span class="eyebrow">USER GUIDE</span><h2>Help</h2>
-      <p class="hint">Start with <strong>Approval</strong> to identify a recording, then use <strong>Album</strong> to choose its edition. Sources imports music; the other sections help you inspect, refine, and maintain it. Choose a topic below for detailed instructions.</p></div></div>
+    <h2 class="sr-only">Help</h2>
     <div class="help-layout">
       <nav class="help-sidebar" aria-label="Help topics">
         <strong>Navigate help</strong>
@@ -755,9 +744,9 @@
           <h3 id="help-catalogue-title">Catalogue</h3>
           <p><strong>MusicBrainz reference and cache, not the album editor.</strong> Use it when Approval or Album cannot yet show a recording, release group, edition or tracklist. Metadata indexing and search are separate from making changes to your music.</p>
           <p>Explore the shared public MusicBrainz cache: artists, recordings, album families, specific release editions and compositions. Cached entries are not necessarily downloaded.</p>
-          <p><strong>Cache synchronization</strong> also displays Approval metadata prefetch progress, the queue and cooldown, cached data size and overall Catalogue database size. Expand <strong>Failed searches and metadata requests</strong> to inspect disabled jobs and retry each for three more low-priority attempts. Use <strong>Clean unused cache</strong> to preview removing obsolete searches while retaining metadata for already approved music and recordings still awaiting approval. Music and Catalogue graph entities are never deleted.</p>
+          <p><strong>Background cache activity</strong> displays Approval metadata prefetch progress, the queue and cooldown, cached data size and overall Catalogue database size. Expand <strong>Failed searches and metadata requests</strong> to inspect disabled jobs and retry each for three more low-priority attempts. Use <strong>Clean unused cache</strong> to preview removing obsolete searches while retaining metadata for already approved music and recordings still awaiting approval. Music and Catalogue graph entities are never deleted.</p>
           <p><strong>Search cache</strong> uses saved metadata; <strong>Search MusicBrainz</strong> requests new data. <strong>Only items linked to my library</strong> filters by confirmed MusicBrainz IDs and their cached links, not similar names.</p>
-          <p><strong>Index downloaded recordings</strong> synchronizes recording and credited-artist metadata in the background. It is metadata-only: it never edits or downloads audio. Use <strong>Refresh progress</strong> for the shared queue; its totals can grow as more relationships are discovered.</p>
+          <p><strong>Automatic indexing</strong> discovers newly available recording IDs and queues missing MusicBrainz metadata in the background without a button. It does not edit or download audio. Progress updates automatically while Catalogue is open; totals can grow as relationships are discovered.</p>
           <p><strong>Album family cache</strong> shows completed, queued, deferred and running release-group discovery and release-tracklist tasks. This is a growing queue: newly discovered editions increase the total. A tracklist being cached is not a missing album, and a public recording does not mean that its audio is downloaded. Album assignments and explicit recording-ID overrides are reviewed in Album, not automatically inferred by Catalogue.</p>
           <p><strong>Album organization</strong> has moved to the dedicated Album tab. Catalogue is for exploring and synchronizing MusicBrainz metadata.</p>
         </section>
