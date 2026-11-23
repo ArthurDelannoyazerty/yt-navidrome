@@ -480,8 +480,9 @@ def test_provider_wide_musicbrainz_503_does_not_grow_per_track_backoff(db, track
     assert queued["state"] == "PENDING"
 
 
-def test_worker_does_not_defer_every_track_during_shared_cooldown(db, track):
+def test_worker_does_not_defer_identification_retries_during_shared_cooldown(db, track):
     db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    db.execute("UPDATE jobs SET stage='identifying' WHERE kind='track'")
     db.defer_api("musicbrainz.org", time.time() + 60)
     worker = Pipeline(db)
 
