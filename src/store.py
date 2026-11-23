@@ -999,13 +999,22 @@ class Store:
                 result.append(row)
         return result
 
-    def claim(self):
+    def claim(self, *, skip_tracks: bool = False):
+        """Claim due work; optionally leave metadata-dependent tracks queued.
+
+        During a provider-wide MusicBrainz cooldown, the worker should not
+        claim and defer every track separately. Unrelated maintenance, source
+        sync, and cleanup jobs can still run.
+        """
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 AND not_before<=? ORDER BY CASE WHEN json_extract(payload,'$.stop_after_commit')=1 THEN 0 WHEN kind='purge_source' THEN 1 ELSE 2 END,id LIMIT 1",
-                (time.time(),),
-            ).fetchone()
+            query = ("SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 "
+                     "AND not_before<=?")
+            if skip_tracks:
+                query += " AND kind!='track'"
+            query += (" ORDER BY CASE WHEN json_extract(payload,'$.stop_after_commit')=1 "
+                      "THEN 0 WHEN kind='purge_source' THEN 1 ELSE 2 END,id LIMIT 1")
+            row = con.execute(query, (time.time(),)).fetchone()
             if not row:
                 return None
             con.execute("UPDATE jobs SET state=?,error=NULL WHERE id=?", (JOB.send(row["state"], "claim"), row["id"]))
@@ -1024,6 +1033,27 @@ class Store:
             con.execute("UPDATE jobs SET state='PENDING' WHERE state='RUNNING'")
             con.execute("UPDATE tracks SET operation_state='QUEUED',updated_at=? WHERE operation_state='RUNNING'", (utcnow(),))
             con.execute("UPDATE sources SET status='PENDING' WHERE status='SYNCING'")
+            # Repair the previous release's combined 503 + slot-wait bug.
+            # It treated a temporary MusicBrainz outage as a track-specific
+            # failure and scheduled some tracks 30 minutes out. Never shorten
+            # a provider's actual global Retry-After / cooldown.
+            now = time.time()
+            clock = con.execute(
+                "SELECT next_at FROM api_clock WHERE host='musicbrainz.org'"
+            ).fetchone()
+            next_allowed = max(now + 5, float(clock["next_at"]) if clock else 0.0)
+            affected = con.execute(
+                """SELECT id,not_before FROM jobs
+                   WHERE kind='track' AND state='PENDING' AND cancel_requested=0
+                     AND error LIKE '%musicbrainz.org: waiting for shared provider cooldown%'
+                     AND error LIKE '%musicbrainz.org: HTTP 503%'"""
+            ).fetchall()
+            for job in affected:
+                if float(job["not_before"]) > next_allowed + 60:
+                    con.execute(
+                        "UPDATE jobs SET not_before=?,defer_count=0 WHERE id=?",
+                        (next_allowed, job["id"]),
+                    )
         from state_machines import UPDATE, transition_setting
         for key in ("downloader_update", "spotdl_update"):
             value = self.setting(key, {})
