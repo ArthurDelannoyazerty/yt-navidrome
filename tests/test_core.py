@@ -443,7 +443,7 @@ def test_cooling_musicbrainz_can_skip_metadata_retries_without_claiming_it(db, t
     claimed = db.claim(skip_tracks=True)
     assert claimed is not None and claimed["kind"] == "integrity"
     assert db.claim(skip_tracks=True) is None
-    row = db.one("SELECT state,defer_count,not_before FROM jobs WHERE kind='track'")
+    row = db.one("SELECT state,defer_count,not_before FROM jobs WHERE kind='track' ORDER BY id DESC LIMIT 1")
     assert row["state"] == "PENDING" and row["defer_count"] == 0
     assert row["not_before"] == 0
     assert db.claim()["kind"] == "track"
