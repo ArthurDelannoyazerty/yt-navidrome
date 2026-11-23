@@ -1011,7 +1011,9 @@ class Store:
             query = ("SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 "
                      "AND not_before<=?")
             if skip_tracks:
-                query += " AND kind!='track'"
+                # Never delay a track that was already past its commit boundary.
+                query += (" AND (kind!='track' OR stage IN ('applying','publishing') "
+                          "OR json_extract(payload,'$.stop_after_commit')=1)")
             query += (" ORDER BY CASE WHEN json_extract(payload,'$.stop_after_commit')=1 "
                       "THEN 0 WHEN kind='purge_source' THEN 1 ELSE 2 END,id LIMIT 1")
             row = con.execute(query, (time.time(),)).fetchone()
