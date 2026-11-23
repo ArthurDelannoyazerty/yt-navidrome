@@ -1494,7 +1494,7 @@ test("real browser: six album membership colors, individual checkboxes and Valid
   assert.equal(data.albumTracks.find(t=>t.id==="three").current_release_id,b);
   assert.equal(data.albumTracks.find(t=>t.id==="six").current_release_id,a);
   assert.equal(data.albumTracks.find(t=>t.id==="four").current_release_id,null);
-  assert.match(await chrome.evaluate("document.querySelector('#albumSelectedTitle a.album-musicbrainz-link').href"),/musicbrainz\\.org\\/release\\//);
+  assert.equal(await chrome.evaluate("document.querySelector('#albumSelectedTitle a.album-musicbrainz-link').href.includes('musicbrainz.org/release/')"),true);
    assert.equal(await chrome.evaluate("document.querySelector('#albumPrev,#albumNext')"),null);
    await chrome.evaluate("document.querySelectorAll('.album-cluster-choice')[1].click()");
    await chrome.until("document.querySelector('.album-cluster-choice[aria-selected=true]')?.textContent.includes('Other Cluster')");
