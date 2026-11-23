@@ -463,3 +463,18 @@ def test_beets_metadata_preflight_avoids_subprocess_when_musicbrainz_is_cooling(
         ))
     assert exc.value.retry_at > time.time() + 40
     assert not (tmp_path / "identify-request.json").exists()
+
+
+def test_provider_wide_musicbrainz_503_does_not_grow_per_track_backoff(db, track):
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    job = db.claim()
+    until = time.time() + 75
+    result = db.defer_job(
+        job["id"], "musicbrainz.org: HTTP 503; automatic attempts exhausted",
+        retry_at=until, provider_cooldown=True,
+    )
+    assert result >= until
+    assert result < until + 1
+    queued = db.one("SELECT defer_count,state FROM jobs WHERE id=?", (job["id"],))
+    assert queued["defer_count"] == 0
+    assert queued["state"] == "PENDING"
