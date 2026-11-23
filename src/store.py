@@ -859,7 +859,8 @@ class Store:
 
     def defer_job(self, job_id: int, reason: str, *, retry_at: float | None = None,
                   base_delay: float = 60.0, download_failure: bool = False,
-                  provider_slot_wait: bool = False) -> float | None:
+                  provider_slot_wait: bool = False,
+                  provider_cooldown: bool = False) -> float | None:
         """Return a running job to the durable queue without losing staged work."""
         reason = redact(reason)
         now = time.time()
@@ -889,8 +890,9 @@ class Store:
             # Merely waiting for the shared MusicBrainz request slot is not
             # another failed ingest attempt. Exponential backoff on these waits
             # can otherwise grow to 30 minutes per track during busy imports.
-            count = int(job["defer_count"] or 0) + (0 if provider_slot_wait else 1)
-            backoff_at = (now + 5.0 if provider_slot_wait else
+            shared_wait = provider_slot_wait or provider_cooldown
+            count = int(job["defer_count"] or 0) + (0 if shared_wait else 1)
+            backoff_at = (now + 5.0 if shared_wait else
                           now + min(1800.0, base_delay * (2 ** min(count - 1, 5))))
             retry_at = max(float(retry_at or 0), backoff_at, now + 1.0)
             con.execute(
