@@ -157,10 +157,7 @@ window.AlbumUI = (() => {
   function renderNavigation(){
     const list=$("albumClusterList");list.replaceChildren();
     const i=ui.clusters.findIndex(x=>x.id===ui.focus),count=ui.clusters.length;
-    $("albumClusterPosition").textContent=count?(i+1)+" / "+count:"0 / 0";
     $("albumClusterCount").textContent=count+" groups";
-    $("albumPrev").disabled=i<=0;
-    $("albumNext").disabled=i<0||i>=count-1;
     for(let index=0;index<count;index++){
       const cluster=ui.clusters[index],row=button("",()=>selectCluster(cluster.id),
         "album-cluster-choice"+(cluster.id===ui.focus?" is-active":""));
@@ -308,6 +305,11 @@ window.AlbumUI = (() => {
       return;
     }
     $("albumSelectedTitle").append(element("span","Selected: ","hint"),bilingual(album));
+    const musicbrainzLink=element("a","MusicBrainz Album","album-musicbrainz-link");
+    musicbrainzLink.href="https://musicbrainz.org/release/"+encodeURIComponent(album.id);
+    musicbrainzLink.target="_blank";
+    musicbrainzLink.rel="noopener noreferrer";
+    $("albumSelectedTitle").append(musicbrainzLink);
     const edition=activeEdition(),counts=selectedSummary();
     control.disabled=!edition?.complete||!counts.selected.length;
     $("albumSelectAll").disabled=!edition?.complete;
@@ -869,13 +871,6 @@ window.AlbumUI = (() => {
       await loadClusters(null);
       if(ui.focus)saveRoute(true);
     },280);
-  });
-  $("albumPrev").addEventListener("click",()=>{
-    const index=ui.clusters.findIndex(c=>c.id===ui.focus);if(index>0)void selectCluster(ui.clusters[index-1].id);
-  });
-  $("albumNext").addEventListener("click",()=>{
-    const index=ui.clusters.findIndex(c=>c.id===ui.focus);
-    if(index>=0&&index<ui.clusters.length-1)void selectCluster(ui.clusters[index+1].id);
   });
   $("albumOnlyGreen").addEventListener("change",()=>{
     renderMusic();renderSelected();
