@@ -120,10 +120,11 @@ window.CatalogueUI = (() => {
   async function refreshPrefetchStatus() {
     if (!(ui.user && state.tab === "catalogue")) return;
     const user = ui.user;
+    let data = null;
     try {
       const response = await fetch("/api/musicbrainz/approval-prefetch-status?user_id=" +
         encodeURIComponent(user), {cache:"no-store"});
-      const data = await response.json();
+      data = await response.json();
       if (!(ui.user && state.tab === "catalogue") || user !== ui.user || !response.ok) return;
       const done = Number(data.completed || 0), total = Number(data.total || 0);
       const queued = Number(data.queued || 0), retrying = Number(data.deferred || 0);
@@ -134,6 +135,7 @@ window.CatalogueUI = (() => {
       byId("approvalCacheCompleted").textContent = num(done) + " / " + num(total);
       byId("approvalCacheQueue").textContent = num(queued) + " / " + num(total);
       byId("approvalCacheDeferred").textContent = num(retrying);
+      byId("approvalCacheWaiting").textContent = num(data.waiting_tracks);
       byId("approvalCacheSize").textContent = bytes(data.cache_bytes);
       byId("approvalCacheProgress").max = Math.max(1, total);
       byId("approvalCacheProgress").value = Math.min(done, Math.max(1, total));
@@ -160,7 +162,10 @@ window.CatalogueUI = (() => {
     if ((ui.user && state.tab === "catalogue") && user === ui.user) {
       clearTimeout(ui.prefetchTimer);
       void refreshProgress().catch(() => {});
-      ui.prefetchTimer = setTimeout(refreshPrefetchStatus, 10000);
+      // Poll quickly while there is active work; throttle idle polling.
+      const active = Number(data?.queued || 0) + Number(data?.running || 0) +
+        Number(data?.waiting_tracks || 0);
+      ui.prefetchTimer = setTimeout(refreshPrefetchStatus, active ? 2000 : 10000);
     }
   }
   function cacheCleanupNotice(message, error = false) {
@@ -424,11 +429,11 @@ window.CatalogueUI = (() => {
     const deferred = Number(album.deferred || 0);
     byId("catalogueAlbumCacheBar").max = Math.max(1,total);
     byId("catalogueAlbumCacheBar").value = Math.min(complete,Math.max(1,total));
+    byId("catalogueAlbumCacheCount").textContent = num(complete)+" / "+num(total)+" known tasks";
     byId("catalogueAlbumCacheStatus").textContent =
-      num(complete)+" / "+num(total)+" album cache tasks completed · "+
       num(pending)+" queued ("+num(deferred)+" deferred) · "+
       num(running)+" running · "+num(album.cached_tracklists)+" release tracklists cached. "+
-      "Totals grow as release-group searches discover editions.";
+      "These are discovered tasks, not a measure of complete library coverage.";
     const counts = Object.entries(data.counts || {}).map(([k, count]) => `${k}: ${count}`).join(" · ");
     const active = (data.active || []).slice(0, 4).map(row => `${row.kind} ${row.section}: page ${row.cursor + 1}${row.total == null ? "" : ` / ${Math.ceil(row.total / 100)}`}`).join("; ");
     message(`${counts || "Nothing queued"}${active ? ` · ${active}` : ""}`, false, "catalogueProgress");
@@ -466,14 +471,5 @@ window.CatalogueUI = (() => {
   });
   byId("catalogueSearchForm").addEventListener("submit", event => { event.preventDefault(); search(false).catch(error => message(error.message, true)); });
   byId("catalogueOnlineSearch").addEventListener("click", () => search(true).catch(error => message(error.message, true)));
-  byId("catalogueRefreshProgress").addEventListener("click", () => refreshProgress().catch(error => message(error.message, true)));
-  byId("catalogueIndexLibrary").addEventListener("click", async () => {
-    if (!confirm("Queue local recordings for rate-limited background MusicBrainz indexing? A large library may take hours; audio is not modified.")) return;
-    try {
-      const result = await api("/api/catalogue/index-library", {user_id: state.user, limit: 5000});
-      message(`${result.queued_or_cached} recording identities queued or already cached.`, false);
-      await refreshProgress();
-    } catch (error) { message(error.message, true); }
-  });
   return {enter, leave, reset, openEntity, openRoute, refreshProgress};
 })();
