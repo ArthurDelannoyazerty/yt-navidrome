@@ -197,7 +197,12 @@ class HttpPolicy:
             self.store.defer_api(host, time.time() + delay)
             self.report("ERROR", f"{host}: HTTP {status}; attempt {attempt + 1}/3, cooldown {delay:.1f}s")
             response.close()
-            if attempt == 2 or delay > 60:
+            if (attempt == 2 or delay > 60 or
+                    (host == "musicbrainz.org" and status == 503 and attempt >= 1)):
+                # Preserve the *actual* 503 in the durable retry reason. Otherwise
+                # the next slot check turns the failure into a misleading "waiting"
+                # error, allowing repeated provider failures to masquerade as
+                # harmless slot contention.
                 message = f"{host}: HTTP {status}; automatic attempts exhausted or long provider cooldown"
                 retry_at = time.time() + max(delay, 60)
                 self.store.defer_api(host, retry_at)
