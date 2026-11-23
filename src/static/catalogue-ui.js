@@ -125,7 +125,8 @@ window.CatalogueUI = (() => {
       const response = await fetch("/api/musicbrainz/approval-prefetch-status?user_id=" +
         encodeURIComponent(user), {cache:"no-store"});
       data = await response.json();
-      if (!(ui.user && state.tab === "catalogue") || user !== ui.user || !response.ok) return;
+      if (!(ui.user && state.tab === "catalogue") || user !== ui.user) return;
+      if (!response.ok) throw Error("Cache progress temporarily unavailable");
       const done = Number(data.completed || 0), total = Number(data.total || 0);
       const queued = Number(data.queued || 0), retrying = Number(data.deferred || 0);
       const failed = Number(data.failed || 0), atTail = Number(data.tail_queued || 0);
