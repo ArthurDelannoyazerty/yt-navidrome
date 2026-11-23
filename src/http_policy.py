@@ -49,6 +49,22 @@ def is_shared_musicbrainz_wait(message: str) -> bool:
     )
 
 
+def is_musicbrainz_transient(message: str) -> bool:
+    """A shared MusicBrainz outage/slot wait, not a defect in one track.
+
+    A real 503 still has a distinct error reason and enforces a global HTTP
+    cooldown; it should not permanently poison individual cache jobs.
+    """
+    return is_shared_musicbrainz_wait(message) or str(message).startswith((
+        "musicbrainz.org: HTTP 429;",
+        "musicbrainz.org: HTTP 500;",
+        "musicbrainz.org: HTTP 502;",
+        "musicbrainz.org: HTTP 503;",
+        "musicbrainz.org: HTTP 504;",
+        "musicbrainz.org: connection failed after three attempts",
+    ))
+
+
 class HttpPolicy:
     def __init__(self, store: Store, report=None):
         self.store = store
