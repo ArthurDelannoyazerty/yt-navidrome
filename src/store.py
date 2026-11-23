@@ -1000,19 +1000,20 @@ class Store:
         return result
 
     def claim(self, *, skip_tracks: bool = False):
-        """Claim due work; optionally leave metadata-dependent tracks queued.
+        """Claim due work; leave *previously identified-stage* tracks on hold.
 
-        During a provider-wide MusicBrainz cooldown, the worker should not
-        claim and defer every track separately. Unrelated maintenance, source
-        sync, and cleanup jobs can still run.
+        New ingestion downloads can continue and preserve staged candidates
+        during a provider-wide MusicBrainz outage. Jobs already at the
+        identifying stage must not be re-claimed and deferred repeatedly.
         """
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             query = ("SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 "
                      "AND not_before<=?")
             if skip_tracks:
-                # Never delay a track that was already past its commit boundary.
-                query += (" AND (kind!='track' OR stage IN ('applying','publishing') "
+                # Do not block fresh downloads or already-started commits:
+                # only metadata retries that have reached identification wait.
+                query += (" AND (kind!='track' OR stage!='identifying' "
                           "OR json_extract(payload,'$.stop_after_commit')=1)")
             query += (" ORDER BY CASE WHEN json_extract(payload,'$.stop_after_commit')=1 "
                       "THEN 0 WHEN kind='purge_source' THEN 1 ELSE 2 END,id LIMIT 1")
