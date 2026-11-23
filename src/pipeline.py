@@ -116,6 +116,19 @@ class Pipeline:
         return lambda level, message: self.store.event(level, message, job["user_id"], job["target"])
 
     async def bridge_request(self, job, directory: Path, name: str, request: dict, timeout=1800):
+        # A known shared cooldown is not a reason to launch Beets and ask each
+        # metadata plugin to fail (and print a full traceback) all over again.
+        # Other bridge operations may be entirely local and must still run.
+        if name in {"identify", "metadata"}:
+            clock = self.store.one(
+                "SELECT next_at FROM api_clock WHERE host=?", ("musicbrainz.org",)
+            )
+            until = float(clock["next_at"]) if clock else 0.0
+            if until - time.time() > 5:
+                raise DeferredOperation(
+                    "musicbrainz.org: waiting for shared provider cooldown",
+                    retry_at=until,
+                )
         request_path = directory / f"{name}-request.json"
         result_path = directory / f"{name}-result.json"
         result_path.unlink(missing_ok=True)
