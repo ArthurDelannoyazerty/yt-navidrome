@@ -152,3 +152,19 @@ def test_shared_musicbrainz_wait_classification_excludes_real_http_errors():
     assert not is_shared_musicbrainz_wait(wait + "; musicbrainz.org: HTTP 503")
     assert not is_shared_musicbrainz_wait("musicbrainz.org: HTTP 503")
     assert not is_shared_musicbrainz_wait("api.acoustid.org: HTTP 429")
+
+
+def test_background_musicbrainz_budget_is_shared_and_non_accumulating(db, track, clock):
+    # No ingestion backlog: catalogue/approval are free to populate the cache.
+    assert db.reserve_musicbrainz_background(interval=20) == 0
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    assert db.reserve_musicbrainz_background(interval=20) == 0
+    assert db.reserve_musicbrainz_background(interval=20) == pytest.approx(20)
+    assert db.reserve_musicbrainz_background(interval=20) == pytest.approx(20)
+    # Repeated denials must not push the next allowance further into the future.
+    clock[0] += 19
+    assert db.reserve_musicbrainz_background(interval=20) == pytest.approx(1)
+    clock[0] += 1
+    assert db.reserve_musicbrainz_background(interval=20) == 0
+    db.execute("UPDATE jobs SET state='DONE' WHERE kind='track'")
+    assert db.reserve_musicbrainz_background(interval=20) == 0
