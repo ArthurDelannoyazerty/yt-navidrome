@@ -18,7 +18,7 @@ from common import (
     LIBRARY, ROOT, STATE, atomic_copy, atomic_json, atomic_text,
     discovery_comment, canonical_source_urls, next_nightly, safe_name, sha256_file, utcnow,
 )
-from http_policy import ApiDeferred, HttpPolicy, is_shared_musicbrainz_wait
+from http_policy import ApiDeferred, HttpPolicy, is_shared_musicbrainz_wait, is_musicbrainz_transient
 from providers import PROVIDERS
 from runtime import DeferredOperation, DownloaderRuntime, ProcessError, SourceAccessError, run_process
 from spotdl_runtime import SpotDLRuntime
@@ -1211,6 +1211,7 @@ class Pipeline:
                     job["id"], str(exc), retry_at=getattr(exc, "retry_at", None),
                     download_failure=getattr(exc, "download_failure", False),
                     provider_slot_wait=is_shared_musicbrainz_wait(str(exc)),
+                    provider_cooldown=is_musicbrainz_transient(str(exc)),
                 )
                 if retry_at is not None:
                     when = datetime.fromtimestamp(retry_at, UTC).isoformat()
