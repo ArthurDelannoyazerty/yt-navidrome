@@ -189,6 +189,11 @@ class HttpPolicy:
                     self.failures.append(f"{host}: HTTP {status}")
                 return response
             delay = max(retry_delay(response.headers.get("Retry-After")), 2 ** (attempt + 1) + random.random())
+            if host == "musicbrainz.org" and status == 503:
+                # MusicBrainz uses HTTP 503 for IP/application/global throttling,
+                # often without Retry-After. Do not probe again after only 2s
+                # when the whole provider is already under pressure.
+                delay = max(delay, 5.0 * (2 ** attempt))
             self.store.defer_api(host, time.time() + delay)
             self.report("ERROR", f"{host}: HTTP {status}; attempt {attempt + 1}/3, cooldown {delay:.1f}s")
             response.close()
