@@ -50,19 +50,23 @@ def is_shared_musicbrainz_wait(message: str) -> bool:
 
 
 def is_musicbrainz_transient(message: str) -> bool:
-    """A shared MusicBrainz outage/slot wait, not a defect in one track.
+    """Recognize *only* shared MusicBrainz waits and temporary provider failures.
 
-    A real 503 still has a distinct error reason and enforces a global HTTP
-    cooldown; it should not permanently poison individual cache jobs.
+    Beets combines individual plugin failures with semicolons, and a single
+    HTTP 503 also has a semicolon-delimited explanatory suffix. Order must not
+    change whether the failure consumes a track's exponential retry budget.
+    Reject mixed unrelated failures so we don't hide permanent errors.
     """
-    return is_shared_musicbrainz_wait(message) or str(message).startswith((
-        "musicbrainz.org: HTTP 429;",
-        "musicbrainz.org: HTTP 500;",
-        "musicbrainz.org: HTTP 502;",
-        "musicbrainz.org: HTTP 503;",
-        "musicbrainz.org: HTTP 504;",
+    parts = [part.strip() for part in str(message).split(";") if part.strip()]
+    transient = {
+        "musicbrainz.org: waiting for shared provider cooldown",
         "musicbrainz.org: connection failed after three attempts",
-    ))
+        *(f"musicbrainz.org: HTTP {code}" for code in (429, 500, 502, 503, 504)),
+    }
+    explanations = {"automatic attempts exhausted or long provider cooldown"}
+    return bool(parts) and any(part in transient for part in parts) and all(
+        part in transient or part in explanations for part in parts
+    )
 
 
 class HttpPolicy:

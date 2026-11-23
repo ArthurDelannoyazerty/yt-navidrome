@@ -182,3 +182,15 @@ def test_musicbrainz_transient_classifier_keeps_provider_outages_retryable():
     assert is_musicbrainz_transient("musicbrainz.org: connection failed after three attempts")
     assert not is_musicbrainz_transient("musicbrainz.org: HTTP 400; invalid lookup")
     assert not is_musicbrainz_transient("MusicBrainz entry was not found")
+    # Beets produces these composite errors when one plugin sees the 503
+    # while another merely waits on the host clock. Order must not matter:
+    # both are provider-wide, not per-track failures.
+    wait = "musicbrainz.org: waiting for shared provider cooldown"
+    unavailable = "musicbrainz.org: HTTP 503"
+    suffix = "automatic attempts exhausted or long provider cooldown"
+    assert is_musicbrainz_transient(f"{wait}; {unavailable}; {suffix}")
+    assert is_musicbrainz_transient(f"{unavailable}; {suffix}; {wait}")
+    assert is_musicbrainz_transient(f"{wait}; {unavailable}")
+    assert is_musicbrainz_transient(f"{wait}; {wait}")
+    assert not is_musicbrainz_transient(f"{wait}; api.acoustid.org: HTTP 401")
+    assert not is_musicbrainz_transient(f"{unavailable}; {suffix}; permanent metadata error")

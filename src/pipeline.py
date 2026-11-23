@@ -1177,9 +1177,22 @@ class Pipeline:
 
     async def work(self):
         while not self.stopping.is_set():
-            job = self.store.claim()
+            # When MusicBrainz is in a *provider* cooldown (>5 s), don't
+            # repeatedly claim dozens of tracks only to defer them to the
+            # same deadline. Leave them queued and keep non-track maintenance
+            # and any already-committing work runnable. A normal 1.1-second
+            # request slot does not prevent ingesting tracks.
+            clock = self.store.one(
+                "SELECT next_at FROM api_clock WHERE host=?",
+                ("musicbrainz.org",),
+            )
+            pause_until = float(clock["next_at"]) if clock else 0.0
+            skip_tracks = pause_until > time.time() + 5
+            job = self.store.claim(skip_tracks=skip_tracks)
             if not job:
-                await asyncio.sleep(0.5)
+                sleep_for = (min(5.0, max(0.5, pause_until - time.time() - 4.0))
+                             if skip_tracks else 0.5)
+                await asyncio.sleep(sleep_for)
                 continue
             payload = json.loads(job["payload"])
             kind = payload.get("action") or payload.get("mode") or job["kind"]

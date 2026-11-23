@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -433,3 +434,46 @@ def test_v3_channel_migration_preserves_existing_tracks(db, track):
     assert db.one("SELECT id FROM tracks")["id"] == track["id"]
     db.init()
     assert db.one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION
+
+
+def test_cooling_musicbrainz_can_skip_metadata_retries_without_claiming_it(db, track):
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    db.execute("UPDATE jobs SET stage='identifying' WHERE kind='track'")
+    db.enqueue("integrity", "maintenance", "admin", {})
+    claimed = db.claim(skip_tracks=True)
+    assert claimed is not None and claimed["kind"] == "integrity"
+    assert db.claim(skip_tracks=True) is None
+    row = db.one("SELECT state,defer_count,not_before FROM jobs WHERE kind='track' ORDER BY id DESC LIMIT 1")
+    assert row["state"] == "PENDING" and row["defer_count"] == 0
+    assert row["not_before"] == 0
+    assert db.claim()["kind"] == "track"
+
+
+def test_recover_repairs_old_mixed_musicbrainz_503_thirty_minute_waits(db, track):
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    claimed = db.claim()
+    now = time.time()
+    db.defer_api("musicbrainz.org", now + 50)
+    # Simulate the previous release's bad classification and 30-minute
+    # backoff. The stored retry reason is the combined Beets error.
+    db.defer_job(
+        claimed["id"],
+        "musicbrainz.org: waiting for shared provider cooldown; "
+        "musicbrainz.org: HTTP 503; automatic attempts exhausted or long provider cooldown",
+        retry_at=now + 1800,
+    )
+    before = db.one("SELECT not_before,defer_count FROM jobs WHERE id=?", (claimed["id"],))
+    assert before["not_before"] > now + 1700
+    assert before["defer_count"] == 1
+    db.recover()
+    after = db.one("SELECT not_before,defer_count,state FROM jobs WHERE id=?", (claimed["id"],))
+    assert now + 49 <= after["not_before"] < now + 60
+    assert after["defer_count"] == 0
+    assert after["state"] == "PENDING"
+
+
+def test_new_ingest_downloads_remain_eligible_during_musicbrainz_outage(db, track):
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    row = db.claim(skip_tracks=True)
+    assert row is not None and row["kind"] == "track"
+    assert row["stage"] == "queued"

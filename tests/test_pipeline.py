@@ -478,3 +478,26 @@ def test_provider_wide_musicbrainz_503_does_not_grow_per_track_backoff(db, track
     queued = db.one("SELECT defer_count,state FROM jobs WHERE id=?", (job["id"],))
     assert queued["defer_count"] == 0
     assert queued["state"] == "PENDING"
+
+
+def test_worker_does_not_defer_identification_retries_during_shared_cooldown(db, track):
+    db.enqueue("track", track["id"], "admin", {"mode": "ingest"})
+    db.execute("UPDATE jobs SET stage='identifying' WHERE kind='track'")
+    db.defer_api("musicbrainz.org", time.time() + 60)
+    worker = Pipeline(db)
+
+    async def run():
+        task = asyncio.create_task(worker.work())
+        try:
+            await asyncio.sleep(0.08)
+        finally:
+            worker.stopping.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+    row = db.one("SELECT state,defer_count,not_before FROM jobs WHERE kind='track' ORDER BY id DESC LIMIT 1")
+    assert row["state"] == "PENDING"
+    assert row["defer_count"] == 0
+    assert row["not_before"] == 0
+    assert db.one("SELECT operation_state FROM tracks WHERE id=?", (track["id"],))["operation_state"] != "DEFERRED"

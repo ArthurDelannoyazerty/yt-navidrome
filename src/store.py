@@ -999,13 +999,25 @@ class Store:
                 result.append(row)
         return result
 
-    def claim(self):
+    def claim(self, *, skip_tracks: bool = False):
+        """Claim due work; leave *previously identified-stage* tracks on hold.
+
+        New ingestion downloads can continue and preserve staged candidates
+        during a provider-wide MusicBrainz outage. Jobs already at the
+        identifying stage must not be re-claimed and deferred repeatedly.
+        """
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 AND not_before<=? ORDER BY CASE WHEN json_extract(payload,'$.stop_after_commit')=1 THEN 0 WHEN kind='purge_source' THEN 1 ELSE 2 END,id LIMIT 1",
-                (time.time(),),
-            ).fetchone()
+            query = ("SELECT * FROM jobs WHERE state='PENDING' AND cancel_requested=0 "
+                     "AND not_before<=?")
+            if skip_tracks:
+                # Do not block fresh downloads or already-started commits:
+                # only metadata retries that have reached identification wait.
+                query += (" AND (kind!='track' OR stage!='identifying' "
+                          "OR json_extract(payload,'$.stop_after_commit')=1)")
+            query += (" ORDER BY CASE WHEN json_extract(payload,'$.stop_after_commit')=1 "
+                      "THEN 0 WHEN kind='purge_source' THEN 1 ELSE 2 END,id LIMIT 1")
+            row = con.execute(query, (time.time(),)).fetchone()
             if not row:
                 return None
             con.execute("UPDATE jobs SET state=?,error=NULL WHERE id=?", (JOB.send(row["state"], "claim"), row["id"]))
@@ -1017,6 +1029,9 @@ class Store:
             return dict(con.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
 
     def recover(self):
+        # Import here to avoid a module-level dependency cycle with HttpPolicy.
+        from http_policy import is_musicbrainz_transient
+
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             for job in con.execute("SELECT * FROM jobs WHERE cancel_requested=1 AND state IN ('PENDING','RUNNING')").fetchall():
@@ -1024,6 +1039,28 @@ class Store:
             con.execute("UPDATE jobs SET state='PENDING' WHERE state='RUNNING'")
             con.execute("UPDATE tracks SET operation_state='QUEUED',updated_at=? WHERE operation_state='RUNNING'", (utcnow(),))
             con.execute("UPDATE sources SET status='PENDING' WHERE status='SYNCING'")
+            # Older releases sometimes treated *provider-wide* MusicBrainz
+            # outages as per-track failures, creating 30-minute retry delays.
+            # Repair only strictly classified transient MusicBrainz errors.
+            # Respect the shared provider clock (including Retry-After), so
+            # recovery cannot cause an early retry or thundering herd.
+            now = time.time()
+            clock = con.execute(
+                "SELECT next_at FROM api_clock WHERE host='musicbrainz.org'"
+            ).fetchone()
+            next_allowed = max(now + 5, float(clock["next_at"]) if clock else 0.0)
+            affected = con.execute(
+                """SELECT id,error,not_before FROM jobs
+                   WHERE kind='track' AND state='PENDING' AND cancel_requested=0
+                     AND error LIKE 'musicbrainz.org:%'"""
+            ).fetchall()
+            for job in affected:
+                if (float(job["not_before"]) > next_allowed + 60
+                        and is_musicbrainz_transient(job["error"] or "")):
+                    con.execute(
+                        "UPDATE jobs SET not_before=?,defer_count=0 WHERE id=?",
+                        (next_allowed, job["id"]),
+                    )
         from state_machines import UPDATE, transition_setting
         for key in ("downloader_update", "spotdl_update"):
             value = self.setting(key, {})
