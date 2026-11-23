@@ -36,6 +36,19 @@ def retry_delay(value: str | None, now=None) -> float:
             return 0
 
 
+def is_shared_musicbrainz_wait(message: str) -> bool:
+    """True only for request-slot contention, never for actual HTTP failures.
+
+    Beets may combine multiple deferred plugin messages with semicolons.
+    A mixed HTTP 503 and slot-wait report must keep the normal failure backoff.
+    """
+    parts = [part.strip() for part in str(message).split(";")]
+    return bool(parts) and all(
+        part == "musicbrainz.org: waiting for shared provider cooldown"
+        for part in parts
+    )
+
+
 class HttpPolicy:
     def __init__(self, store: Store, report=None):
         self.store = store
