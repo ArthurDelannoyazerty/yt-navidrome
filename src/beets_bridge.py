@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import traceback
 from pathlib import Path
@@ -404,19 +405,26 @@ class Bridge:
         # English proposal when the actual reversible tag job executes.
         from catalogue import Catalogue
         from localized_names import preferred_recording_title
-        with Catalogue(self.store).db() as con:
-            row = con.execute(
-                "SELECT data FROM entities WHERE kind='recording' AND id=?",
-                (track["mbid"],),
-            ).fetchone()
-            if row:
-                recording = json.loads(row["data"])
-                chosen = preferred_recording_title(
-                    con, track["mbid"], recording,
-                    assigned_release_id=track.get("release_id"),
-                )
-                if chosen["source"] != "canonical":
-                    display["title"] = chosen["title"]
+        try:
+            with Catalogue(self.store).db() as con:
+                row = con.execute(
+                    "SELECT data FROM entities WHERE kind='recording' AND id=?",
+                    (track["mbid"],),
+                ).fetchone()
+                if row:
+                    recording = json.loads(row["data"])
+                    chosen = preferred_recording_title(
+                        con, track["mbid"], recording,
+                        assigned_release_id=track.get("release_id"),
+                    )
+                    if chosen["source"] != "canonical":
+                        display["title"] = chosen["title"]
+        except sqlite3.OperationalError as exc:
+            # Standalone Beets invocations may not have the optional Catalogue
+            # initialized. Preserve the pre-existing Beets metadata behavior
+            # without masking disk errors or malformed database schemas.
+            if "no such table: entities" not in str(exc):
+                raise
         if album is not None:
             display["album"] = album.album
             display["albumartist"] = (getattr(album, "albumartist", None)
