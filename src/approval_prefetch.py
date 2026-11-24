@@ -20,7 +20,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from http_policy import ApiDeferred, is_musicbrainz_transient
-from localized_names import artist_credit, preferred_english_name
+from localized_names import (
+    artist_credit, english_release_language, preferred_english_name,
+    preferred_recording_title,
+)
 from metadata_hints import alias_key, normalized_words, search_hints
 from musicbrainz_search import PAGE_SIZE, query_for, valid_id
 from source_metadata import source_snapshot
@@ -240,6 +243,34 @@ class ApprovalPrefetch:
                                       {"id": identity}, priority))
         return self._enqueue_rows(jobs)
 
+    def enqueue_official_releases(self, recording_id, releases, *, priority=16):
+        """Bound extra lookups to two English editions of a non-Latin recording.
+
+        The release-browse response already carries its title-language code.
+        Don't fetch every regional/compilation edition or compete with the
+        already busy shared MusicBrainz host for English-native recordings.
+        """
+        with self.catalogue.db() as con:
+            exact, _ = self._cached(con, "recording", recording_id)
+            raw = exact or self._catalogue_entity(con, "recording", recording_id) or {}
+            native = str(raw.get("title") or "")
+            if (not any(ch.isalpha() and not ch.isascii() for ch in native)
+                    or raw.get("preferred_title")
+                    or preferred_english_name(raw) != native):
+                return 0
+        english = [
+            rel for rel in releases
+            if (str(rel.get("status") or "").casefold() == "official"
+                and english_release_language(rel.get("language"))
+                and valid_id(rel.get("id")))
+        ]
+        # Recording IDs, not title similarity, identify every candidate.
+        ids = list(dict.fromkeys(rel["id"] for rel in english))[:2]
+        return self._enqueue_rows([
+            self._job("official_release", identity, {"id": identity}, priority)
+            for identity in ids
+        ])
+
     def enqueue_search(self, entity, title, artist, artist_id=None, page=1, *, priority=0):
         # Always enforce the same search validation and no broader Lucene input
         # than the normal interactive endpoint.
@@ -385,14 +416,20 @@ class ApprovalPrefetch:
                       if str(r.get("status") or "").casefold() == "pseudo-release"]
             if not pseudo:
                 continue
-            keys = [rid for rid in pseudo if rid]
-            for batch in self._chunks(keys):
-                marks = ",".join("?" for _ in batch)
-                if con.execute(
-                    "SELECT 1 FROM approval_prefetch_jobs "
-                    f"WHERE kind='pseudo_release' AND cache_key IN ({marks}) LIMIT 1", batch
-                ).fetchone():
-                    return True
+            official = [valid_id(r.get("id")) for r in releases
+                        if str(r.get("status") or "").casefold() == "official"
+                        and english_release_language(r.get("language"))]
+            for kind, keys in (("pseudo_release", [rid for rid in pseudo if rid]),
+                               ("official_release", [rid for rid in official if rid])):
+                for batch in self._chunks(keys):
+                    marks = ",".join("?" for _ in batch)
+                    if con.execute(
+                        "SELECT 1 FROM approval_prefetch_jobs "
+                        f"WHERE kind=? AND cache_key IN ({marks}) "
+                        "AND state IN ('PENDING','RUNNING') LIMIT 1",
+                        (kind, *batch),
+                    ).fetchone():
+                        return True
         return False
 
     def _recording(self, con, identity):
@@ -409,14 +446,20 @@ class ApprovalPrefetch:
             return None, fresh if unavailable else full_catalogue, []
         item = dict(item)
         native = item.get("title") or ""
-        has_alias = bool(item.get("preferred_title"))
-        if not has_alias and (pseudo := self._pseudo_title(con, identity, native)):
-            item["preferred_title"] = pseudo["title"]
-            item["preferred_title_source"] = "pseudo_release"
-            item["preferred_title_release_id"] = pseudo["release_id"]
-            item["preferred_title_language"] = pseudo.get("language") or ""
-        elif has_alias:
-            item["preferred_title_source"] = "recording_alias"
+        raw = self._catalogue_entity(con, "recording", identity) or {"title": native}
+        # The exact-name cache has verified recording aliases even when a
+        # sparse Catalogue entry does not. The shared resolver then considers
+        # complete English official tracklists before pseudo-releases.
+        chosen = preferred_recording_title(
+            con, identity, raw, known_alias=item.get("preferred_title"),
+            pseudo=self._pseudo_title(con, identity, native),
+        )
+        item["preferred_title"] = chosen["title"] if chosen["title"] != native else None
+        if item["preferred_title"]:
+            item["preferred_title_source"] = chosen["source"]
+            if chosen["release_id"]:
+                item["preferred_title_release_id"] = chosen["release_id"]
+                item["preferred_title_language"] = chosen["language"] or ""
         credits = item.get("artist_credits") or []
         english = []
         has_alias = False
@@ -757,8 +800,30 @@ class ApprovalPrefetch:
             with self._cleanup_lock:
                 if self._store(kind, job["cache_key"], value, NAME_TTL, expected_job=True):
                     self.enqueue_pseudo_releases(value["releases"], priority=14)
+                    self.enqueue_official_releases(args["id"], value["releases"], priority=16)
                     if args["page"] < 20 and args["page"] * 100 < value["total"]:
                         self.enqueue_releases([args["id"]], page=args["page"] + 1, priority=28)
+        elif kind == "official_release":
+            value = await asyncio.to_thread(
+                self.searcher.request_official_release_tracklist, args["id"])
+            if value["id"] != args["id"]:
+                raise ValueError("MusicBrainz returned an unrelated official release")
+            with self._cleanup_lock:
+                with self.catalogue.db() as con:
+                    current = con.execute(
+                        "SELECT 1 FROM approval_prefetch_jobs "
+                        "WHERE kind='official_release' AND cache_key=? AND state='RUNNING'",
+                        (args["id"],),
+                    ).fetchone()
+                    if not current:
+                        return
+                    if value.get("accepted"):
+                        release = value["release"]
+                        self.catalogue.ingest(con, "release", release)
+                        self.catalogue._store_release_tracks(con, release)
+                self._store(kind, args["id"],
+                            {"id": args["id"], "accepted": bool(value.get("accepted"))},
+                            NAME_TTL, expected_job=True)
         elif kind == "pseudo_release":
             value = await asyncio.to_thread(
                 self.searcher.request_pseudo_release_titles, args["id"])
