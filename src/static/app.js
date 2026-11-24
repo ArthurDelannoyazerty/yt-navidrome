@@ -647,6 +647,21 @@ function showRemoval(track) {
   $("removeUrls").replaceChildren(...track.origins.map(origin => node("li", origin.url || origin.title)));
   $("removeDialog").showModal();
 }
+// Approval and Music share the same existing removal confirmation dialog.
+// Opening it NEVER submits a delete/ignore action.
+window.IngestorRemoval = Object.freeze({
+  open: async (trackId, user, stillCurrent = () => true) => {
+    if (!trackId || user !== state.user || !stillCurrent()) return;
+    const track = await api(`/api/tracks/${encodeURIComponent(trackId)}?user_id=${encodeURIComponent(user)}`);
+    if (state.user !== user || !stillCurrent() || track.id !== trackId) return;
+    if (!Array.isArray(track.origins) || !track.origins.length)
+      throw new Error("This track no longer has a removable source.");
+    if (["QUEUED", "RUNNING", "DEFERRED"].includes(track.operation_state))
+      throw new Error("This track is busy; reopen it after processing finishes.");
+    showRemoval(track);
+  },
+});
+
 function closeRemoval() { state.removeTrack = null; $("removeDialog").close(); }
 $("cancelRemoval").addEventListener("click", closeRemoval);
 $("removeDialog").addEventListener("cancel", () => { state.removeTrack = null; });
@@ -661,6 +676,7 @@ $("removeForm").addEventListener("submit", guard(async event => {
   try {
     await action(track, selected.value);
     state.removeTrack = null; $("removeDialog").close();
+    if (state.tab === "approval") await window.MetadataUI?.afterRemoval?.(track.id);
     await loadIgnored(false);
   } finally { $("removeSubmit").disabled = false; }
 }));
