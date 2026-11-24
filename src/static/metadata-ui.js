@@ -119,6 +119,9 @@ window.MetadataUI = (() => {
     $("metadataManualApply").disabled = !mutable || ui.context?.health !== "AVAILABLE" || !Object.keys(manualChanges()).length;
     $("metadataReload").disabled = flow.mutation.pending || flow.queue.pending;
     $("approvalArtwork").disabled = busy || !ui.track || !window.ArtworkUI;
+    $("approvalRemove").disabled = busy || !ui.track || !ui.context ||
+      ["QUEUED", "RUNNING", "DEFERRED"].includes(ui.context.state) ||
+      !window.IngestorRemoval?.open;
     for (const id of [...Object.values(manualFields), "mbArtist", "mbEntity", "mbUseSource", "mbSearchNow"]) $(id).disabled = busy;
     $("mbTitle").disabled = busy || $("mbEntity").value === "artist";
     const keep = choices().find(choice => choice.asis || choice.kind === "asis");
@@ -792,6 +795,17 @@ window.MetadataUI = (() => {
   $("metadataReload").addEventListener("click", () => ui.track ? loadTrack(ui.track) : refreshQueue());
   $("approvalCover").addEventListener("error", () => { $("approvalCover").hidden = true; });
   $("approvalArtwork").addEventListener("click", () => ui.track && window.ArtworkUI?.open(ui.track));
+  $("approvalRemove").addEventListener("click", async () => {
+    if ($("approvalRemove").disabled || !active() || !ui.context) return;
+    const user = ui.user, trackId = ui.context.track_id, serial = ui.loadSerial;
+    const stillCurrent = () => active() && ui.user === user && ui.loadSerial === serial &&
+      ui.context?.track_id === trackId;
+    try {
+      await window.IngestorRemoval.open(trackId, user, stillCurrent);
+    } catch (error) {
+      if (stillCurrent()) feedback(error.message || String(error), true);
+    }
+  });
   $("sourceMetadataApply").addEventListener("click", () => submit("restore_source"));
   $("metadataManualApply").addEventListener("click", () => Object.keys(manualChanges()).length && submit("retag", {overrides: manualChanges()}));
   $("metadataKeepCurrent").addEventListener("click", () => {
@@ -806,7 +820,11 @@ window.MetadataUI = (() => {
   $("mbPrev").addEventListener("click", () => { if (ui.page > 1) { ui.page -= 1; return search(); } });
   $("mbNext").addEventListener("click", () => { if (ui.page < ui.maxPage) { ui.page += 1; return search(); } });
   $("approvalFilter").value = "NEEDS_APPROVAL";
-  return {open, openRoute, enter, leave, reset, search};
+  async function afterRemoval(trackId) {
+    if (!active() || ui.context?.track_id !== trackId) return;
+    await refreshQueue(null);
+  }
+  return {open, openRoute, enter, leave, reset, search, afterRemoval};
 })();
 
 if (state.user) {
