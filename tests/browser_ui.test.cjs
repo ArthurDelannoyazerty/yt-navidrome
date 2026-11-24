@@ -1347,8 +1347,8 @@ test("real browser: Approval shows official-release English track beneath canoni
   await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
   await chrome.until("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias')");
   assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name a').textContent"),"未始的供献颂");
-  assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias').textContent"),
-    /English \\(official release\\): Offertorium of Fortuitum/);
+  assert.ok((await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias').textContent"))
+    .includes("English (official release): Offertorium of Fortuitum"));
   assert.ok((await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias a').href")).endsWith("/release/"+release));
   assert.equal(data.writes.length,0,"Showing translated name must not approve or retag a track");
   assert.deepEqual(chrome.errors,[]);
