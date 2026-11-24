@@ -238,6 +238,15 @@ async function fixtureServer(t, data) {
         }
         const parts = url.pathname.split("/");
         const current = data.tracks.find(track => track.id === parts[3]);
+        if (url.pathname === "/api/catalogue/language-review-start") {
+          data.languageRunId = "review-background-run";
+          data.languageStoredReview = {state:"ready", result:data.languagePreview};
+          result = {state:"starting",started:true,run_id:data.languageRunId};
+        }
+        if (url.pathname === "/api/catalogue/language-apply-start") {
+          data.languageApplyRunId = "apply-background-run";
+          result = {state:"starting",started:true,run_id:data.languageApplyRunId};
+        }
         if (url.pathname === "/api/catalogue/language-name-change") {
           (data.languageJobStates ||= {})[payload.track_id] = "PENDING";
         }
@@ -335,7 +344,8 @@ async function fixtureServer(t, data) {
       else if (url.pathname === "/api/catalogue/graph") result = data.graph || {nodes:[], edges:[], owned_recording_count:0, truncated:false};
       else if (url.pathname === "/api/catalogue/language-preview") result = data.languagePreview || {
         eligible:0, skipped:{already_localized:0,manual_or_busy:0,invalid_or_missing:0}, sample:[]};
-      else if (url.pathname === "/api/catalogue/language-progress") result = {state:"complete", processed:12, total:12, eligible:12};
+      else if (url.pathname === "/api/catalogue/language-progress") result = {
+        state:"complete", run_id:data.languageRunId, processed:12, total:12, eligible:12};
       else if (url.pathname === "/api/catalogue/language-canary") result = data.languageCanary || {state:"not_started", verified:false, track_count:0};
       else if (url.pathname === "/api/catalogue/language-review-state") result = data.languageStoredReview || {state:"idle"};
       else if (url.pathname === "/api/catalogue/language-batch-status") result = data.languageBatch || {state:"idle",submitted:0,done:0,running:0,pending:0,failed:0};
@@ -353,7 +363,8 @@ async function fixtureServer(t, data) {
       }
       else if (url.pathname === "/api/catalogue/language-name-change-status")
         result = {states: data.languageJobStates || {}};
-      else if (url.pathname === "/api/catalogue/language-apply-progress") result = {state:"complete",processed:12,eligible:12,queued:3};
+      else if (url.pathname === "/api/catalogue/language-apply-progress") result = {
+        state:"complete",run_id:data.languageApplyRunId,processed:12,eligible:12,queued:3};
       else if (url.pathname === "/api/catalogue/album-history") result = [];
       else if (url.pathname === "/api/catalogue/preferences") result = data.albumPreferences || [];
       else if (url.pathname === "/api/catalogue/search") result = {items:data.catalogueSearch || [], remote:false};
@@ -966,25 +977,27 @@ test("real browser: Language review distinguishes changes and enables only a ver
   assert.equal(individual.body.confirmed,true);
   assert.equal(await chrome.evaluate("document.querySelector('#languageChangeAll').disabled"),true);
   assert.match(await chrome.evaluate("document.querySelector('#languageScopeSummary').textContent"),/1 candidates/);
-  const previousScans = data.reads.filter(x=>x.startsWith("/api/catalogue/language-preview?")).length;
+  const previousScans = data.writes.filter(x=>x.path==="/api/catalogue/language-review-start").length;
   await chrome.evaluate("document.querySelector('#languageSmartFilter').click()");
   await chrome.until("document.querySelectorAll('#languageNameChangesList .language-change-row').length===3");
   assert.equal(await chrome.evaluate("document.querySelector('#languageNameChangesCount').textContent"),"(3)");
   assert.match(await chrome.evaluate("document.querySelector('#languageNameChangesList').textContent"),/It Doesn’t Matter/);
   assert.match(await chrome.evaluate("document.querySelector('#languageScopeSummary').textContent"),/3 candidates/);
-  assert.equal(data.reads.filter(x=>x.startsWith("/api/catalogue/language-preview?")).length,previousScans,
+  assert.equal(data.writes.filter(x=>x.path==="/api/catalogue/language-review-start").length,previousScans,
     "Changing only the smart filter must not trigger a slow rescan");
   assert.equal(await chrome.evaluate("document.querySelector('#languageCanary').disabled"),false);
   assert.equal(await chrome.evaluate("document.querySelector('#languageBulk').disabled"),true);
   assert.equal(data.writes.filter(x=>x.path==="/api/catalogue/language-apply").length,0);
-  assert.ok(data.reads.some(x=>x.startsWith("/api/catalogue/language-preview?user_id=admin")));
+  assert.ok(data.writes.some(x=>x.path==="/api/catalogue/language-review-start" &&
+    x.body.user_id==="admin"),"Language review must start in the background, not hold a long GET");
   await chrome.evaluate("document.querySelector('#languageScope').value='names_and_originals'; document.querySelector('#languageScope').dispatchEvent(new Event('change'))");
   assert.match(await chrome.evaluate("document.querySelector('#languageScopeSummary').textContent"),/5 candidates/);
   await chrome.evaluate("document.querySelector('#languageRecheck').click()");
   assert.equal(await chrome.evaluate("document.querySelector('#languageCanary').disabled"),true,"Option change invalidates the review");
   await chrome.evaluate("document.querySelector('#languageReview').click()");
   await chrome.until("document.querySelector('#languageCountNames').textContent==='3'");
-  assert.ok(data.reads.some(x=>x.includes("include_localized=true")));
+  assert.ok(data.writes.some(x=>x.path==="/api/catalogue/language-review-start" &&
+    x.body.include_localized===true),"Recheck flag travels with the background scan");
   assert.equal(await chrome.evaluate("document.querySelector('#languageBulk').disabled"),true);
   await chrome.send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true});
   assert.equal(await chrome.evaluate("document.documentElement.scrollWidth<=innerWidth+1"),true);
@@ -1035,7 +1048,7 @@ test("real browser: full Language list scrolls and Change all queues only review
   await chrome.until("!document.querySelector('#languageChangeAll').disabled");
   await chrome.evaluate("document.querySelector('#languageChangeAll').click()");
   await chrome.until("document.querySelector('#languageNameChangesStatus').textContent.includes('queued')");
-  const bulk=data.writes.find(x=>x.path==="/api/catalogue/language-apply");
+  const bulk=data.writes.find(x=>x.path==="/api/catalogue/language-apply-start");
   assert.equal(bulk.body.limit,5000);
   assert.equal(bulk.body.scope,"names","Original-tag-only updates must not join Change all");
   assert.equal(bulk.body.smart_only,true,"Change all must enforce the checked filter server-side");
