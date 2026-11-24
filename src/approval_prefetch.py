@@ -799,7 +799,11 @@ class ApprovalPrefetch:
             with self._cleanup_lock:
                 if self._store(kind, job["cache_key"], value, NAME_TTL, expected_job=True):
                     self.enqueue_pseudo_releases(value["releases"], priority=14)
-                    self.enqueue_official_releases(args["id"], value["releases"], priority=16)
+                    # Only the first browse page may add English official
+                    # lookups. Even recordings on hundreds of compilations
+                    # must never create an unbounded API work multiplier.
+                    if args["page"] == 1:
+                        self.enqueue_official_releases(args["id"], value["releases"], priority=16)
                     if args["page"] < 20 and args["page"] * 100 < value["total"]:
                         self.enqueue_releases([args["id"]], page=args["page"] + 1, priority=28)
         elif kind == "official_release":
