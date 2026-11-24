@@ -119,6 +119,8 @@ def preferred_recording_title(con, recording_id, recording, *,
     # version name of an English recording can denote a remix or alternate
     # title rather than a translation.
     non_latin = has_non_latin_letters(canonical)
+    if not non_latin:
+        return base
     if non_latin:
         candidates = []
         pseudo_candidates = []
