@@ -1390,6 +1390,13 @@ def test_album_clusters_api_reports_server_timing_and_focused_only_payload(db, e
         family = first.json()["detail"]["id"]
         assert family and tid in {row["id"] for row in first.json()["detail"]["tracks"]}
         assert "album-catalogue-db;dur=" in first.headers["server-timing"]
+        lean = client.get("/api/albums/clusters", params={
+            "user_id": "admin", "include_assigned": "true", "lean": "true",
+        })
+        assert lean.status_code == 200
+        assert set(lean.json()["clusters"][0]) == {
+            "id", "title", "track_count", "candidate_count", "locked"}
+        assert len(lean.content) < len(first.content), "Lean list saves JSON transfer"
         detail = client.get("/api/albums/clusters", params={
             "user_id": "admin", "include_assigned": "true",
             "focus_id": family, "detail_only": "true",
