@@ -87,7 +87,8 @@ class Migration:
                 continue
             is_waiting = (old.parent == user_root / "Waiting for approval"
                           and old.name == row["id"] + ".opus"
-                          and row["temporary_candidate_sha256"] is not None)
+                          and (row["temporary_candidate_sha256"] is not None
+                               or row["operation_state"] == "NEEDS_APPROVAL"))
             if self.waiting_only:
                 # Only move *current, unapproved* music. Files not referenced
                 # by the active SQLite asset must never be moved automatically.
