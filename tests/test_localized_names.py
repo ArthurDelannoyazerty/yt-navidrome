@@ -165,7 +165,11 @@ def test_shared_resolver_uses_exact_official_english_track_and_keeps_recording_i
     assert preferred_recording_title(
         con, recording, native, assigned_release_id=japanese) == selected
     # Local album edition selection cannot change the English title source.
-    assert preferred_recording_title(con, unrelated, {"title": "別の曲"})["source"] == "canonical"
+    assert preferred_recording_title(
+        con, "99999999-9999-4999-8999-999999999999",
+        {"title": "別の曲"})["source"] == "canonical", (
+            "Only release tracks with the exact same Recording ID can supply a title"
+        )
     # A properly locale-marked recording alias always outranks official titles.
     aliased = {**native, "aliases": [{"name": "Official alias", "locale": "en"}]}
     assert preferred_recording_title(con, recording, aliased)["title"] == "Official alias"
