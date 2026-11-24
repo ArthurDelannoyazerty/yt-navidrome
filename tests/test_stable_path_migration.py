@@ -228,3 +228,91 @@ def test_relative_beets_path_mismatch_still_blocks_migration(db, environment):
     with pytest.raises(ValueError, match="Beets item path mismatch"):
         Migration(*environment).inspect()
     assert old.exists()
+
+
+def waiting_fixture(db, environment):
+    """Old image: current playable, still unapproved, in the legacy folder."""
+    tid, old, digest, beets_db = fixture_legacy(db, environment)
+    waiting = environment[1] / "admin" / "Waiting for approval" / (tid + ".opus")
+    waiting.parent.mkdir(parents=True, exist_ok=True)
+    old.rename(waiting)
+    db.execute(
+        """UPDATE tracks SET file_path=?,operation_state='NEEDS_APPROVAL',
+           temporary_candidate_sha256=? WHERE id=?""",
+        (str(waiting), digest, tid),
+    )
+    db.execute("UPDATE assets SET path=? WHERE track_id=? AND state='CURRENT'",
+               (str(waiting), tid))
+    with sqlite3.connect(beets_db) as con:
+        con.execute("UPDATE items SET path=? WHERE id=23", (os.fsencode(waiting),))
+    return tid, waiting, digest, beets_db
+
+
+def test_waiting_migration_updates_all_three_paths_and_preserves_review(db, environment):
+    tid, waiting, digest, beets_db = waiting_fixture(db, environment)
+    migration = Migration(*environment, waiting_only=True)
+    plan = migration.inspect()
+    assert len(plan["entries"]) == 1 and plan["mode"] == "waiting"
+    # A separate journal must not affect the original approved-path migration.
+    assert migration.journal.name == "waiting-audio-migration.json"
+    assert Migration(*environment).inspect()["entries"] == []
+    original_token = db.approval_token(db.owned("tracks", tid, "admin"))
+    with migration.locked():
+        migrated = migration.apply(backup_confirmed=True)
+    assert migrated["state"] == "AWAITING_NAVIDROME_SCAN"
+    path = environment[1] / "admin" / "audio" / (tid + ".opus")
+    assert path.is_file() and sha256_file(path) == digest
+    assert not waiting.exists()
+    row = db.owned("tracks", tid, "admin")
+    assert row["file_path"] == str(path)
+    assert row["temporary_candidate_sha256"] == digest
+    assert row["operation_state"] == "NEEDS_APPROVAL"
+    assert db.approval_token(row) == original_token
+    assert db.current_asset(tid)["path"] == str(path)
+    with sqlite3.connect(beets_db) as con:
+        assert os.fsdecode(con.execute("SELECT path FROM items WHERE id=23").fetchone()[0]) == str(path)
+    assert Path(migrated["backup_dir"]).is_dir()
+    with pytest.raises(ValueError, match="Verify Navidrome"):
+        migration.acknowledge(navidrome_verified=False)
+    with migration.locked():
+        assert migration.acknowledge(navidrome_verified=True)["state"] == "COMPLETE"
+
+
+def test_waiting_migration_survives_crash_between_move_and_sqlite_commit(db, environment):
+    tid, old, digest, beets_db = waiting_fixture(db, environment)
+    migration = Migration(*environment, waiting_only=True)
+    plan = migration.inspect()
+    migration.save(plan)
+    destination = Path(plan["entries"][0]["destination"])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    old.replace(destination)
+    with migration.locked():
+        result = migration.apply(backup_confirmed=True)
+    assert result["state"] == "AWAITING_NAVIDROME_SCAN"
+    assert sha256_file(destination) == digest
+    assert db.current_asset(tid)["path"] == str(destination)
+    with sqlite3.connect(beets_db) as con:
+        assert os.fsdecode(con.execute("SELECT path FROM items WHERE id=23").fetchone()[0]) == str(destination)
+
+
+def test_waiting_migration_refuses_modified_audio_or_occupied_target(db, environment):
+    tid, old, digest, _ = waiting_fixture(db, environment)
+    target = environment[1] / "admin" / "audio" / (tid + ".opus")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"collision")
+    with pytest.raises(ValueError, match="Target collision"):
+        Migration(*environment, waiting_only=True).inspect()
+    target.unlink()
+    old.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="checksum"):
+        Migration(*environment, waiting_only=True).inspect()
+
+
+def test_waiting_migration_blocks_importer_until_navidrome_ack(db, environment):
+    from fastapi.testclient import TestClient
+    from main import create_app
+    waiting = db.path.parent / "waiting-audio-migration.json"
+    waiting.write_text(json.dumps({"state": "AWAITING_NAVIDROME_SCAN"}))
+    with pytest.raises(RuntimeError, match="waiting-audio-migration"):
+        with TestClient(create_app(db, start_workers=False)):
+            pass

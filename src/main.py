@@ -115,16 +115,22 @@ def create_app(store=None, start_workers=True):
             # The move-only migration and Navidrome verification form one
             # maintenance boundary. Never resume ingestion, metadata changes or
             # scheduled sync while track IDs/ratings are awaiting verification.
-            journal = store.path.parent / "stable-path-migration.json"
-            if journal.is_file():
-                state = json.loads(journal.read_text(encoding="utf-8")).get("state")
-                if state != "COMPLETE":
-                    raise RuntimeError(
-                        f"Stable-path migration is {state or 'unrecognized'} (not acknowledged). "
-                        "Keep the importer stopped, verify Navidrome track IDs, "
-                        "playlists and ratings, then acknowledge the migration "
-                        "with tools/stable_path_migrate.py ack."
-                    )
+            for name, tool in (
+                ("stable-path-migration.json", "stable_path_migrate.py"),
+                ("waiting-audio-migration.json", "migrate_waiting_audio.py"),
+            ):
+                journal = store.path.parent / name
+                if journal.is_file():
+                    state = json.loads(journal.read_text(encoding="utf-8")).get("state")
+                    if state != "COMPLETE":
+                        label = ("Stable-path migration" if name == "stable-path-migration.json"
+                                 else "waiting-audio-migration.json")
+                        raise RuntimeError(
+                            f"{label} is {state or 'unrecognized'} (not acknowledged). "
+                            "Keep the importer stopped, verify Navidrome track IDs, "
+                            "playlists and ratings, then acknowledge the migration "
+                            f"with tools/{tool} ack."
+                        )
             store.init()
             catalogue.init()
             albums.init()

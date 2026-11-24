@@ -85,6 +85,8 @@ def test_new_strong_match_is_playable_before_approval(db, track, environment, li
     raw = OggOpus(current['file_path'])
     assert current['health'] == 'AVAILABLE' and current['operation_state'] == 'NEEDS_APPROVAL'
     assert current['mbid'] is None and current['release_id'] is None
+    assert Path(current['file_path']) == environment[1] / 'admin' / 'audio' / (track['id'] + '.opus')
+    assert not (environment[1] / 'admin' / 'Waiting for approval').exists()
     assert raw['album'] == ['Waiting for approval']
     assert raw['albumartist'] == ['Various Artists']
     assert raw['artist'] == ['Source Artist'] and raw['title'] == ['Source Song']
@@ -94,7 +96,8 @@ def test_new_strong_match_is_playable_before_approval(db, track, environment, li
     assert sha256_file(Path(current['temp_path'])) == sha256_file(fixture)
     assert db.current_asset(track['id'])['sha256'] == sha256_file(Path(current['file_path']))
     playlist = Path(db.one('SELECT playlist_path FROM sources')['playlist_path']).read_text()
-    assert f"Waiting for approval/{track['id']}.opus" in playlist
+    assert f"audio/{track['id']}.opus" in playlist
+    assert 'Waiting for approval/' not in playlist
     assert len(downloads) == 1
     assert not db.rows('PRAGMA foreign_key_check')
     # Opus metadata writes must not change decoded audio samples.
@@ -106,16 +109,20 @@ def test_new_strong_match_is_playable_before_approval(db, track, environment, li
 def test_approval_replaces_temporary_copy_without_downloading(db, track, environment, listening):
     pipeline, _, downloads = listening
     waiting = import_track(db, pipeline, track)
+    old_sha = sha256_file(Path(waiting['file_path']))
+    old_file = waiting['file_path']
     current = approve_source(db, pipeline, waiting)
+    assert current['file_path'] == old_file, "Approval must never move the Navidrome path"
+    assert sha256_file(Path(old_file)) != old_sha, "Approval changes the tags at the same path"
     assert current['operation_state'] == 'IDLE' and current['health'] == 'AVAILABLE'
     assert current['temporary_candidate_sha256'] is None
     assert OggOpus(current['file_path'])['album'] == ['Source Album']
-    assert not Path(waiting['file_path']).exists()
+    assert Path(waiting['file_path']).exists()
     assert not Path(waiting['temp_path']).exists()
     assert len(downloads) == 1
     assert db.one("SELECT COUNT(*) AS n FROM assets WHERE state='CURRENT'")['n'] == 1
     playlist = Path(db.one('SELECT playlist_path FROM sources')['playlist_path']).read_text()
-    assert 'Waiting for approval' not in playlist and '#EXTINF' in playlist
+    assert 'Waiting for approval/' not in playlist and f"audio/{track['id']}.opus" in playlist
     asyncio.run(pipeline.process_integrity({'id': 999, 'user_id': 'admin', 'target': 'admin'}))
     assert db.integrity_report('admin')['total'] == 0
 

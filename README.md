@@ -6,19 +6,24 @@ The administration interface must remain behind an authenticated reverse proxy.
 
 ## Listen before approving metadata
 
-Every new audio download is published immediately to
-`<library>/<user>/Waiting for approval/<track-id>.opus`, with **Waiting for approval**
-as the album and **Various Artists** as the album artist. Source artist/title,
-discovery tags and measured loudness are retained. Navidrome can play it and its
-exported playlists after the next scan, even while MusicBrainz is offline.
+Every new audio download is published immediately at the **permanent path**
+`<library>/<user>/audio/<track-id>.opus`, with **Waiting for approval**
+as the provisional *album tag* and **Various Artists** as the album artist.
+Source artist/title, discovery tags and measured loudness are retained. Navidrome
+can play it and its exported playlists after the next scan, even while MusicBrainz
+is offline. Approval updates tags **at that same path**, avoiding a second
+Navidrome entry caused solely by a directory move.
 Public Spotify URLs are scanned without account setup; spotDL finds audio candidates
 that enter the same download and approval pipeline.
 
 New imports require metadata approval, including strong automatic matches. Use
 **Approve**, **Review metadata**, or the original source tags. Approval replaces
-the temporary copy, updates the playlist paths, and removes the temporary file.
-The original staged download stays unchanged for identification and approval
-revalidation. Existing approved audio remains active during reprocessing.
+the published audio *at its stable path*, keeps playlist paths unchanged, and
+updates the file tags. The separate pristine staged download in importer state
+stays unchanged for identification and approval revalidation. Existing approved
+audio remains active during reprocessing. Existing legacy `Waiting for approval`
+files require the offline, move-only **`tools/migrate_waiting_audio.py`**
+migration; see [stable waiting-audio migration](docs/waiting-audio-migration.md).
 
 On startup, candidates awaiting approval from older versions are queued for
 publication without redownloading or replacing their choices. No live library
@@ -163,6 +168,19 @@ Permanent access restrictions stop that URL automatically. Transient download
 failures stop after `DOWNLOAD_MAX_ATTEMPTS` attempts (default `5`). Metadata
 deferrals and time spent waiting for a shared cooldown do not use that budget.
 See [Source controls and retry behavior](docs/source-controls.md).
+
+## Long Language scans behind reverse proxies
+
+The Language tab starts its read-only 5,000-track metadata review with a short
+`POST /api/catalogue/language-review-start`, then polls
+`GET /api/catalogue/language-progress` for completion. The saved review is
+read with `GET /api/catalogue/language-review-state`. Bulk queue selection
+uses the equivalent `language-apply-start` / `language-apply-progress` pair.
+These avoid holding a Cloudflare-proxied request open long enough to return
+HTTP 524. The scan and queue run inside the importer process: they survive a
+browser tab closing, but **not** an importer restart. A failed/restarted scan
+can be started again safely; no tags are changed during review. Individual
+metadata edits are still separate queued jobs with their usual protections.
 
 ## Asset provenance and health
 

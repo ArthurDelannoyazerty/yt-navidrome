@@ -30,6 +30,24 @@ class PreviewProgress:
         self._lock = threading.Lock()
         self._users = {}
 
+    def start(self, user, request):
+        """Atomically claim one server-side scan for this user.
+
+        Return the existing run for identical requests, rather than starting
+        duplicate expensive scans when a browser reconnects after a timeout.
+        """
+        with self._lock:
+            existing = self._users.get(user, {})
+            if existing.get("state") in {"starting", "running", "scanning", "queuing"}:
+                if existing.get("request") != request:
+                    raise ValueError("A different Language operation is already running; wait for it to finish")
+                return {"state": "running", "run_id": existing["run_id"], "started": False}
+            run_id = uuid4().hex
+            self._users[user] = {"state": "starting", "run_id": run_id,
+                                 "request": request, "processed": 0, "total": 0,
+                                 "eligible": 0, "error": None}
+            return {"state": "starting", "run_id": run_id, "started": True}
+
     def update(self, user, **values):
         with self._lock:
             self._users[user] = {**self._users.get(user, {}), **values}

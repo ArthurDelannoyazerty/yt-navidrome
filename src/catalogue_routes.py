@@ -80,6 +80,11 @@ class IndexLibraryInput(BaseModel):
     limit: int = Field(default=500, ge=1, le=5000)
 
 
+class LanguageReviewStart(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    include_localized: bool = False
+
+
 class LanguageApplyInput(BaseModel):
     user_id: str
     limit: int = Field(default=3, ge=1, le=5000)
@@ -237,8 +242,20 @@ def install_catalogue_routes(app, store, pipeline):
 
     @app.get("/api/catalogue/language-preview")
     async def preview_language(user_id: str, include_localized: bool = False):
+        # Kept for older API clients. The web UI uses the non-blocking start
+        # endpoint below: a 5,000-file scan can exceed reverse proxy limits.
         store.require_user(user_id)
         return await asyncio.to_thread(language_preview, store, user_id, include_localized)
+
+    @app.post("/api/catalogue/language-review-start")
+    def language_review_start(data: LanguageReviewStart, background_tasks: BackgroundTasks):
+        store.require_user(data.user_id)
+        result = preview_progress.start(data.user_id, (bool(data.include_localized),))
+        if result["started"]:
+            background_tasks.add_task(
+                language_preview, store, data.user_id, data.include_localized,
+            )
+        return result
 
     @app.get("/api/catalogue/language-progress")
     def language_progress(user_id: str):
@@ -296,11 +313,27 @@ def install_catalogue_routes(app, store, pipeline):
 
     @app.post("/api/catalogue/language-apply")
     async def apply_language(data: LanguageApplyInput):
+        # Backward-compatible synchronous endpoint for existing API clients.
         albums.require_migration_complete()
         store.require_user(data.user_id)
         return await asyncio.to_thread(queue_languages, store, data.user_id, data.limit,
                                        data.include_localized, data.review_token, data.scope,
                                        data.smart_only)
+
+    @app.post("/api/catalogue/language-apply-start")
+    def apply_language_start(data: LanguageApplyInput, background_tasks: BackgroundTasks):
+        albums.require_migration_complete()
+        store.require_user(data.user_id)
+        request = (data.limit, bool(data.include_localized), data.review_token,
+                   data.scope, bool(data.smart_only))
+        result = queue_progress.start(data.user_id, request)
+        if result["started"]:
+            background_tasks.add_task(
+                queue_languages, store, data.user_id, data.limit,
+                data.include_localized, data.review_token, data.scope,
+                data.smart_only,
+            )
+        return result
 
     @app.get("/api/catalogue/graph")
     def graph(user_id: str, view: str = "downloaded", kinds: str = "artist,recording,release,release-group,work",

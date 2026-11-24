@@ -61,7 +61,8 @@ def is_musicbrainz_transient(message: str) -> bool:
     transient = {
         "musicbrainz.org: waiting for shared provider cooldown",
         "musicbrainz.org: connection failed after three attempts",
-        *(f"musicbrainz.org: HTTP {code}" for code in (429, 500, 502, 503, 504)),
+        *(f"musicbrainz.org: HTTP {code}"
+          for code in (429, 500, 502, 503, 504, 520, 521, 522, 523, 524)),
     }
     explanations = {"automatic attempts exhausted or long provider cooldown"}
     return bool(parts) and any(part in transient for part in parts) and all(
@@ -202,7 +203,9 @@ class HttpPolicy:
                         "Spotify developer-account quota exhausted; source synchronization paused. "
                         "Other apps on that Spotify developer account share the quota.", retry_at,
                     )
-            transient = status in {429, 500, 502, 503, 504} or reason in {"rateLimitExceeded", "userRateLimitExceeded"}
+            # A Cloudflare 524 is an upstream origin-read timeout, not a
+            # malformed recording. Keep it retryable just like 502/503/504.
+            transient = status in {429, 500, 502, 503, 504, 520, 521, 522, 523, 524} or reason in {"rateLimitExceeded", "userRateLimitExceeded"}
             if not transient:
                 if status >= 400 and status != 404:
                     self.report("ERROR", f"{host}: HTTP {status} {reason}".rstrip())
@@ -214,6 +217,11 @@ class HttpPolicy:
                 # often without Retry-After. Do not probe again after only 2s
                 # when the whole provider is already under pressure.
                 delay = max(delay, 5.0 * (2 ** attempt))
+            if status == 524:
+                # Cloudflare already waited up to ~125s for the remote origin.
+                # Repeating that same slow request immediately would block
+                # the metadata worker again without useful new information.
+                delay = max(delay, 120.0)
             self.store.defer_api(host, time.time() + delay)
             self.report("ERROR", f"{host}: HTTP {status}; attempt {attempt + 1}/3, cooldown {delay:.1f}s")
             response.close()

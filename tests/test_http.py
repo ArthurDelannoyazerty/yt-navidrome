@@ -179,6 +179,7 @@ def test_musicbrainz_transient_classifier_keeps_provider_outages_retryable():
     assert is_musicbrainz_transient("musicbrainz.org: waiting for shared provider cooldown")
     assert is_musicbrainz_transient("musicbrainz.org: HTTP 503; automatic attempts exhausted or long provider cooldown")
     assert is_musicbrainz_transient("musicbrainz.org: HTTP 429; automatic attempts exhausted or long provider cooldown")
+    assert is_musicbrainz_transient("musicbrainz.org: HTTP 524; automatic attempts exhausted or long provider cooldown")
     assert is_musicbrainz_transient("musicbrainz.org: connection failed after three attempts")
     assert not is_musicbrainz_transient("musicbrainz.org: HTTP 400; invalid lookup")
     assert not is_musicbrainz_transient("MusicBrainz entry was not found")
@@ -194,3 +195,19 @@ def test_musicbrainz_transient_classifier_keeps_provider_outages_retryable():
     assert is_musicbrainz_transient(f"{wait}; {wait}")
     assert not is_musicbrainz_transient(f"{wait}; api.acoustid.org: HTTP 401")
     assert not is_musicbrainz_transient(f"{unavailable}; {suffix}; permanent metadata error")
+
+
+def test_upstream_cloudflare_524_defers_metadata_without_repeating_long_request(db, clock):
+    policy = HttpPolicy(db)
+    request = requests.Request("GET", "https://musicbrainz.org/ws/2/recording").prepare()
+    attempts = []
+
+    def send(*args, **kwargs):
+        attempts.append(clock[0])
+        return response(524)
+
+    with pytest.raises(ApiDeferred, match="musicbrainz.org: HTTP 524") as error:
+        policy.send(send, requests.Session(), request)
+    assert len(attempts) == 1, "Do not repeat a 125-second proxy timeout inline"
+    assert error.value.retry_at >= clock[0] + 119
+    assert db.one("SELECT next_at FROM api_clock WHERE host='musicbrainz.org'")["next_at"] >= error.value.retry_at

@@ -574,6 +574,53 @@ def test_language_review_reports_activity_and_cached_english_preview(db, environ
     assert any("No audio or tags were changed" in event["message"] for event in events)
 
 
+def test_language_review_start_uses_run_id_and_pollable_completed_summary(db, environment):
+    from language_jobs import PreviewProgress, preview_progress
+    setup_catalogue(db)
+    add_audio_track(db, environment, RECORDING_1)
+    with TestClient(create_app(db, start_workers=False)) as client:
+        started = client.post("/api/catalogue/language-review-start", json={
+            "user_id": "admin", "include_localized": False,
+        })
+        assert started.status_code == 200
+        assert started.json()["started"] is True
+        assert len(started.json()["run_id"]) == 32
+        status = client.get("/api/catalogue/language-progress",
+                            params={"user_id": "admin"}).json()
+        assert status["run_id"] == started.json()["run_id"]
+        assert status["state"] == "complete"
+        saved = client.get("/api/catalogue/language-review-state",
+                           params={"user_id": "admin"}).json()
+        assert saved["state"] == "ready"
+        assert saved["result"]["review_token"]
+
+    progress = PreviewProgress()
+    first = progress.start("admin", (False,))
+    assert first["started"]
+    assert progress.start("admin", (False,)) == {
+        "state": "running", "run_id": first["run_id"], "started": False,
+    }
+    with pytest.raises(ValueError, match="already running"):
+        progress.start("admin", (True,))
+    progress.update("admin", state="complete")
+    assert progress.start("admin", (True,))["run_id"] != first["run_id"]
+
+
+def test_language_canary_background_queue_reports_completion(db, environment):
+    setup_catalogue(db)
+    add_audio_track(db, environment, RECORDING_1)
+    with TestClient(create_app(db, start_workers=False)) as client:
+        started = client.post("/api/catalogue/language-apply-start", json={
+            "user_id": "admin", "limit": 3, "confirmed": True,
+        })
+        assert started.status_code == 200
+        progress = client.get("/api/catalogue/language-apply-progress",
+                              params={"user_id": "admin"}).json()
+        assert progress["state"] == "complete"
+        assert progress["run_id"] == started.json()["run_id"]
+        assert progress["queued"] == 1
+
+
 def test_bulk_english_retag_requires_completed_verified_canary(db, environment):
     from language_jobs import preview, canary_status
     from mutagen.oggopus import OggOpus

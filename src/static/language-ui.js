@@ -384,9 +384,9 @@ window.LanguageUI = (() => {
       }, 4000);
     }
   }
-  async function pollProgress(user, serial, endpoint, target) {
+  async function pollProgress(user, serial, endpoint, target, current = null) {
     try {
-      const data = await api(endpoint + "?" + params(user));
+      const data = current || await api(endpoint + "?" + params(user));
       if (!active(user, serial)) return;
       if (endpoint.endsWith("language-progress") && data.state === "running") {
         const fraction = data.total ? Math.round(100 * data.processed / data.total) : 0;
@@ -402,6 +402,29 @@ window.LanguageUI = (() => {
       }
     } catch (_) { /* The main request reports its own errors. */ }
   }
+  // Scans of thousands of Opus tags can take longer than Cloudflare's 524
+  // proxy timeout. Submit once and poll short status requests instead.
+  async function waitForJob(user, serial, endpoint, runId, target) {
+    let errors = 0;
+    while (active(user, serial)) {
+      try {
+        const progress = await api(endpoint + "?" + params(user));
+        if (progress.run_id !== runId)
+          throw new Error("Language job was interrupted by a server restart. Start it again.");
+        if (progress.state === "error")
+          throw new Error(progress.error || "Language operation failed.");
+        if (progress.state === "complete") return progress;
+        await pollProgress(user, serial, endpoint, target, progress);
+        errors = 0;
+      } catch (error) {
+        if (/interrupted|failed\./i.test(error.message) || ++errors >= 5) throw error;
+        // Transient loss of a single progress request does not restart
+        // a running scan or submit a duplicate batch.
+      }
+      await new Promise(resolve => setTimeout(resolve, 1200));
+    }
+    return null;
+  }
   async function review() {
     if (stateUI.busy || !state.user) return;
     const user = state.user, serial = stateUI.serial;
@@ -410,23 +433,30 @@ window.LanguageUI = (() => {
     $("languageReview").disabled = true;
     $("languageReviewBar").hidden = false;
     $("languageReviewBar").value = 0;
-    text("languageReviewStatus", "Review started. Reading existing audio tags without changing files...");
-    await pollProgress(user, serial, "/api/catalogue/language-progress", "languageReviewStatus");
-    clearInterval(stateUI.requestTimer);
-    stateUI.requestTimer = setInterval(() =>
-      pollProgress(user, serial, "/api/catalogue/language-progress", "languageReviewStatus"), 1200);
+    text("languageReviewStatus", "Starting read-only scan. You can leave this tab and return later...");
     try {
-      const result = await api("/api/catalogue/language-preview?" + params(user) +
-        "&include_localized=" + String(recheck()));
+      const started = await api("/api/catalogue/language-review-start", {
+        user_id: user, include_localized: recheck(),
+      });
       if (!active(user, serial)) return;
-      renderReview(result);
-      text("languageReviewStatus", "Read-only review complete. " + number(result.scanned) +
-        " checked; " + number(result.changes?.display_changes) + " possible visible-name changes, " +
-        number(result.changes?.original_updates) + " original-tag repairs. No audio or tags were modified.");
+      const finished = await waitForJob(
+        user, serial, "/api/catalogue/language-progress",
+        started.run_id, "languageReviewStatus",
+      );
+      if (!finished || !active(user, serial)) return;
+      const saved = await api("/api/catalogue/language-review-state?" + params(user));
+      if (saved.state !== "ready" || !saved.result?.review_token)
+        throw new Error("Language scan completed without a usable review. Start it again.");
+      if (!active(user, serial)) return;
+      renderReview(saved.result);
+      text("languageReviewStatus", "Read-only review complete. " +
+        number(saved.result.scanned) + " checked; " +
+        number(saved.result.changes?.display_changes) + " possible visible-name changes, " +
+        number(saved.result.changes?.original_updates) +
+        " original-tag repairs. No audio or tags were modified.");
     } catch (error) {
       if (active(user, serial)) text("languageReviewStatus", error.message, true);
     } finally {
-      clearInterval(stateUI.requestTimer); stateUI.requestTimer = null;
       if (active(user, serial)) {
         stateUI.busy = false; $("languageReview").disabled = false;
         $("languageReviewBar").hidden = true; renderActions();
@@ -442,18 +472,18 @@ window.LanguageUI = (() => {
       ? "Backed up your music and importer state? Queue up to THREE reviewed metadata changes, then verify Navidrome before continuing?"
       : "Have the test tracks finished, and have you checked song IDs, favorites, ratings and playlists in Navidrome? Queue all remaining reviewed changes?")) return;
     stateUI.busy = true; renderActions();
-    text("languageApplyStatus", "Submitting reviewed " +
-      (canary ? "test" : "remaining-library") + " updates...");
-    clearInterval(stateUI.requestTimer);
-    stateUI.requestTimer = setInterval(() =>
-      pollProgress(user, serial, "/api/catalogue/language-apply-progress", "languageApplyStatus"), 1000);
+    text("languageApplyStatus", "Starting reviewed " +
+      (canary ? "test" : "remaining-library") + " queue in the background...");
     try {
-      const result = await api("/api/catalogue/language-apply", {
+      const started = await api("/api/catalogue/language-apply-start", {
         user_id: user, limit, confirmed: true, include_localized: recheck(),
         review_token: stateUI.review.review_token, scope: scope(),
         smart_only: smartOnly(),
       });
       if (!active(user, serial)) return;
+      const result = await waitForJob(user, serial, "/api/catalogue/language-apply-progress",
+                                     started.run_id, "languageApplyStatus");
+      if (!result || !active(user, serial)) return;
       text("languageApplyStatus", number(result.queued) + " reviewed track job(s) submitted. " +
         "The worker now updates audio tags without changing MusicBrainz IDs or audio paths. " +
         "Follow completion above and see Activity for per-track details.");
@@ -461,7 +491,6 @@ window.LanguageUI = (() => {
     } catch (error) {
       if (active(user, serial)) text("languageApplyStatus", error.message, true);
     } finally {
-      clearInterval(stateUI.requestTimer); stateUI.requestTimer = null;
       if (active(user, serial)) {
         stateUI.busy = false;
         await refreshStatus(user, serial).catch(() => {});

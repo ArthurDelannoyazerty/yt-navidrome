@@ -1558,9 +1558,9 @@ class Store:
                 # retries update one asset rather than accumulating fake history.
                 asset_id = current["id"]
                 con.execute(
-                    """UPDATE assets SET sha256=?,size_bytes=?,mtime_ns=?,origin_id=?,source_url=?,
+                    """UPDATE assets SET path=?,sha256=?,size_bytes=?,mtime_ns=?,origin_id=?,source_url=?,
                        downloader_name=?,downloader_version=? WHERE id=?""",
-                    (asset["sha256"], asset["size_bytes"], asset["mtime_ns"], origin_id, asset.get("source_url"),
+                    (asset["path"], asset["sha256"], asset["size_bytes"], asset["mtime_ns"], origin_id, asset.get("source_url"),
                      asset.get("downloader_name"), asset.get("downloader_version"), asset_id),
                 )
             else:
