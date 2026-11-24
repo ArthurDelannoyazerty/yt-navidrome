@@ -452,7 +452,8 @@ def test_exact_pseudo_release_name_is_persisted_below_native_recording(db, monke
             seen.append(("release-list", rid, page))
             return {"recording_id": rid, "page": page, "total": 2,
                     "releases": [
-                        {"id": OFFICIAL_RELEASE, "title": "Official CD", "status": "Official"},
+                        {"id": OFFICIAL_RELEASE, "title": "Official CD", "status": "Official",
+                         "language": "jpn"},
                         {"id": PSEUDO_RELEASE, "title": "Live English tracklist",
                          "status": "Pseudo-Release", "date": "2020-06-24"},
                     ]}
