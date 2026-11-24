@@ -213,6 +213,13 @@ figcaption { font-size: 12px; color: var(--muted); padding-top: 12px; }
 .approval-cover { width: 100%; max-height: 220px; object-fit: contain; margin-bottom: 18px; border-radius: 6px; }
 .approval-info .metadata-values { grid-template-columns: 68px minmax(0, 1fr); font-size: 13px; gap: 8px 12px; margin: 18px 0; }
 .approval-info .row { justify-content: space-between; }
+.approval-track-actions { justify-content: flex-start !important; gap: 10px; }
+.approval-track-actions button { padding: 7px 10px; font-size: 12px; }
+.approval-track-actions .approval-remove {
+  background: var(--danger); color: #9a3734; border: 1px solid #efcecb;
+}
+.approval-track-actions .approval-remove:not(:disabled):hover { background: #f8dcda; }
+
 #metadataAudioNote { font-size: 11px; margin-bottom: 14px; }
 .approval-metadata { min-width: 0; }
 .approval-metadata h3 { font-size: 17px; margin-bottom: 12px; }
