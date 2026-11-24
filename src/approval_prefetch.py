@@ -21,8 +21,8 @@ from typing import Any
 
 from http_policy import ApiDeferred, is_musicbrainz_transient
 from localized_names import (
-    artist_credit, english_release_language, preferred_english_name,
-    preferred_recording_title,
+    artist_credit, english_release_language, has_non_latin_letters,
+    preferred_english_name, preferred_recording_title,
 )
 from metadata_hints import alias_key, normalized_words, search_hints
 from musicbrainz_search import PAGE_SIZE, query_for, valid_id
@@ -254,7 +254,7 @@ class ApprovalPrefetch:
             exact, _ = self._cached(con, "recording", recording_id)
             raw = exact or self._catalogue_entity(con, "recording", recording_id) or {}
             native = str(raw.get("title") or "")
-            if (not any(ch.isalpha() and not ch.isascii() for ch in native)
+            if (not has_non_latin_letters(native)
                     or raw.get("preferred_title")
                     or preferred_english_name(raw) != native):
                 return 0
