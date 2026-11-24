@@ -937,3 +937,40 @@ def test_official_english_title_is_lower_priority_than_recording_alias(db):
         data = prefetch.names_batch([JAPANESE_RECORDING])["recordings"][JAPANESE_RECORDING]
         assert data["preferred_title"] == "Recording-level English alias"
         assert data["preferred_title_source"] == "recording_alias"
+
+
+def test_old_cached_release_list_still_triggers_one_verified_official_english_lookup(db):
+    """Pre-update approval cache omitted language on every release browse item."""
+    recording = "1f245767-ed69-4753-8992-c64eab34ce35"
+    english = "342888a1-9244-4d5c-8316-1f7162dd27f4"
+    other = "97a17f06-e88e-41c9-a522-3e6707dc8c7e"
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch = app.state.approval_prefetch
+        prefetch.workers_enabled = True
+        prefetch._store("recording", recording, {
+            "id": recording, "title": "未始的供献颂", "artist_credits": [],
+        }, NAME_TTL)
+        prefetch._store("releases", recording + ":1", {
+            "recording_id": recording, "page": 1, "total": 2,
+            "releases": [
+                {"id": english, "title": "Genshin Impact - The Stellar Moments, Vol. 5",
+                 "status": "Official"},
+                {"id": other, "title": "原神 - 輝く星々",
+                 "status": "Official"},
+            ],
+        }, NAME_TTL)
+        result = prefetch.names_batch([recording])
+        assert result["pending_recordings"] == [recording]
+        with app.state.catalogue.db() as con:
+            queued = [(item["kind"], item["cache_key"]) for item in con.execute(
+                "SELECT kind,cache_key FROM approval_prefetch_jobs ORDER BY kind,cache_key")]
+            assert queued == [("official_release", english)]
+        assert prefetch.enqueue_official_releases(recording, [
+            {"id": english, "status": "Official", "title": "Genshin Impact - The Stellar Moments"},
+            {"id": other, "status": "Official", "title": "原神 - 輝く星々"},
+        ]) == 0, "Repeated UI polling should not enqueue another provider request"
+        with app.state.catalogue.db() as con:
+            again = [dict(x) for x in con.execute(
+                "SELECT kind,cache_key FROM approval_prefetch_jobs")]
+        assert again == [{"kind": "official_release", "cache_key": english}]
