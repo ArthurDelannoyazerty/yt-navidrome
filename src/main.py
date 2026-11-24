@@ -123,8 +123,10 @@ def create_app(store=None, start_workers=True):
                 if journal.is_file():
                     state = json.loads(journal.read_text(encoding="utf-8")).get("state")
                     if state != "COMPLETE":
+                        label = ("Stable-path migration" if name == "stable-path-migration.json"
+                                 else "waiting-audio-migration.json")
                         raise RuntimeError(
-                            f"{name} is {state or 'unrecognized'} (not acknowledged). "
+                            f"{label} is {state or 'unrecognized'} (not acknowledged). "
                             "Keep the importer stopped, verify Navidrome track IDs, "
                             "playlists and ratings, then acknowledge the migration "
                             f"with tools/{tool} ack."
