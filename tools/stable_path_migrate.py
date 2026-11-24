@@ -215,7 +215,11 @@ class Migration:
             return plan
         if plan["state"] not in {"PLANNED", "MOVING", "CANARY_VERIFIED"}:
             raise ValueError("Unknown migration state")
-        self.backups(plan)
+        # Preserve the original pre-migration database snapshots across the
+        # canary/full steps and any crash restart. Never overwrite a backup
+        # with a database that already contains partially migrated paths.
+        if not plan.get("backup_dir"):
+            self.backups(plan)
         if plan["state"] == "PLANNED":
             plan["canary_count"] = canary_count
             plan["goal"] = "CANARY" if len(plan["entries"]) > canary_count else "FULL"
