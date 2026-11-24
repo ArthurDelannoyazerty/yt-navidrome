@@ -6,7 +6,7 @@ import logging
 import time
 from typing import Literal
 from pydantic import BaseModel, Field
-from fastapi import Query
+from fastapi import BackgroundTasks, Query, Response
 
 from album_management import AlbumManager
 from album_workspace import AlbumWorkspace
@@ -318,10 +318,29 @@ def install_catalogue_routes(app, store, pipeline):
         return store.rows("SELECT id,title,status,is_playlist FROM sources WHERE user_id=? ORDER BY title", (user_id,))
 
     @app.get("/api/albums/clusters")
-    def album_clusters(user_id: str, include_assigned: bool = False,
-                       q: str = Query("", max_length=100), focus_id: str | None = None):
-        return clusters.list(user_id, include_assigned=include_assigned,
-                             query=q, focus_id=focus_id)
+    def album_clusters(background_tasks: BackgroundTasks, response: Response,
+                       user_id: str, include_assigned: bool = False,
+                       q: str = Query("", max_length=100),
+                       focus_id: str | None = None, refresh: bool = False,
+                       detail_only: bool = False, lean: bool = False):
+        # A standard DevTools Server-Timing header reveals whether latency is
+        # SQLite loads, Python grouping, or response transfer/rendering.
+        started = time.perf_counter()
+        timings = {}
+        result = clusters.list(
+            user_id, include_assigned=include_assigned, query=q,
+            focus_id=focus_id, background_tasks=background_tasks,
+            use_cache=True, force_refresh=refresh, detail_only=detail_only,
+            lean=lean, timing=timings,
+        )
+        timings["total"] = (time.perf_counter() - started) * 1000
+        hit = "hit" if timings.pop("snapshot_cache_hit", False) else "miss"
+        response.headers["Server-Timing"] = (
+            f'album-snapshot;desc="{hit}", ' +
+            ", ".join(f"album-{key.replace('_', '-')};dur={value:.1f}"
+                      for key, value in timings.items())
+        )
+        return result
 
     @app.get("/api/albums/contradictions")
     def album_contradictions(user_id: str, offset: int = Query(0, ge=0),
@@ -329,10 +348,13 @@ def install_catalogue_routes(app, store, pipeline):
         return clusters.contradictions(user_id, offset=offset, limit=limit)
 
     @app.get("/api/albums/cluster-edition")
-    def album_cluster_edition(user_id: str, anchor_id: str, release_id: str,
+    def album_cluster_edition(background_tasks: BackgroundTasks, user_id: str,
+                              anchor_id: str, release_id: str,
                               include_assigned: bool = False):
-        return clusters.edition(user_id, anchor_id, release_id,
-                                include_assigned=include_assigned)
+        return clusters.edition(
+            user_id, anchor_id, release_id, include_assigned=include_assigned,
+            background_tasks=background_tasks,
+        )
 
     @app.get("/api/albums/lock")
     def album_lock(user_id: str, track_id: str):

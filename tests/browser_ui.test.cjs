@@ -302,7 +302,12 @@ async function fixtureServer(t, data) {
         const visible=all.filter(x=>!filter||x.tracks.some(t=>
           [t.display_title,t.original_title,t.english_title].join(" ").toLowerCase().includes(filter)));
         const selected=visible.find(x=>x.id===url.searchParams.get("focus_id"))||visible[0];
-        result={clusters:visible.map(x=>x.summary),total_clusters:visible.length,total_tracks:source.length,
+        result={clusters:url.searchParams.get("detail_only")==="true"?[]:visible.map(x=>
+            url.searchParams.get("lean")==="true"
+              ? {id:x.summary.id,title:x.summary.title,track_count:x.summary.track_count,
+                 candidate_count:x.summary.candidate_count,locked:x.summary.locked}
+              : x.summary),
+          total_clusters:visible.length,total_tracks:source.length,
           detail:selected?{id:selected.id,tracks:selected.tracks,releases:selected.releases,
             total_releases:selected.releases.length,releases_truncated:false}:null};
       }
@@ -600,6 +605,14 @@ test("real browser: Approval is a two-column page with automatic search and one-
   await chrome.until("!document.querySelector('#approvalWorkspace').hidden && document.querySelectorAll('#mbResults tbody tr').length===1");
   assert.equal(await chrome.evaluate("document.querySelector('#approvalFilter').value"),"NEEDS_APPROVAL");
   assert.equal(await chrome.evaluate("document.querySelector('#filter').value"),"ALL");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSourceLink').textContent"),"Source");
+  assert.equal(await chrome.evaluate("document.querySelector('#approvalRemove').disabled"),false);
+  await chrome.evaluate("document.querySelector('#approvalRemove').click()");
+  await chrome.until("document.querySelector('#removeDialog').open");
+  assert.deepEqual(await chrome.evaluate("[...document.querySelectorAll('#removeChoices input')].map(i=>i.value)"),["delete","delete_ignore_urls"]);
+  assert.equal(data.writes.length,0,"Opening Removal in Approval must not delete or ignore music");
+  await chrome.evaluate("document.querySelector('#cancelRemoval').click()");
+  await chrome.until("!document.querySelector('#removeDialog').open");
   assert.equal(await chrome.evaluate("!!document.querySelector('dialog[open]')"),false);
   assert.equal(await chrome.evaluate("(() => {const l=document.querySelector('#approvalInfo').getBoundingClientRect(), r=document.querySelector('#approvalMetadata').getBoundingClientRect();return l.right<r.left && Math.abs(l.top-r.top)<2;})()"),true);
   assert.equal(await chrome.evaluate("document.querySelector('#metadataAudio').src.includes('candidate=true') && document.querySelector('#metadataAudio').src.includes('approval_token=')"),true);
@@ -1449,6 +1462,13 @@ test("real browser: six album membership colors, individual checkboxes and Valid
   await chrome.until("document.querySelectorAll('#tracks tr[data-key]').length===1");
   await chrome.evaluate("document.querySelector('[data-tab=album]').click()");
   await chrome.until("document.querySelectorAll('.album-cluster-choice').length===2");
+  assert.equal(await chrome.evaluate("document.querySelector('#albumEditionUse').disabled"),true,
+    "Cannot validate a cluster before choosing an edition");
+  assert.equal(await chrome.evaluate("document.querySelector('#albumSelectAll').disabled"),true);
+  assert.equal(await chrome.evaluate("[...document.querySelectorAll('#albumMusicList input[type=checkbox]')].every(x=>x.disabled&&!x.checked)"),true,
+    "Cannot select local music before choosing an album");
+  await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
+  assert.equal(await chrome.evaluate("document.querySelector('#albumValidateDialog').open"),false);
   assert.equal(await chrome.evaluate("document.querySelector('#albumPlanTitle')"),null);
   assert.equal(await chrome.evaluate("document.querySelectorAll('.album-cluster-choice').length"),2);
   await chrome.evaluate("document.querySelector('#albumIncludeAssigned').click()");
@@ -1482,11 +1502,15 @@ test("real browser: six album membership colors, individual checkboxes and Valid
   await chrome.until("document.querySelector('#albumSelectedTitle').textContent.includes('0 from other albums')");
   await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
   await chrome.until("document.querySelector('#albumValidateDialog').open");
+  assert.deepEqual(data.writes.filter(x=>x.path==="/api/albums/plan-preview").at(-1).body.decisions.map(x=>x.track_id),["three"],
+    "Only checked recordings are submitted; unselected cluster music stays untouched");
   assert.match(await chrome.evaluate("document.querySelector('#albumValidateSummary').textContent"),/0 moved from other albums/);
   await chrome.evaluate("document.querySelector('#albumValidateCancel').click()");
   await chrome.evaluate("(()=>{const cb=document.querySelector('.album-music-orange input');cb.click()})()");
   await chrome.evaluate("document.querySelector('#albumEditionUse').click()");
   await chrome.until("document.querySelector('#albumValidateDialog').open");
+  assert.deepEqual(new Set(data.writes.filter(x=>x.path==="/api/albums/plan-preview").at(-1).body.decisions.map(x=>x.track_id)),
+    new Set(["two","three"]),"Confirm includes only checked local recordings, not the whole family");
   await chrome.evaluate("document.querySelector('#albumValidateConfirm').click()");
   await chrome.until("document.querySelector('#albumClusterStatus').textContent.includes('2 reversible album changes queued')");
   assert.equal(data.albumTracks.find(t=>t.id==="one").current_release_id,a);
@@ -1738,5 +1762,58 @@ test("real browser: Help topics keep canonical URLs, selection and scroll throug
   await chrome.send("Page.navigate",{url:origin+base+"/not-a-topic"});
   await chrome.until("document.querySelector('#user')?.value==='admin' && document.querySelector('#notice')?.textContent.includes('Unknown Help topic')");
   assert.equal(await chrome.evaluate("document.querySelectorAll('.help-sidebar [aria-current=location]').length"),1);
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: Approval removal requires the shared confirmation form", {timeout:60000}, async t => {
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures(),origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]')");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("!document.querySelector('#approvalWorkspace').hidden && !document.querySelector('#approvalRemove').disabled");
+  await chrome.evaluate("document.querySelector('#approvalRemove').click()");
+  await chrome.until("document.querySelector('#removeDialog').open");
+  assert.equal(data.writes.length,0);
+  await chrome.evaluate("document.querySelector('#removeChoices input[value=delete_ignore_urls]').click()");
+  assert.equal(data.writes.length,0,"Choosing a removal scope must never submit automatically");
+  await chrome.evaluate("document.querySelector('#removeSubmit').click()");
+  await chrome.until("!document.querySelector('#removeDialog').open");
+  assert.equal(data.writes.length,1);
+  assert.equal(data.writes[0].path,"/api/tracks/track-1/action");
+  assert.equal(data.writes[0].body.mode,"delete_ignore_urls");
+  assert.deepEqual(chrome.errors,[]);
+});
+
+
+test("real browser: thousands of album families render progressively and fetch focused detail only", {timeout:60000}, async t => {
+  const chrome=await browser(t);if(!chrome)return;
+  const data=fixtures(),count=260;
+  data.albumTracks=Array.from({length:count},(_,i)=>({
+    id:"family-song-"+i,mbid:null,recording_id:null,
+    display_title:"Song "+i,original_title:"Song "+i,english_title:"Song "+i,
+    current_release_id:null,locked:false,not_found:false
+  }));
+  data.albumFamilies=data.albumTracks.map((row,i)=>({
+    id:"family-"+i,title:"Family "+i,ids:[row.id]
+  }));
+  data.albumEditions=[];
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]')");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=album]').click()");
+  await chrome.until("document.querySelectorAll('.album-cluster-choice').length===90");
+  assert.equal(await chrome.evaluate("document.querySelector('#albumClusterCount').textContent"),"260 groups");
+  assert.equal(await chrome.evaluate("document.querySelectorAll('.album-cluster-choice').length"),90,
+    "Do not build the full 260-family DOM during initial load");
+  await chrome.evaluate("document.querySelector('.album-clusters-more').click()");
+  await chrome.until("document.querySelectorAll('.album-cluster-choice').length===180");
+  await chrome.evaluate("document.querySelectorAll('.album-cluster-choice')[1].click()");
+  await chrome.until("document.querySelector('.album-cluster-choice[aria-selected=true]')?.textContent.includes('Family 1')");
+  assert.equal(data.reads.some(path=>path.startsWith("/api/albums/clusters?")&&path.includes("detail_only=true")),true,
+    "Selecting an album family should not transfer every family summary again");
   assert.deepEqual(chrome.errors,[]);
 });

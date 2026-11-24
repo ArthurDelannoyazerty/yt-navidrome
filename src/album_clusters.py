@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 import unicodedata
 import uuid
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 from common import utcnow
 from localized_names import preferred_english_name
@@ -49,6 +51,44 @@ class AlbumClusters:
         self.manager = manager
         self.store = manager.store
         self.catalogue = manager.catalogue
+        # Read-only snapshots are library-scoped, short-lived, and never used by
+        # the plan/apply validation path. Avoid reloading thousands of cached
+        # MusicBrainz JSON blobs for each family/edition click.
+        self._snapshots = OrderedDict()
+        self._snapshot_lock = threading.Lock()
+        self._last_prefetch = {}
+
+    def _snapshot(self, user_id, include_assigned, *, use_cache=False, force_refresh=False,
+                  timing=None):
+        self.store.require_user(user_id)
+        key = (user_id, bool(include_assigned))
+        if use_cache and not force_refresh:
+            with self._snapshot_lock:
+                saved = self._snapshots.get(key)
+                if saved and time.monotonic() - saved[0] < 8.0:
+                    self._snapshots.move_to_end(key)
+                    if timing is not None:
+                        timing["snapshot_cache_hit"] = True
+                        timing["local_db"] = 0.0
+                        timing["catalogue_db"] = 0.0
+                    return [dict(row) for row in saved[1]], saved[2]
+        started = time.perf_counter()
+        tracks = self._local_tracks(user_id, include_assigned)
+        local_ms = (time.perf_counter() - started) * 1000
+        started = time.perf_counter()
+        catalogue_data = self._catalogue_data(tracks) if tracks else None
+        catalogue_ms = (time.perf_counter() - started) * 1000
+        if timing is not None:
+            timing["snapshot_cache_hit"] = False
+            timing["local_db"] = local_ms
+            timing["catalogue_db"] = catalogue_ms
+        if use_cache:
+            with self._snapshot_lock:
+                self._snapshots[key] = (time.monotonic(), [dict(row) for row in tracks], catalogue_data)
+                self._snapshots.move_to_end(key)
+                while len(self._snapshots) > 4:
+                    self._snapshots.popitem(last=False)
+        return tracks, catalogue_data
 
     def init(self):
         with self.store.db() as con:
@@ -93,6 +133,9 @@ class AlbumClusters:
                     "DELETE FROM album_track_locks WHERE user_id=? AND track_id=?",
                     (user_id, track_id),
                 )
+        with self._snapshot_lock:
+            self._snapshots.pop((user_id, False), None)
+            self._snapshots.pop((user_id, True), None)
         return {"track_id": track_id, "locked": bool(locked)}
 
     def _local_tracks(self, user_id, include_assigned):
@@ -217,12 +260,22 @@ class AlbumClusters:
             "linked_track_count": len(matched), "matched_count": len(matched) if complete else 0,
         }
 
-    def list(self, user_id, *, include_assigned=False, query="", focus_id=None):
-        tracks = self._local_tracks(user_id, include_assigned)
+    def list(self, user_id, *, include_assigned=False, query="", focus_id=None,
+             background_tasks=None, use_cache=False, force_refresh=False,
+             detail_only=False, lean=False, timing=None):
+        started = time.perf_counter()
+        tracks, metadata = self._snapshot(
+            user_id, include_assigned, use_cache=use_cache,
+            force_refresh=force_refresh, timing=timing,
+        )
         if not tracks:
+            if timing is not None:
+                timing["grouping"] = 0.0
+                timing["prefetch"] = 0.0
             return {"clusters": [], "total_clusters": 0, "total_tracks": 0, "detail": None}
         (release_rec, verified_rec, release_data, recording_data, groups, fetched,
-         track_counts, group_data, group_releases) = self._catalogue_data(tracks)
+         track_counts, group_data, group_releases) = metadata
+        started = time.perf_counter()
         by_recording = defaultdict(set)
         by_id = {row["id"]: row for row in tracks}
         for row in tracks:
@@ -352,13 +405,47 @@ class AlbumClusters:
                 "releases_truncated": len(editions) > MAX_CLUSTER_EDITIONS,
                 "release_group_id": focus_id if focus_id in group_releases else None,
             }
+        if timing is not None:
+            timing["grouping"] = (time.perf_counter() - started) * 1000
+        prefetch_started = time.perf_counter()
         all_releases = {rid for ids in family_editions.values() for rid in ids}
         focused_releases = family_editions.get(focus_id, set())
-        if all_releases:
-            self.catalogue.prefetch_album_tracklists(all_releases, focused_ids=focused_releases)
         families = set(group_releases) & set(family_members)
-        if families:
-            self.catalogue.prefetch_album_families(families, focused_ids=[focus_id])
+        if background_tasks is None:
+            # Preserve synchronous semantics for internal callers and tests.
+            if all_releases:
+                self.catalogue.prefetch_album_tracklists(all_releases, focused_ids=focused_releases)
+            if families:
+                self.catalogue.prefetch_album_families(families, focused_ids=[focus_id])
+        else:
+            # The full 3,000+ family enqueue transaction used to be performed
+            # *inside every GET*, delaying the first byte and each family click.
+            # Queue only the focused family first; refresh the whole catalogue
+            # at most once per minute, after the response has been sent.
+            if focused_releases:
+                background_tasks.add_task(
+                    self.catalogue.prefetch_album_tracklists,
+                    focused_releases, focused_ids=focused_releases)
+            if focus_id in families:
+                background_tasks.add_task(
+                    self.catalogue.prefetch_album_families,
+                    [focus_id], focused_ids=[focus_id])
+            with self._snapshot_lock:
+                key = (user_id, bool(include_assigned))
+                full_scan_due = time.monotonic() - self._last_prefetch.get(key, 0.0) >= 60.0
+                if full_scan_due:
+                    self._last_prefetch[key] = time.monotonic()
+            if full_scan_due:
+                if all_releases:
+                    background_tasks.add_task(
+                        self.catalogue.prefetch_album_tracklists,
+                        all_releases, focused_ids=focused_releases)
+                if families:
+                    background_tasks.add_task(
+                        self.catalogue.prefetch_album_families,
+                        families, focused_ids=[focus_id])
+        if timing is not None:
+            timing["prefetch"] = (time.perf_counter() - prefetch_started) * 1000
         if detail is not None:
             focus = family_editions.get(focus_id, set())
             discovering = False
@@ -373,7 +460,13 @@ class AlbumClusters:
                 "complete": len(focus & fetched), "total": len(focus),
                 "discovering_editions": discovering,
             }
-        return {"clusters": summaries, "total_clusters": len(summaries),
+        # Only the sidebar's five display fields are needed in the browser.
+        # Keep full summaries as the default for API clients and internal tests.
+        output = ([] if detail_only else
+                  [{key: row[key] for key in
+                    ("id", "title", "track_count", "candidate_count", "locked")}
+                   for row in summaries] if lean else summaries)
+        return {"clusters": output, "total_clusters": len(summaries),
                 "total_tracks": len(tracks), "detail": detail}
 
     def contradictions(self, user_id, *, limit=50, offset=0):
@@ -429,10 +522,14 @@ class AlbumClusters:
         return {"total":len(items),"offset":offset,"limit":limit,
                 "items":items[offset:offset+limit]}
 
-    def edition(self, user_id, anchor_id, release_id, *, include_assigned=False):
+    def edition(self, user_id, anchor_id, release_id, *, include_assigned=False,
+                background_tasks=None):
         # Accept family-ID anchors and legacy track-ID anchors, but only within
         # the requesting user's own album family.
-        result = self.list(user_id, include_assigned=include_assigned, focus_id=anchor_id)
+        result = self.list(
+            user_id, include_assigned=include_assigned, focus_id=anchor_id,
+            use_cache=background_tasks is not None, background_tasks=background_tasks,
+        )
         detail = result["detail"]
         if not detail or (detail["id"] != anchor_id and
                           not any(t["id"] == anchor_id for t in detail["tracks"])):

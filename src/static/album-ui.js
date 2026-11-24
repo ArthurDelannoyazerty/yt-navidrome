@@ -14,8 +14,10 @@ window.AlbumUI = (() => {
     el.addEventListener("click",()=>Promise.resolve().then(callback).catch(error=>notice(error.message,true)));
     return el;
   };
+  const CLUSTER_BATCH_SIZE=90;
   const ui={user:null,serial:0,clusters:[],detail:null,focus:null,work:new Map(),
-    preview:null,searchTimer:null,pollTimer:null,familyTimer:null,preferences:[],sources:[],fetching:false};
+    preview:null,searchTimer:null,pollTimer:null,familyTimer:null,preferences:[],sources:[],fetching:false,
+    navCount:CLUSTER_BATCH_SIZE,navScope:null};
   const active=(user,serial)=>state.user===user && ui.user===user &&
     state.tab==="album" && ui.serial===serial;
   const currentRoute = (familyId=ui.focus,editionId=ui.focus?clusterWork().selected:null) => ({
@@ -154,11 +156,15 @@ window.AlbumUI = (() => {
       counts.selected.length+" checked for this edition"+
       (counts.hiddenOrange?" (including "+counts.hiddenOrange+" hidden orange moves)":"")+".";
   }
-  function renderNavigation(){
-    const list=$("albumClusterList");list.replaceChildren();
+  function renderNavigation(preserveScroll=false){
+    const list=$("albumClusterList"),oldScroll=list.scrollTop;
+    list.replaceChildren();
     const i=ui.clusters.findIndex(x=>x.id===ui.focus),count=ui.clusters.length;
     $("albumClusterCount").textContent=count+" groups";
-    for(let index=0;index<count;index++){
+    // Render the first page immediately, then progressively reveal more as
+    // users scroll. Creating 3,565 button DOM nodes at once is unnecessary.
+    ui.navCount=Math.min(count,Math.max(CLUSTER_BATCH_SIZE,ui.navCount,i+1));
+    for(let index=0;index<ui.navCount;index++){
       const cluster=ui.clusters[index],row=button("",()=>selectCluster(cluster.id),
         "album-cluster-choice"+(cluster.id===ui.focus?" is-active":""));
       row.setAttribute("role","option");
@@ -169,22 +175,48 @@ window.AlbumUI = (() => {
       info.append(element("small",cluster.track_count+" tracks · "+cluster.candidate_count+" editions"+
         (cluster.locked?" · "+cluster.locked+" locked":"")));
       row.append(info);list.append(row);
-      if(cluster.id===ui.focus)list.scrollTop=Math.max(0,index*65-100);
     }
+    if(ui.navCount<count){
+      const more=button("Show more families ("+(count-ui.navCount)+" remaining)",()=>{
+        ui.navCount=Math.min(count,ui.navCount+CLUSTER_BATCH_SIZE);
+        renderNavigation(true);
+      },"secondary album-clusters-more");
+      more.setAttribute("aria-label","Show more album families");
+      list.append(more);
+    }
+    if(preserveScroll)list.scrollTop=oldScroll;
+    else if(i>=0)list.scrollTop=Math.max(0,i*65-100);
   }
-  async function loadClusters(focus=ui.focus){
+  // The full family list remains available by scrolling or filtering; only
+  // the currently viewed slice is constructed as live DOM nodes.
+  $("albumClusterList").addEventListener("scroll",()=>{
+    const list=$("albumClusterList");
+    if(ui.navCount<ui.clusters.length &&
+       list.scrollTop+list.clientHeight>=list.scrollHeight-180){
+      ui.navCount=Math.min(ui.clusters.length,ui.navCount+CLUSTER_BATCH_SIZE);
+      renderNavigation(true);
+    }
+  });
+  async function loadClusters(focus=ui.focus,{refresh=false,detailOnly=false}={}){
     if(!ui.user)return;
     const user=ui.user,serial=++ui.serial;
+    const navScope=JSON.stringify([
+      $("albumIncludeAssigned").checked,$("albumClusterSearch").value.trim()
+    ]);
+    const compact=detailOnly&&Boolean(ui.clusters.length)&&ui.navScope===navScope;
+    if(ui.navScope!==navScope){ui.navScope=navScope;ui.navCount=CLUSTER_BATCH_SIZE;}
     const query=new URLSearchParams({user_id:user,
       include_assigned:String($("albumIncludeAssigned").checked),
-      q:$("albumClusterSearch").value.trim()});
+      q:$("albumClusterSearch").value.trim(),lean:"true"});
     if(focus)query.set("focus_id",focus);
+    if(refresh)query.set("refresh","true");
+    if(compact)query.set("detail_only","true");
     ui.fetching=true;
     notice("Building clusters from exact cached MusicBrainz relationships…");
     try {
       const response=await api("/api/albums/clusters?"+query);
       if(!active(user,serial))return;
-      ui.clusters=response.clusters||[];
+      if(!compact)ui.clusters=response.clusters||[];
       ui.focus=response.detail?.id||null;
       ui.detail=response.detail||null;
       if (ui.focus && window.IngestorRouter?.read()?.tab === "album" &&
@@ -205,7 +237,7 @@ window.AlbumUI = (() => {
   }
   async function selectCluster(id){
     if(!id||id===ui.focus)return;
-    await loadClusters(id);
+    await loadClusters(id,{detailOnly:true});
     if(ui.focus===id)saveRoute();
   }
   function renderAlbums(){
@@ -279,7 +311,7 @@ window.AlbumUI = (() => {
       // lightweight cache-only refresh, not another MusicBrainz HTTP call.
       await loadEdition(id);
       if(active(user,serial)&&ui.focus===focus&&activeEdition()?.complete){
-        void loadClusters(focus);
+        void loadClusters(focus,{detailOnly:true});
       }
     },5000);
   }
@@ -749,6 +781,7 @@ window.AlbumUI = (() => {
     clearTimeout(ui.familyTimer);ui.familyTimer=null;
     ui.searchTimer=null;ui.pollTimer=null;
     ui.user=null;ui.clusters=[];ui.detail=null;ui.focus=null;ui.preview=null;
+    ui.navCount=CLUSTER_BATCH_SIZE;ui.navScope=null;
     ui.work.clear();ui.sources=[];ui.preferences=[];ui.fetching=false;
     $("albumIncludeAssigned").checked=false;$("albumOnlyGreen").checked=false;
     $("albumClusterSearch").value="";$("albumReleaseSearchInput").value="";
@@ -855,7 +888,7 @@ window.AlbumUI = (() => {
     }).catch(error=>{lockState.textContent=error.message;});
   }
 
-  $("albumRefresh").addEventListener("click",()=>loadClusters(ui.focus));
+  $("albumRefresh").addEventListener("click",()=>loadClusters(ui.focus,{refresh:true}));
   $("albumIncludeAssigned").addEventListener("change",()=>{
     const hasChoices=[...ui.work.values()].some(w=>w.unchecked.size||w.manual.size);
     if(hasChoices&&!confirm("Changing preselection will reset your manual song choices. Continue?")){
