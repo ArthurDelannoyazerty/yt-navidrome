@@ -270,6 +270,18 @@ class ApprovalPrefetch:
                 and english_release_language(rel.get("language"))
                 and valid_id(rel.get("id")))
         ]
+        if not english:
+            # Older cached browse results omitted release text language.
+            # Probe at most ONE plausible Latin-named official release; the
+            # full response still MUST prove language=eng and contain the
+            # identical Recording ID before any title is accepted.
+            english = [
+                rel for rel in releases
+                if (str(rel.get("status") or "").casefold() == "official"
+                    and not rel.get("language") and valid_id(rel.get("id"))
+                    and any(ch.isalpha() for ch in str(rel.get("title") or ""))
+                    and not has_non_latin_letters(rel.get("title")))
+            ][:1]
         # Recording IDs, not title similarity, identify every candidate.
         ids = list(dict.fromkeys(rel["id"] for rel in english))[:2]
         return self._enqueue_rows([
@@ -422,7 +434,9 @@ class ApprovalPrefetch:
                       if str(r.get("status") or "").casefold() == "pseudo-release"]
             official = [valid_id(r.get("id")) for r in releases
                         if str(r.get("status") or "").casefold() == "official"
-                        and english_release_language(r.get("language"))]
+                        and (english_release_language(r.get("language"))
+                             or (not r.get("language")
+                                 and not has_non_latin_letters(r.get("title"))))]
             for kind, keys in (("pseudo_release", [rid for rid in pseudo if rid]),
                                ("official_release", [rid for rid in official if rid])):
                 for batch in self._chunks(keys):
