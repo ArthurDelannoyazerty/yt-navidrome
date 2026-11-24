@@ -252,11 +252,17 @@ class ApprovalPrefetch:
         """
         with self.catalogue.db() as con:
             exact, _ = self._cached(con, "recording", recording_id)
-            raw = exact or self._catalogue_entity(con, "recording", recording_id) or {}
+            catalogue_raw = self._catalogue_entity(con, "recording", recording_id)
+            raw = catalogue_raw or exact or {}
             native = str(raw.get("title") or "")
-            if (not has_non_latin_letters(native)
-                    or raw.get("preferred_title")
-                    or preferred_english_name(raw) != native):
+            if not has_non_latin_letters(native):
+                return 0
+            known = (exact or {}).get("preferred_title")
+            existing = preferred_recording_title(
+                con, recording_id, raw, known_alias=known)
+            # No additional MusicBrainz requests if either a recording alias
+            # or an official English track is already available locally.
+            if existing["source"] in {"recording_alias", "official_release"}:
                 return 0
         english = [
             rel for rel in releases
