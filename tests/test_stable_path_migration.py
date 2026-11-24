@@ -309,9 +309,10 @@ def test_waiting_migration_refuses_modified_audio_or_occupied_target(db, environ
 
 
 def test_waiting_migration_blocks_importer_until_navidrome_ack(db, environment):
+    from fastapi.testclient import TestClient
     from main import create_app
     waiting = db.path.parent / "waiting-audio-migration.json"
     waiting.write_text(json.dumps({"state": "AWAITING_NAVIDROME_SCAN"}))
     with pytest.raises(RuntimeError, match="waiting-audio-migration"):
-        with TestClient(create_app(db)):
+        with TestClient(create_app(db, start_workers=False)):
             pass
