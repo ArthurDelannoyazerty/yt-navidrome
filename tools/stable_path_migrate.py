@@ -90,12 +90,20 @@ class Migration:
                           and (row["temporary_candidate_sha256"] is not None
                                or row["operation_state"] == "NEEDS_APPROVAL"))
             if self.waiting_only:
-                # Only move *current, unapproved* music. Files not referenced
-                # by the active SQLite asset must never be moved automatically.
+                # Only move *current, unapproved* music with a deterministic
+                # filename. Refuse ambiguous older names rather than silently
+                # declaring the migration complete without moving them.
+                if (old.parent == user_root / "Waiting for approval"
+                        and row["operation_state"] == "NEEDS_APPROVAL"
+                        and not is_waiting):
+                    raise ValueError(f"Legacy waiting file is not named <track-id>.opus: {old}")
                 if not is_waiting:
                     continue
-            elif is_waiting:
-                skipped += 1  # original move-only migration handled approved audio
+            elif is_waiting or (row["operation_state"] == "NEEDS_APPROVAL"
+                               and old.parent == user_root / "Waiting for approval"):
+                # Preserve the original approved-audio migration's exemption
+                # even for very old temporary files with noncanonical names.
+                skipped += 1
                 continue
             if not old.is_relative_to(user_root):
                 raise ValueError(f"Unsafe path outside user library: {old}")
