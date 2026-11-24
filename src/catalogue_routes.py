@@ -322,7 +322,7 @@ def install_catalogue_routes(app, store, pipeline):
                        user_id: str, include_assigned: bool = False,
                        q: str = Query("", max_length=100),
                        focus_id: str | None = None, refresh: bool = False,
-                       detail_only: bool = False):
+                       detail_only: bool = False, lean: bool = False):
         # A standard DevTools Server-Timing header reveals whether latency is
         # SQLite loads, Python grouping, or response transfer/rendering.
         started = time.perf_counter()
@@ -331,7 +331,7 @@ def install_catalogue_routes(app, store, pipeline):
             user_id, include_assigned=include_assigned, query=q,
             focus_id=focus_id, background_tasks=background_tasks,
             use_cache=True, force_refresh=refresh, detail_only=detail_only,
-            timing=timings,
+            lean=lean, timing=timings,
         )
         timings["total"] = (time.perf_counter() - started) * 1000
         hit = "hit" if timings.pop("snapshot_cache_hit", False) else "miss"
