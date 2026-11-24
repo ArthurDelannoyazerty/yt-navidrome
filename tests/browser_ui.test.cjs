@@ -302,7 +302,11 @@ async function fixtureServer(t, data) {
         const visible=all.filter(x=>!filter||x.tracks.some(t=>
           [t.display_title,t.original_title,t.english_title].join(" ").toLowerCase().includes(filter)));
         const selected=visible.find(x=>x.id===url.searchParams.get("focus_id"))||visible[0];
-        result={clusters:url.searchParams.get("detail_only")==="true"?[]:visible.map(x=>x.summary),
+        result={clusters:url.searchParams.get("detail_only")==="true"?[]:visible.map(x=>
+            url.searchParams.get("lean")==="true"
+              ? {id:x.summary.id,title:x.summary.title,track_count:x.summary.track_count,
+                 candidate_count:x.summary.candidate_count,locked:x.summary.locked}
+              : x.summary),
           total_clusters:visible.length,total_tracks:source.length,
           detail:selected?{id:selected.id,tracks:selected.tracks,releases:selected.releases,
             total_releases:selected.releases.length,releases_truncated:false}:null};
