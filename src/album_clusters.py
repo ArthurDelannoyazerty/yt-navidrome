@@ -56,10 +56,11 @@ class AlbumClusters:
         # MusicBrainz JSON blobs for each family/edition click.
         self._snapshots = OrderedDict()
         self._snapshot_lock = threading.Lock()
-        self._last_prefetch = 0.0
+        self._last_prefetch = {}
 
     def _snapshot(self, user_id, include_assigned, *, use_cache=False, force_refresh=False,
                   timing=None):
+        self.store.require_user(user_id)
         key = (user_id, bool(include_assigned))
         if use_cache and not force_refresh:
             with self._snapshot_lock:
@@ -132,6 +133,9 @@ class AlbumClusters:
                     "DELETE FROM album_track_locks WHERE user_id=? AND track_id=?",
                     (user_id, track_id),
                 )
+        with self._snapshot_lock:
+            self._snapshots.pop((user_id, False), None)
+            self._snapshots.pop((user_id, True), None)
         return {"track_id": track_id, "locked": bool(locked)}
 
     def _local_tracks(self, user_id, include_assigned):
@@ -270,6 +274,7 @@ class AlbumClusters:
             return {"clusters": [], "total_clusters": 0, "total_tracks": 0, "detail": None}
         (release_rec, verified_rec, release_data, recording_data, groups, fetched,
          track_counts, group_data, group_releases) = metadata
+        started = time.perf_counter()
         by_recording = defaultdict(set)
         by_id = {row["id"]: row for row in tracks}
         for row in tracks:
@@ -425,9 +430,10 @@ class AlbumClusters:
                     self.catalogue.prefetch_album_families,
                     [focus_id], focused_ids=[focus_id])
             with self._snapshot_lock:
-                full_scan_due = time.monotonic() - self._last_prefetch >= 60.0
+                key = (user_id, bool(include_assigned))
+                full_scan_due = time.monotonic() - self._last_prefetch.get(key, 0.0) >= 60.0
                 if full_scan_due:
-                    self._last_prefetch = time.monotonic()
+                    self._last_prefetch[key] = time.monotonic()
             if full_scan_due:
                 if all_releases:
                     background_tasks.add_task(
