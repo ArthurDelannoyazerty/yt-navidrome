@@ -13,7 +13,7 @@ from audio_tags import loudness_values, write_loudness_tags
 from localized_names import native_names, apply_to_opus, POLICY_TAG
 from source_metadata import clear_descriptive_tags, clear_release_tags, identification_hints
 from metadata_hints import evidence_for_candidate, search_hints
-from common import LIBRARY, ROOT, STATE, atomic_copy, atomic_json, music_comment, canonical_source_urls, user_name
+from common import LIBRARY, ROOT, STATE, atomic_copy, sha256_file, atomic_json, music_comment, canonical_source_urls, user_name
 from http_policy import ApiDeferred, HttpPolicy
 from store import Store
 
@@ -148,12 +148,25 @@ class Bridge:
         loudness = self.measure_loudness(Item.from_path(str(staged)))
         self.write_discovery_tags(staged, track.get("discovered_at"), self.source_urls(track))
         write_loudness_tags(staged, loudness)
-        destination = (self.directory / "Waiting for approval" / f"{track['id']}.opus").resolve()
-        if not destination.is_relative_to(self.directory):
+        # Publish unapproved and approved audio in the *same* stable slot.
+        # Only the embedded album tags reflect approval state. A preserved
+        # download in STATE/staging remains the immutable review candidate.
+        slot = self.directory / "audio" / f"{track['id']}.opus"
+        destination = slot.resolve()
+        if not destination.is_relative_to(self.directory) or slot.is_symlink():
             raise ValueError("Temporary destination is outside this library")
+        item = self.find_existing(track)
+        if slot.exists():
+            # Crash-safe retry: an already-written candidate may be identical,
+            # or the destination must belong to this very track. Never trample
+            # a different file with a coincidentally reused track id.
+            if not slot.is_file() or (
+                (not item or Path(os.fsdecode(item.path)).resolve() != destination)
+                and sha256_file(slot) != sha256_file(staged)
+            ):
+                raise ValueError("Stable audio slot contains unexpected data")
         destination.parent.mkdir(parents=True, exist_ok=True)
         atomic_copy(staged, destination)
-        item = self.find_existing(track)
         if item:
             item.path = os.fsencode(destination)
             item.read()
