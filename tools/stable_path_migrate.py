@@ -23,10 +23,15 @@ from common import atomic_json, sha256_file, utcnow  # noqa: E402
 
 
 class Migration:
-    def __init__(self, state: Path, library: Path):
+    def __init__(self, state: Path, library: Path, *, waiting_only: bool = False):
         self.state = state.resolve()
         self.library = library.resolve()
-        self.journal = self.state / "stable-path-migration.json"
+        self.waiting_only = waiting_only
+        # Never reuse the completed approved-audio migration journal: existing
+        # waiting files need their own crash-resumable, Navidrome-verified plan.
+        self.journal = self.state / (
+            "waiting-audio-migration.json" if waiting_only
+            else "stable-path-migration.json")
         self.database = self.state / "ingestor.sqlite"
 
     @contextmanager
@@ -66,7 +71,7 @@ class Migration:
             # Queued work is safe while the instance lock is held: it cannot
             # publish or move files until the importer starts again.
             rows = con.execute("""SELECT t.id,t.user_id,t.file_path,t.beets_id,t.operation_state,
-                t.current_asset_id,a.path,a.sha256 FROM tracks t
+                t.temporary_candidate_sha256,t.current_asset_id,a.path,a.sha256 FROM tracks t
                 JOIN assets a ON a.id=t.current_asset_id AND a.state='CURRENT'
                 ORDER BY t.user_id,t.id""").fetchall()
         plans, skipped, dest_seen, old_seen = [], 0, set(), set()
@@ -80,8 +85,16 @@ class Migration:
             dest = user_root / "audio" / (row["id"] + ".opus")
             if old == dest:
                 continue
-            if row["operation_state"] == "NEEDS_APPROVAL" and old.parent == user_root / "Waiting for approval":
-                skipped += 1  # temporary copies are removed when explicitly approved
+            is_waiting = (old.parent == user_root / "Waiting for approval"
+                          and old.name == row["id"] + ".opus"
+                          and row["temporary_candidate_sha256"] is not None)
+            if self.waiting_only:
+                # Only move *current, unapproved* music. Files not referenced
+                # by the active SQLite asset must never be moved automatically.
+                if not is_waiting:
+                    continue
+            elif is_waiting:
+                skipped += 1  # original move-only migration handled approved audio
                 continue
             if not old.is_relative_to(user_root):
                 raise ValueError(f"Unsafe path outside user library: {old}")
@@ -106,6 +119,7 @@ class Migration:
                           "source": str(old), "destination": str(dest),
                           "sha256": digest, "phase": "PENDING"})
         return {"version": 1, "state": "PLANNED", "created_at": utcnow(),
+                "mode": "waiting" if self.waiting_only else "approved",
                 "entries": plans, "temporary_waiting_skipped": skipped,
                 "notes": "Move-only, no tag changes. Rescan Navidrome then verify track IDs/ratings/playlists."}
 
@@ -246,8 +260,10 @@ def main(argv=None):
     parser.add_argument("--canary-count", type=int, default=3,
                         help="Number of files to migrate for the first Navidrome verification")
     parser.add_argument("--navidrome-verified", action="store_true")
+    parser.add_argument("--waiting-only", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    migration = Migration(Path(args.state_dir), Path(args.library_dir))
+    migration = Migration(Path(args.state_dir), Path(args.library_dir),
+                          waiting_only=args.waiting_only)
     with migration.locked():
         if args.action == "plan":
             result = migration.get() or migration.inspect()
