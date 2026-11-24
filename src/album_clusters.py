@@ -262,7 +262,7 @@ class AlbumClusters:
 
     def list(self, user_id, *, include_assigned=False, query="", focus_id=None,
              background_tasks=None, use_cache=False, force_refresh=False,
-             detail_only=False, timing=None):
+             detail_only=False, lean=False, timing=None):
         started = time.perf_counter()
         tracks, metadata = self._snapshot(
             user_id, include_assigned, use_cache=use_cache,
@@ -460,8 +460,13 @@ class AlbumClusters:
                 "complete": len(focus & fetched), "total": len(focus),
                 "discovering_editions": discovering,
             }
-        return {"clusters": [] if detail_only else summaries,
-                "total_clusters": len(summaries),
+        # Only the sidebar's five display fields are needed in the browser.
+        # Keep full summaries as the default for API clients and internal tests.
+        output = ([] if detail_only else
+                  [{key: row[key] for key in
+                    ("id", "title", "track_count", "candidate_count", "locked")}
+                   for row in summaries] if lean else summaries)
+        return {"clusters": output, "total_clusters": len(summaries),
                 "total_tracks": len(tracks), "detail": detail}
 
     def contradictions(self, user_id, *, limit=50, offset=0):
