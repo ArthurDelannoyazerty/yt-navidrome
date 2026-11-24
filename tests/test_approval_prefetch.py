@@ -844,3 +844,96 @@ def test_upstream_musicbrainz_503_never_disables_approval_cache_task(db):
                     "UPDATE approval_prefetch_jobs SET retry_at=0 WHERE kind=? AND cache_key=?",
                     (job["kind"], job["cache_key"]),
                 )
+
+
+def test_official_english_release_title_is_shown_in_approval_without_approving_audio(db, monkeypatch):
+    """A real English Genshin edition is not a pseudo-release or recording alias."""
+    recording = "1f245767-ed69-4753-8992-c64eab34ce35"
+    english = "342888a1-9244-4d5c-8316-1f7162dd27f4"
+    japanese = "97a17f06-e88e-41c9-a522-3e6707dc8c7e"
+    app = create_app(db, start_workers=False)
+    with TestClient(app) as client:
+        prefetch = app.state.approval_prefetch
+        prefetch.workers_enabled = True
+        prefetch._store("recording", recording, {
+            "id": recording, "title": "未始的供献颂",
+            "preferred_title": None, "artist": "HOYO‐MiX",
+            "artist_credits": [],
+        }, NAME_TTL)
+        assert prefetch.names_batch([recording])["pending_recordings"] == [recording]
+        release_job = prefetch.claim()
+        assert release_job["kind"] == "releases"
+        monkeypatch.setattr(
+            app.state.musicbrainz_search, "request_releases",
+            lambda rid, page: {"recording_id": rid, "page": page, "total": 2,
+                               "releases": [
+                {"id": japanese, "title": "原神 - 輝く星々", "status": "Official",
+                 "language": "jpn"},
+                {"id": english, "title": "Genshin Impact - The Stellar Moments, Vol. 5",
+                 "status": "Official", "language": "eng"},
+            ]},
+        )
+        asyncio.run(prefetch.process(release_job))
+        with app.state.catalogue.db() as con:
+            queued = list(con.execute(
+                "SELECT kind,cache_key FROM approval_prefetch_jobs WHERE kind='official_release'"
+            ))
+            assert [(r["kind"], r["cache_key"]) for r in queued] == [
+                ("official_release", english)]
+        assert prefetch.names_batch([recording])["pending_recordings"] == [recording]
+        official_job = prefetch.claim()
+        assert official_job["kind"] == "official_release"
+        def fake_release(rid):
+            assert rid == english
+            return {"id": rid, "accepted": True, "release": {
+                "id": english, "status": "Official",
+                "title": "Genshin Impact - The Stellar Moments, Vol. 5",
+                "text-representation": {"language": "eng"},
+                "media": [{"position": 1, "tracks": [
+                    {"position": 11, "title": "Offertorium of Fortuitum",
+                     "recording": {"id": recording, "title": "未始的供献颂"}},
+                    {"position": 12, "title": "Wrong recording",
+                     "recording": {"id": OTHER, "title": "别的曲"}},
+                ]}],
+            }}
+        monkeypatch.setattr(app.state.musicbrainz_search,
+                            "request_official_release_tracklist", fake_release)
+        asyncio.run(prefetch.process(official_job))
+        result = client.get("/api/musicbrainz/approval-names", params={
+            "user_id": "admin", "recording_ids": recording})
+        assert result.status_code == 200
+        label = result.json()["recordings"][recording]
+        assert label["title"] == "未始的供献颂"
+        assert label["preferred_title"] == "Offertorium of Fortuitum"
+        assert label["preferred_title_source"] == "official_release"
+        assert label["preferred_title_release_id"] == english
+        assert result.json()["pending_recordings"] == []
+        # Name hydration is purely read-only. No Approval mutation was made.
+        assert db.rows("SELECT id FROM jobs WHERE kind='track'") == []
+
+
+def test_official_english_title_is_lower_priority_than_recording_alias(db):
+    app = create_app(db, start_workers=False)
+    with TestClient(app):
+        prefetch, catalogue = app.state.approval_prefetch, app.state.catalogue
+        with catalogue.db() as con:
+            catalogue.ingest(con, "release", {
+                "id": OFFICIAL_RELEASE, "title": "English album",
+                "status": "Official",
+                "text-representation": {"language": "eng"},
+            })
+            catalogue._store_release_tracks(con, {
+                "id": OFFICIAL_RELEASE, "media": [{"tracks": [{
+                    "id": str(uuid.uuid4()), "position": 1,
+                    "title": "Official English title",
+                    "recording": {"id": JAPANESE_RECORDING, "title": JAPANESE_TITLE},
+                }]}],
+            })
+        prefetch._store("recording", JAPANESE_RECORDING, {
+            "id": JAPANESE_RECORDING, "title": JAPANESE_TITLE,
+            "preferred_title": "Recording-level English alias",
+            "artist_credits": [],
+        }, NAME_TTL)
+        data = prefetch.names_batch([JAPANESE_RECORDING])["recordings"][JAPANESE_RECORDING]
+        assert data["preferred_title"] == "Recording-level English alias"
+        assert data["preferred_title_source"] == "recording_alias"
