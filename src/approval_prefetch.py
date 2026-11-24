@@ -1099,7 +1099,9 @@ class ApprovalPrefetch:
                             if str(rel.get("status") or "").casefold() == "pseudo-release":
                                 pseudo_releases.add(release_id)
                             elif (str(rel.get("status") or "").casefold() == "official"
-                                  and english_release_language(rel.get("language"))):
+                                  and (english_release_language(rel.get("language"))
+                                       or (not rel.get("language")
+                                           and not has_non_latin_letters(rel.get("title"))))):
                                 official_releases.add(release_id)
                 except (ValueError, TypeError):
                     continue
