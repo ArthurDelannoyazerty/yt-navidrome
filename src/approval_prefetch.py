@@ -414,8 +414,6 @@ class ApprovalPrefetch:
                 continue
             pseudo = [valid_id(r.get("id")) for r in releases
                       if str(r.get("status") or "").casefold() == "pseudo-release"]
-            if not pseudo:
-                continue
             official = [valid_id(r.get("id")) for r in releases
                         if str(r.get("status") or "").casefold() == "official"
                         and english_release_language(r.get("language"))]
