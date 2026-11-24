@@ -84,6 +84,15 @@ window.LanguageUI = (() => {
     const after = el("div", undefined, "language-change-column");
     after.append(el("small", (row.changed_field || "Title / artist") + " · proposed"),
                  el("strong", row.after_label ?? row.proposed_name ?? "Unknown"));
+    if (row.title_release_id && ["official_release", "pseudo_release"].includes(row.title_source) &&
+        row.display_diffs?.some(diff => diff.field === "TITLE")) {
+      const source = el("a", row.title_source === "official_release"
+        ? "MusicBrainz English official edition" : "MusicBrainz pseudo-release",
+        "language-name-source");
+      source.href = "https://musicbrainz.org/release/" + encodeURIComponent(row.title_release_id);
+      source.target = "_blank"; source.rel = "noopener noreferrer";
+      after.append(source);
+    }
     const actions = el("div", undefined, "language-change-actions");
     const button = el("button", "Change");
     button.type = "button";
