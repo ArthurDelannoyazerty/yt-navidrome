@@ -1,6 +1,8 @@
 """English preference and lossless preservation of canonical MusicBrainz names."""
 from __future__ import annotations
 
+import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -9,7 +11,7 @@ from mutagen.oggopus import OggOpus
 
 from localized_names import (
     LANGUAGE_POLICY, apply_to_opus, artist_credit, is_localized,
-    native_names, preferred_english_name,
+    native_names, preferred_english_name, preferred_recording_title,
 )
 
 
@@ -125,3 +127,94 @@ def test_activity_report_distinguishes_visible_changes_from_canonical_tags(audio
     assert "Visible title, artist and album names unchanged" in message
     assert "ORIGINALTITLE" in message
     assert "English-first policy marker set" in message
+
+
+def test_shared_resolver_uses_exact_official_english_track_and_keeps_recording_identity():
+    """Genshin: the English *track* is not an alias of the CJK recording."""
+    recording = "1f245767-ed69-4753-8992-c64eab34ce35"
+    english = "342888a1-9244-4d5c-8316-1f7162dd27f4"
+    japanese = "97a17f06-e88e-41c9-a522-3e6707dc8c7e"
+    unrelated = "11111111-1111-4111-8111-111111111111"
+    native = {"title": "未始的供献颂", "artist-credit": [{"name": "HOYO‐MiX"}]}
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.executescript("""
+        CREATE TABLE entities (kind TEXT,id TEXT,data TEXT);
+        CREATE TABLE release_tracks (release_id TEXT,medium INTEGER,
+                                   position INTEGER,recording_id TEXT,title TEXT);
+        CREATE TABLE approval_prefetch_cache (kind TEXT,cache_key TEXT,payload TEXT);
+    """)
+    def release(rid, name, lang, status="Official"):
+        con.execute("INSERT INTO entities VALUES (?,?,?)", (
+            "release", rid, json.dumps({
+                "title": name, "status": status,
+                "text-representation": {"language": lang},
+            }),
+        ))
+    release(english, "Genshin Impact - The Stellar Moments, Vol. 5", "eng")
+    release(japanese, "原神 - 輝く星々", "jpn")
+    con.executemany("INSERT INTO release_tracks VALUES (?,?,?,?,?)", [
+        (english, 1, 11, recording, "Offertorium of Fortuitum"),
+        (japanese, 1, 11, recording, "未だ響かぬ奉献唱"),
+        (english, 1, 12, unrelated, "Wrong recording"),
+    ])
+    selected = preferred_recording_title(con, recording, native)
+    assert selected == {"title": "Offertorium of Fortuitum",
+                        "source": "official_release",
+                        "release_id": english, "language": "eng"}
+    assert preferred_recording_title(
+        con, recording, native, assigned_release_id=japanese) == selected
+    # Local album edition selection cannot change the English title source.
+    assert preferred_recording_title(con, unrelated, {"title": "別の曲"})["source"] == "canonical"
+    # A properly locale-marked recording alias always outranks official titles.
+    aliased = {**native, "aliases": [{"name": "Official alias", "locale": "en"}]}
+    assert preferred_recording_title(con, recording, aliased)["title"] == "Official alias"
+    # A French or Japanese official release cannot supply the English fallback.
+    con.execute("UPDATE entities SET data=? WHERE id=?", (
+        json.dumps({"status": "Official",
+                    "text-representation": {"language": "fra"}}), english,
+    ))
+    assert preferred_recording_title(con, recording, native)["source"] == "canonical"
+    # English-language labels are required: Latin script alone is not proof.
+    con.execute("UPDATE entities SET data=? WHERE id=?", (
+        json.dumps({"status": "Official",
+                    "text-representation": {"language": None}}), english,
+    ))
+    assert preferred_recording_title(con, recording, native)["source"] == "canonical"
+    con.close()
+
+
+def test_shared_resolver_prefers_official_english_to_pseudo_and_preserves_native():
+    native = {"title": "未始的供献颂", "aliases": []}
+    rid = "1f245767-ed69-4753-8992-c64eab34ce35"
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.executescript("""
+        CREATE TABLE entities (kind TEXT,id TEXT,data TEXT);
+        CREATE TABLE release_tracks (release_id TEXT,medium INTEGER,
+                                   position INTEGER,recording_id TEXT,title TEXT);
+        CREATE TABLE approval_prefetch_cache (kind TEXT,cache_key TEXT,payload TEXT);
+    """)
+    con.execute("INSERT INTO approval_prefetch_cache VALUES (?,?,?)", (
+        "pseudo_title", rid, json.dumps({
+            "title": "Unofficial translation", "release_id": "22222222-2222-4222-8222-222222222222",
+            "language": "eng",
+        }),
+    ))
+    pseudo = preferred_recording_title(con, rid, native)
+    assert pseudo["source"] == "pseudo_release"
+    assert pseudo["title"] == "Unofficial translation"
+    official = "342888a1-9244-4d5c-8316-1f7162dd27f4"
+    con.execute("INSERT INTO entities VALUES (?,?,?)", (
+        "release", official, json.dumps({
+            "status": "Official", "text-representation": {"language": "eng"},
+        }),
+    ))
+    con.execute("INSERT INTO release_tracks VALUES (?,?,?,?,?)", (
+        official, 1, 11, rid, "Offertorium of Fortuitum",
+    ))
+    chosen = preferred_recording_title(con, rid, native)
+    assert chosen["source"] == "official_release"
+    assert chosen["title"] == "Offertorium of Fortuitum"
+    assert native["title"] == "未始的供献颂"
+    con.close()
