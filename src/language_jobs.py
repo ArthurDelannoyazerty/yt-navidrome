@@ -17,7 +17,8 @@ from pathlib import Path
 import common
 from language_filter import meaningful_name_change
 from localized_names import (LANGUAGE_POLICY, POLICY_TAG, artist_credit,
-                             is_localized, preferred_english_name)
+                             is_localized, preferred_english_name,
+                             preferred_recording_title)
 
 MAX_TRACKS = 5000
 PROGRESS_STEP = 25
@@ -160,7 +161,11 @@ def _classify(con, track, tags):
             return {**base, "kind": "unknown", "prediction": "Recording credits are not cached yet"}
         native_title = str(recording["title"]).strip()
         native_artist = artist_credit(recording)
-        preferred_title = preferred_english_name(recording)
+        english_title = preferred_recording_title(
+            con, track["mbid"], recording,
+            assigned_release_id=track["release_id"],
+        )
+        preferred_title = english_title["title"]
         preferred_artist = _credited_english_name(con, recording["artist-credit"]) or native_artist
         proposed_album, native_album = None, None
         proposed_albumartist, native_albumartist = None, None
@@ -210,6 +215,8 @@ def _classify(con, track, tags):
             before_label = after_label = None
             changed_field = None
         return {**base, "kind": kind,
+                "title_source": english_title["source"],
+                "title_release_id": english_title["release_id"],
                 "proposed_name": proposed_name,
                 "canonical_name": " - ".join(x for x in (native_artist, native_title) if x),
                 "album": proposed_album,
@@ -257,7 +264,8 @@ def preview(store, user_id, include_localized=False):
                         key: item.get(key) for key in
                         ("id", "current_name", "proposed_name",
                          "before_label", "after_label", "changed_field",
-                         "display_diffs", "changes")
+                         "display_diffs", "changes", "title_source",
+                         "title_release_id")
                     })
                 # Show substantive examples first, not eight unchanged titles.
                 if examples_by_kind[kind] < (3 if kind != "unchanged" else 2):
