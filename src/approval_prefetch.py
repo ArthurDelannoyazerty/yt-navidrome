@@ -1044,13 +1044,14 @@ class ApprovalPrefetch:
         retain["pseudo_title"] = set(retained_rec)
         all_lists = cache_con.execute(
             """SELECT kind,cache_key,payload FROM approval_prefetch_cache
-               WHERE kind IN ('releases','pseudo_release')"""
+               WHERE kind IN ('releases','pseudo_release','official_release')"""
         ).fetchall()
         all_jobs = cache_con.execute(
             """SELECT kind,cache_key FROM approval_prefetch_jobs
-               WHERE kind IN ('releases','pseudo_release')"""
+               WHERE kind IN ('releases','pseudo_release','official_release')"""
         ).fetchall()
         pseudo_releases = set()
+        official_releases = set()
         for row in all_lists:
             if row["kind"] == "releases":
                 rid = valid_id(row["cache_key"].split(":")[0])
@@ -1059,12 +1060,15 @@ class ApprovalPrefetch:
                 retain.setdefault("releases", set()).add(row["cache_key"])
                 try:
                     for rel in json.loads(row["payload"]).get("releases") or []:
-                        if (str(rel.get("status") or "").casefold() == "pseudo-release"
-                                and (release_id := valid_id(rel.get("id")))):
-                            pseudo_releases.add(release_id)
+                        if (release_id := valid_id(rel.get("id"))):
+                            if str(rel.get("status") or "").casefold() == "pseudo-release":
+                                pseudo_releases.add(release_id)
+                            elif (str(rel.get("status") or "").casefold() == "official"
+                                  and english_release_language(rel.get("language"))):
+                                official_releases.add(release_id)
                 except (ValueError, TypeError):
                     continue
-            else:
+            elif row["kind"] == "pseudo_release":
                 try:
                     ids = {valid_id(x.get("recording_id")) for x in
                            (json.loads(row["payload"]).get("titles") or [])}
@@ -1077,6 +1081,7 @@ class ApprovalPrefetch:
                 if valid_id(row["cache_key"].split(":")[0]) in retained_rec:
                     retain.setdefault("releases", set()).add(row["cache_key"])
         retain["pseudo_release"] = pseudo_releases
+        retain["official_release"] = official_releases
         return retain, waiting
 
     @staticmethod
