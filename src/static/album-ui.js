@@ -207,7 +207,7 @@ window.AlbumUI = (() => {
     if(ui.navScope!==navScope){ui.navScope=navScope;ui.navCount=CLUSTER_BATCH_SIZE;}
     const query=new URLSearchParams({user_id:user,
       include_assigned:String($("albumIncludeAssigned").checked),
-      q:$("albumClusterSearch").value.trim()});
+      q:$("albumClusterSearch").value.trim(),lean:"true"});
     if(focus)query.set("focus_id",focus);
     if(refresh)query.set("refresh","true");
     if(compact)query.set("detail_only","true");
