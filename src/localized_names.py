@@ -95,6 +95,22 @@ def preferred_recording_title(con, recording_id, recording, *,
     if not canonical or not recording_id:
         return base
     alias = str(known_alias or preferred_english_name(recording)).strip()[:1000]
+    if alias == canonical:
+        # Approval's exact names cache can be fresher than the Catalogue
+        # recording entity. Language must not ignore a verified alias simply
+        # because its own cached recording lookup lacks the alias list.
+        try:
+            row = con.execute(
+                """SELECT payload FROM approval_prefetch_cache
+                   WHERE kind='recording' AND cache_key=?""",
+                (recording_id,),
+            ).fetchone()
+            if row:
+                exact = json.loads(row["payload"])
+                if str(exact.get("title") or "").strip() == canonical:
+                    alias = str(exact.get("preferred_title") or alias).strip()[:1000]
+        except (sqlite3.OperationalError, TypeError, ValueError, AttributeError):
+            pass
     if alias and alias != canonical:
         return {"title": alias, "source": "recording_alias",
                 "release_id": None, "language": "en"}
@@ -105,6 +121,7 @@ def preferred_recording_title(con, recording_id, recording, *,
     non_latin = has_non_latin_letters(canonical)
     if non_latin:
         candidates = []
+        pseudo_candidates = []
         # release_tracks is written atomically after a *complete* exact-release
         # lookup. Its (recording_id, release_id) index bounds lookup cost.
         rows = con.execute(
@@ -116,14 +133,16 @@ def preferred_recording_title(con, recording_id, recording, *,
         for row in rows:
             try:
                 release = json.loads(row["data"])
-                if str(release.get("status") or "").casefold() != "official":
+                status = str(release.get("status") or "").casefold()
+                if status not in {"official", "pseudo-release"}:
                     continue
                 language = (release.get("text-representation") or {}).get("language")
                 if not english_release_language(language):
                     continue
                 title = str(row["title"] or "").strip()[:1000]
                 if _english_track_title(title, canonical):
-                    candidates.append((title, str(row["release_id"]), language))
+                    entry = (title, str(row["release_id"]), language)
+                    (candidates if status == "official" else pseudo_candidates).append(entry)
             except (ValueError, TypeError, AttributeError):
                 continue
         if candidates:
@@ -136,6 +155,11 @@ def preferred_recording_title(con, recording_id, recording, *,
             return {"title": title, "source": "official_release",
                     "release_id": release_id, "language": language}
 
+        if pseudo is None and pseudo_candidates:
+            title, release_id, language = min(
+                pseudo_candidates, key=lambda item: (item[1], item[0]))
+            pseudo = {"title": title, "release_id": release_id,
+                      "language": language}
     if pseudo is None:
         # Reuse the durable Approval pseudo-title cache (when initialized).
         # Language requires no network request during the read-only review.
