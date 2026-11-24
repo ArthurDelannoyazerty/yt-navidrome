@@ -472,8 +472,9 @@ class ApprovalPrefetch:
             english.append((alias or piece.get("name") or "") + str(piece.get("joinphrase") or ""))
         item["preferred_artist"] = "".join(english)[:1000] if has_alias else None
         item.pop("artist_credits", None)  # Internal wiring, not additional public metadata.
-        title_wait = (not item.get("preferred_title") and
-                      bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", native)) and
+        title_wait = ((not item.get("preferred_title") or
+                       item.get("preferred_title_source") == "pseudo_release") and
+                      has_non_latin_letters(native) and
                       self._pending_pseudo(con, identity))
         return (item,
                 (((fresh or full_catalogue) and not need_artists and not title_wait)
