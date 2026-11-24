@@ -509,10 +509,22 @@ class ApprovalPrefetch:
             raise ValueError("Too many MusicBrainz IDs in a single batch")
         result_r, result_a, pending_r, pending_a = {}, {}, [], []
         missing_r, missing_a = [], list(aids)
-        # Schedule first so the same read sees a pending release lookup and
-        # keeps polling until the possible pseudo-release English title arrives.
+        # Schedule first so the same read sees pending release lookups and
+        # keeps polling until an English official/pseudo title arrives.
         if self.workers_enabled:
             self.enqueue_releases(rids, priority=8)
+            # Backfill lists cached *before* official-title support existed:
+            # those fresh snapshots would otherwise never be processed again
+            # until their 30-day TTL expires. All calls are local SQLite;
+            # only the bounded worker fetches selected exact editions.
+            with self.catalogue.db() as con:
+                legacy = []
+                for rid in rids:
+                    cached, _ = self._cached(con, "releases", f"{rid}:1")
+                    if cached:
+                        legacy.append((rid, cached.get("releases") or []))
+            for rid, releases in legacy:
+                self.enqueue_official_releases(rid, releases, priority=16)
         with self.catalogue.db() as con:
             for identity in rids:
                 label, complete, credited = self._recording(con, identity)
