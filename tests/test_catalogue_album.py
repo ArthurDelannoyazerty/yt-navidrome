@@ -1331,6 +1331,75 @@ def test_cluster_groups_connected_release_families_and_filters_whole_group(db, e
         clusters.edition("admin", guest, RELEASE_A, include_assigned=True)
 
 
+def test_album_snapshot_reuses_catalogue_reads_and_compact_response_preserves_family_detail(db, environment):
+    from album_clusters import AlbumClusters
+
+    catalogue, albums = setup_catalogue(db)
+    clusters = AlbumClusters(albums)
+    clusters.init()
+    tid, _, _ = add_audio_track(db, environment, RECORDING_2)
+    queue = []
+
+    class DeferredTasks:
+        def add_task(self, callback, *args, **kwargs):
+            queue.append((callback, args, kwargs))
+
+    orig = clusters._catalogue_data
+    scans = []
+
+    def counted(tracks):
+        scans.append(len(tracks))
+        return orig(tracks)
+
+    clusters._catalogue_data = counted
+    timing = {}
+    result = clusters.list("admin", include_assigned=True,
+                           use_cache=True, background_tasks=DeferredTasks(), timing=timing)
+    assert result["clusters"] and result["detail"]
+    assert len(scans) == 1
+    assert queue, "Whole-library queueing belongs to response background tasks"
+    assert timing["snapshot_cache_hit"] is False
+    compact_timing = {}
+    focused = clusters.list("admin", include_assigned=True,
+                            focus_id=result["detail"]["id"], detail_only=True,
+                            use_cache=True, background_tasks=DeferredTasks(), timing=compact_timing)
+    assert focused["clusters"] == []
+    assert focused["total_clusters"] == result["total_clusters"]
+    assert {t["id"] for t in focused["detail"]["tracks"]} == {
+        t["id"] for t in result["detail"]["tracks"]}
+    assert compact_timing["snapshot_cache_hit"] is True
+    assert len(scans) == 1, "Switching families should reuse cached SQLite MusicBrainz data"
+    # An explicit album lock immediately invalidates the per-user snapshot.
+    clusters.toggle_lock("admin", tid, True)
+    after = clusters.list("admin", include_assigned=True,
+                          use_cache=True, background_tasks=DeferredTasks())
+    assert len(scans) == 2
+    assert next(t for t in after["detail"]["tracks"] if t["id"] == tid)["locked"] is True
+
+
+def test_album_clusters_api_reports_server_timing_and_focused_only_payload(db, environment):
+    from main import create_app
+
+    catalogue, albums = setup_catalogue(db)
+    tid, _, _ = add_audio_track(db, environment, RECORDING_2)
+    app = create_app(db, start_workers=False)
+    with TestClient(app) as client:
+        first = client.get("/api/albums/clusters",
+                           params={"user_id": "admin", "include_assigned": "true"})
+        assert first.status_code == 200
+        family = first.json()["detail"]["id"]
+        assert family and tid in {row["id"] for row in first.json()["detail"]["tracks"]}
+        assert "album-catalogue-db;dur=" in first.headers["server-timing"]
+        detail = client.get("/api/albums/clusters", params={
+            "user_id": "admin", "include_assigned": "true",
+            "focus_id": family, "detail_only": "true",
+        })
+        assert detail.status_code == 200
+        assert detail.json()["clusters"] == []
+        assert detail.json()["detail"]["id"] == family
+        assert 'album-snapshot;desc="hit"' in detail.headers["server-timing"]
+
+
 def test_cluster_keeps_disjoint_music_separate_and_recognizes_incomplete_release(db, environment):
     from album_clusters import AlbumClusters
     other_rec = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
