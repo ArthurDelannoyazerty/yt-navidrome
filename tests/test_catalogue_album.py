@@ -272,8 +272,10 @@ def test_confirmed_release_alias_is_english_and_native_album_is_preserved(db, en
     tags = cat.release_assignment(RELEASE_B, RECORDING_2)
     assert tags["album"] == "Original Soundtrack"
     assert tags["native_album"] == "オリジナル・サウンドトラック"
+    previous_title = OggOpus(path)["title"]
     albums._retag(path, tags)
     raw = OggOpus(path)
+    assert raw["title"] == previous_title, "Album edition selection never changes the music title"
     assert raw["album"] == ["Original Soundtrack"]
     assert raw["originalalbum"] == ["オリジナル・サウンドトラック"]
     assert raw["musicbrainz_trackid"] == [RECORDING_2]
@@ -1949,3 +1951,70 @@ def test_catalogue_worker_pauses_entire_backlog_during_provider_cooldown(db, cap
     with catalogue.db() as con:
         remaining = con.execute("SELECT COUNT(*) FROM scopes WHERE state='PENDING'").fetchone()[0]
     assert remaining == 2
+
+
+def test_language_review_and_beets_apply_use_same_official_english_title(db, environment):
+    """Genshin-style cross-release title is reviewed, then actually written."""
+    from types import SimpleNamespace
+    from mutagen.oggopus import OggOpus
+    from beets_bridge import Bridge
+    from language_jobs import preview, name_changes
+    from localized_names import POLICY_TAG
+
+    catalogue, _ = setup_catalogue(db)
+    track_id, path, _ = add_audio_track(db, environment, RECORDING_1)
+    with catalogue.db() as con:
+        catalogue.ingest(con, "recording", {
+            "id": RECORDING_1, "title": "未始的供献颂", "aliases": [],
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "HOYO‐MiX"},
+                               "name": "HOYO‐MiX"}],
+        })
+        catalogue.ingest(con, "release", {
+            "id": RELEASE_A, "title": "Genshin Impact - The Stellar Moments",
+            "status": "Official", "text-representation": {"language": "eng"},
+            "artist-credit": [{"artist": {"id": ARTIST, "name": "HOYO‐MiX"}}],
+        })
+        catalogue._store_release_tracks(con, {
+            "id": RELEASE_A, "media": [{"position": 1, "tracks": [{
+                "id": str(uuid.uuid4()), "position": 11,
+                "title": "Offertorium of Fortuitum",
+                "recording": {"id": RECORDING_1, "title": "未始的供献颂"},
+            }]}],
+        })
+    before = sha256_file(path)
+    report = preview(db, "admin")
+    assert report["eligible"] == 1
+    row = report["sample"][0]
+    assert row["title_source"] == "official_release"
+    assert row["title_release_id"] == RELEASE_A
+    assert "Offertorium of Fortuitum" in row["proposed_name"]
+    assert sha256_file(path) == before, "Language review must never edit files"
+    page = name_changes(db, "admin", report["review_token"])
+    assert page["items"][0]["title_release_id"] == RELEASE_A
+
+    # Exercise the actual Beets-side language operation, not just its preview.
+    bridge = object.__new__(Bridge)
+    bridge.store = db
+    bridge.plugins = {"musicbrainz": SimpleNamespace(track_for_id=lambda identity:
+        SimpleNamespace(track_id=identity, title="未始的供献颂", artist="HOYO‐MiX"))}
+    bridge.raise_if_deferred = lambda: None
+    bridge.release_metadata = lambda recording, release: (
+        SimpleNamespace(album="Genshin Impact - The Stellar Moments",
+                        albumartist="HOYO‐MiX"), {},
+    )
+    bridge.canonical_names = lambda recording, release: {
+        "title": "未始的供献颂", "artist": "HOYO‐MiX",
+        "album": "Genshin Impact - The Stellar Moments", "albumartist": "HOYO‐MiX",
+    }
+    result = bridge.localize_existing(
+        {"id": track_id, "mbid": RECORDING_1, "release_id": RELEASE_A,
+         "metadata_edited": False},
+        str(path),
+    )
+    tags = OggOpus(path)
+    assert tags["title"] == ["Offertorium of Fortuitum"]
+    assert tags["originaltitle"] == ["未始的供献颂"]
+    assert tags["musicbrainz_trackid"] == [RECORDING_1]
+    assert tags["musicbrainz_albumid"] == [RELEASE_A]
+    assert result["title"] == "Offertorium of Fortuitum"
+    assert tags[POLICY_TAG] and path.is_file(), "Identity and audio path stay unchanged"
