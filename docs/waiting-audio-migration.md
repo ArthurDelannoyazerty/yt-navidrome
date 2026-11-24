@@ -48,6 +48,10 @@ investigate or restore your backups. When verified, stop Navidrome and run:
 python /app/tools/migrate_waiting_audio.py ack --navidrome-verified
 ```
 
+If the reported state is already `COMPLETE` (at most three tracks needed
+moving), stop here. Otherwise it will be `CANARY_VERIFIED` and the remaining
+files can be moved.
+
 Move all remaining planned unapproved tracks:
 
 ```sh
