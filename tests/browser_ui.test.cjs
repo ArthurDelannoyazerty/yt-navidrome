@@ -1326,6 +1326,34 @@ test("real browser: Japanese official title shows verified pseudo-release Englis
   assert.deepEqual(chrome.errors,[]);
 });
 
+test("real browser: Approval shows official-release English track beneath canonical CJK recording", {timeout:60000}, async t=>{
+  const chrome=await browser(t); if(!chrome)return;
+  const data=fixtures();
+  const rid="1f245767-ed69-4753-8992-c64eab34ce35";
+  const release="342888a1-9244-4d5c-8316-1f7162dd27f4";
+  data.tracks[0].title="未始的供献颂";
+  data.tracks[0].choices=[{...data.tracks[0].choices[0],
+    mbid:rid,title:"未始的供献颂",artist:"HOYO‐MiX"}];
+  data.recordingNames={[rid]:{
+    id:rid,title:"未始的供献颂",preferred_title:"Offertorium of Fortuitum",
+    preferred_title_source:"official_release",preferred_title_release_id:release,
+    preferred_title_language:"eng",artist:"HOYO‐MiX",
+  }};
+  data.searchResults=[{id:rid,title:"未始的供献颂",artist:"HOYO‐MiX",releases:[]}];
+  const origin=await fixtureServer(t,data);
+  await chrome.send("Page.navigate",{url:origin});
+  await chrome.until("document.querySelector('#user option[value=admin]')");
+  await chrome.evaluate("document.querySelector('#user').value='admin';document.querySelector('#user').dispatchEvent(new Event('change'))");
+  await chrome.evaluate("document.querySelector('[data-tab=approval]').click()");
+  await chrome.until("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias')");
+  assert.equal(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name a').textContent"),"未始的供献颂");
+  assert.match(await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias').textContent"),
+    /English \\(official release\\): Offertorium of Fortuitum/);
+  assert.ok((await chrome.evaluate("document.querySelector('#metadataSuggestions .approval-recording-name .approval-english-alias a').href")).endsWith("/release/"+release));
+  assert.equal(data.writes.length,0,"Showing translated name must not approve or retag a track");
+  assert.deepEqual(chrome.errors,[]);
+});
+
 test("real browser: Graph canvas loads with strict CSP, switches layers and supports node selection", {timeout:60000}, async t => {
   const chrome = await browser(t); if (!chrome) return;
   const data = fixtures(); data.strictCsp = true;
