@@ -627,6 +627,21 @@ class Pipeline:
                 **receipt, "path": str(final), "sha256": await asyncio.to_thread(sha256_file, final),
                 "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
             }, digest)
+            # A legacy waiting file can be replaced by a new download before
+            # the offline move-only migration. Remove that old publication only
+            # after the new asset path has committed; never delete arbitrary
+            # files or the immutable candidate in STATE/staging.
+            if asset and asset["path"] != str(final):
+                previous = Path(asset["path"])
+                root = (LIBRARY / track["user_id"]).resolve()
+                if (previous.parent == root / "Waiting for approval"
+                        and previous.name == track["id"] + ".opus"
+                        and not previous.is_symlink()
+                        and not self.store.one(
+                            "SELECT 1 FROM assets WHERE path=? AND state='CURRENT'",
+                            (str(previous),)
+                        )):
+                    previous.unlink(missing_ok=True)
         # Always retry exports, including after a crash following the DB commit.
         await self.rewrite_track_playlists(track["id"])
         return self.store.owned("tracks", track["id"], track["user_id"])
