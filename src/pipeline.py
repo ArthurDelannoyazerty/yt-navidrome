@@ -636,6 +636,8 @@ class Pipeline:
                 root = (LIBRARY / track["user_id"]).resolve()
                 if (previous.parent == root / "Waiting for approval"
                         and previous.name == track["id"] + ".opus"
+                        and previous.resolve().is_relative_to(root)
+                        and not previous.parent.is_symlink()
                         and not previous.is_symlink()
                         and not self.store.one(
                             "SELECT 1 FROM assets WHERE path=? AND state='CURRENT'",
