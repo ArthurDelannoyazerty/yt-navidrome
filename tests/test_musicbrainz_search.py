@@ -389,3 +389,43 @@ def test_official_release_is_not_mistaken_for_english_pseudo_tracklist(db, monke
     monkeypatch.setattr(HttpPolicy, "send", send)
     value = MusicBrainzSearch(db).request_pseudo_release_titles(release)
     assert value == {"id": release, "status": "not-pseudo", "titles": []}
+
+
+def test_official_english_release_lookup_verifies_status_language_and_exact_identity(db, monkeypatch):
+    release = "342888a1-9244-4d5c-8316-1f7162dd27f4"
+    recording = "1f245767-ed69-4753-8992-c64eab34ce35"
+    payload = {
+        "id": release, "title": "Genshin Impact - The Stellar Moments, Vol. 5",
+        "status": "Official", "text-representation": {"language": "eng", "script": "Latn"},
+        "media": [{"position": 1, "tracks": [
+            {"title": "Offertorium of Fortuitum", "recording": {
+                "id": recording, "title": "未始的供献颂"}},
+        ]}],
+    }
+    calls = []
+
+    def send(self, original, session, prepared, **kwargs):
+        calls.append(prepared.url)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(payload).encode()
+        return response
+
+    monkeypatch.setattr(HttpPolicy, "send", send)
+    searcher = MusicBrainzSearch(db)
+    result = searcher.request_official_release_tracklist(release)
+    assert result["accepted"] is True
+    assert result["release"]["media"][0]["tracks"][0]["recording"]["id"] == recording
+    assert len(calls) == 1
+    assert "/release/" + release in calls[0]
+    assert "recordings" in calls[0]
+
+    payload["text-representation"]["language"] = "jpn"
+    assert not searcher.request_official_release_tracklist(release)["accepted"]
+    payload["text-representation"]["language"] = "eng"
+    payload["status"] = "Pseudo-Release"
+    assert not searcher.request_official_release_tracklist(release)["accepted"]
+    payload["status"] = "Official"
+    payload["id"] = RID
+    with pytest.raises(ValueError, match="unrelated release"):
+        searcher.request_official_release_tracklist(release)

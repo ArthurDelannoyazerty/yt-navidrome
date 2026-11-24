@@ -169,13 +169,15 @@ window.MetadataUI = (() => {
     if (!title || !artist) return;
     if (names) {
       const pseudo = names.preferred_title_source === "pseudo_release";
-      const label = pseudo ? (["eng", "en"].includes(names.preferred_title_language)
-        ? "English (pseudo-release)" : "Pseudo-release title") : "English";
+      const official = names.preferred_title_source === "official_release";
+      const label = official ? "English (official release)" :
+        pseudo ? (["eng", "en"].includes(names.preferred_title_language)
+          ? "English (pseudo-release)" : "Pseudo-release title") : "English";
       bilingualName(title, "recording", item.mbid, names.title,
                     names.preferred_title ||
                     (item.title !== names.title ? item.title : null), "",
                     names.preferred_title ? label : "Beets",
-                    pseudo ? names.preferred_title_release_id : null);
+                    (pseudo || official) ? names.preferred_title_release_id : null);
       bilingualName(artist, "artist", null, names.artist || item.artist,
                     names.preferred_artist ||
                     (item.artist !== names.artist ? item.artist : null), "",
@@ -201,11 +203,13 @@ window.MetadataUI = (() => {
       const artist = row.querySelector(".approval-search-recording-artist");
       if (title) {
         const pseudo = names.preferred_title_source === "pseudo_release";
+        const official = names.preferred_title_source === "official_release";
         bilingualName(title, "recording", item.id, names.title || item.title,
                       names.preferred_title || item.preferred_title, "",
-                      pseudo ? (["eng", "en"].includes(names.preferred_title_language)
-                        ? "English (pseudo-release)" : "Pseudo-release title") : "English",
-                      pseudo ? names.preferred_title_release_id : null);
+                      official ? "English (official release)" :
+                        pseudo ? (["eng", "en"].includes(names.preferred_title_language)
+                          ? "English (pseudo-release)" : "Pseudo-release title") : "English",
+                      (pseudo || official) ? names.preferred_title_release_id : null);
       }
       if (artist) bilingualName(artist, "artist", null, names.artist || item.artist,
                                  names.preferred_artist || item.preferred_artist);

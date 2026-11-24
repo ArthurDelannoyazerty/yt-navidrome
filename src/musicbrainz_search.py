@@ -182,10 +182,54 @@ class MusicBrainzSearch:
                     if rid := valid_id(release.get("id")):
                         releases.append({"id": rid, "title": str(release.get("title") or "Untitled")[:1000],
                                          "date": release.get("date"), "country": release.get("country"),
-                                         "status": release.get("status")})
+                                         "status": release.get("status"),
+                                         "language": (release.get("text-representation") or {}).get("language")})
                 return {"recording_id": recording_id, "releases": releases,
                         "page": page, "total": max(0, int(data.get("release-count",
                             data.get("release_count", len(releases)))))}
+            finally:
+                response.close()
+
+    def request_official_release_tracklist(self, release_id: str) -> dict:
+        """Fetch one English-language *official* release, for exact track IDs.
+
+        This is a bounded, background Approval request. Only a completely
+        verified release response is eligible for the shared Catalogue cache;
+        a Romanized or unrelated release must never be treated as English.
+        """
+        from localized_names import english_release_language
+
+        identity = valid_id(release_id)
+        if identity != release_id:
+            raise ValueError("Invalid MusicBrainz release ID")
+        policy = HttpPolicy(self.store)
+        with requests.Session() as session:
+            prepared = session.prepare_request(requests.Request(
+                "GET", API_ROOT + "release/" + identity,
+                params={"fmt": "json", "inc": "recordings+artist-credits+release-groups"},
+                headers={"User-Agent": os.getenv("HTTP_USER_AGENT") or USER_AGENT,
+                         "Accept": "application/json"},
+            ))
+            response = policy.send(requests.sessions.Session.send, session, prepared,
+                                   timeout=(5, 15), allow_redirects=False)
+            try:
+                if response.status_code == 404:
+                    raise ValueError("MusicBrainz release was not found")
+                if response.status_code != 200:
+                    raise ApiDeferred(
+                        f"MusicBrainz official release lookup returned HTTP {response.status_code}",
+                        retry_at=time.time() + 60,
+                    )
+                value = response.json()
+                if valid_id(value.get("id")) != identity:
+                    raise ValueError("MusicBrainz returned an unrelated release")
+                language = (value.get("text-representation") or {}).get("language")
+                if (str(value.get("status") or "").casefold() != "official"
+                        or not english_release_language(language)):
+                    return {"id": identity, "accepted": False}
+                if not isinstance(value.get("media"), list):
+                    raise ValueError("MusicBrainz English release has no complete tracklist")
+                return {"id": identity, "accepted": True, "release": value}
             finally:
                 response.close()
 

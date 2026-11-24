@@ -6,6 +6,11 @@ strings; these refer to the native/canonical *name*, not an older recording.
 """
 from __future__ import annotations
 
+import json
+import sqlite3
+import unicodedata
+from collections import Counter
+
 from mutagen.oggopus import OggOpus
 
 LANGUAGE_POLICY = "english-first-v1"
@@ -45,6 +50,138 @@ def preferred_english_name(data, *, field="title"):
                 and kind not in {"legal name", "search hint", "misspelling"}):
             suitable.append((not bool(alias.get("primary")), locale != "en", name))
     return min(suitable)[2] if suitable else canonical
+
+
+def english_release_language(value):
+    """MusicBrainz release text-language codes (not release countries/scripts)."""
+    code = str(value or "").strip().casefold().replace("_", "-")
+    return code in {"en", "eng"} or code.startswith(("en-", "eng-"))
+
+
+def has_non_latin_letters(value):
+    return any(char.isalpha() and "LATIN" not in unicodedata.name(char, "")
+               for char in str(value or ""))
+
+
+def _english_track_title(title, canonical):
+    """A genuine Latin-script alternate title, never an invented translation.
+
+    Require an English-labelled *release* separately. Latin letters alone are
+    not proof of English; they only reject the obvious wrong-script candidate.
+    """
+    value = str(title or "").strip()[:1000]
+    return (bool(value) and value != str(canonical or "").strip()
+            and any(c.isalpha() and "LATIN" in unicodedata.name(c, "") for c in value)
+            and not any(c.isalpha() and "LATIN" not in unicodedata.name(c, "")
+                        for c in value))
+
+
+def preferred_recording_title(con, recording_id, recording, *,
+                              known_alias=None, assigned_release_id=None,
+                              pseudo=None):
+    """One shared, read-only title policy for Approval and Language.
+
+    Prefer exact recording English aliases, then English titles on *official*
+    releases with the SAME recording MBID, then English pseudo-release track
+    titles. An unrelated work, album or text-similar recording is never used.
+
+    Official fallback is only considered when the canonical title is not in
+    Latin script: distinct official track titles are not automatically assumed
+    to be translations of already-English recording titles.
+    """
+    canonical = str((recording or {}).get("title") or "").strip()[:1000]
+    base = {"title": canonical, "source": "canonical",
+            "release_id": None, "language": None}
+    if not canonical or not recording_id:
+        return base
+    alias = str(known_alias or preferred_english_name(recording)).strip()[:1000]
+    if alias == canonical:
+        # Approval's exact names cache can be fresher than the Catalogue
+        # recording entity. Language must not ignore a verified alias simply
+        # because its own cached recording lookup lacks the alias list.
+        try:
+            row = con.execute(
+                """SELECT payload FROM approval_prefetch_cache
+                   WHERE kind='recording' AND cache_key=?""",
+                (recording_id,),
+            ).fetchone()
+            if row:
+                exact = json.loads(row["payload"])
+                if str(exact.get("title") or "").strip() == canonical:
+                    alias = str(exact.get("preferred_title") or alias).strip()[:1000]
+        except (sqlite3.OperationalError, TypeError, ValueError, AttributeError):
+            pass
+    if alias and alias != canonical:
+        return {"title": alias, "source": "recording_alias",
+                "release_id": None, "language": "en"}
+
+    # Only translate a non-Latin canonical title. A distinct English-language
+    # version name of an English recording can denote a remix or alternate
+    # title rather than a translation.
+    non_latin = has_non_latin_letters(canonical)
+    if not non_latin:
+        return base
+    if non_latin:
+        candidates = []
+        pseudo_candidates = []
+        # release_tracks is written atomically after a *complete* exact-release
+        # lookup. Its (recording_id, release_id) index bounds lookup cost.
+        rows = con.execute(
+            """SELECT t.title,t.release_id,r.data FROM release_tracks AS t
+               JOIN entities AS r ON r.kind='release' AND r.id=t.release_id
+               WHERE t.recording_id=? ORDER BY t.release_id,t.medium,t.position
+               LIMIT 240""", (recording_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                release = json.loads(row["data"])
+                status = str(release.get("status") or "").casefold()
+                if status not in {"official", "pseudo-release"}:
+                    continue
+                language = (release.get("text-representation") or {}).get("language")
+                if not english_release_language(language):
+                    continue
+                title = str(row["title"] or "").strip()[:1000]
+                if _english_track_title(title, canonical):
+                    entry = (title, str(row["release_id"]), language)
+                    (candidates if status == "official" else pseudo_candidates).append(entry)
+            except (ValueError, TypeError, AttributeError):
+                continue
+        if candidates:
+            counts = Counter(title.casefold() for title, _, _ in candidates)
+            title, release_id, language = min(
+                candidates,
+                key=lambda c: (c[1] != assigned_release_id,
+                               -counts[c[0].casefold()], c[1], c[0]),
+            )
+            return {"title": title, "source": "official_release",
+                    "release_id": release_id, "language": language}
+
+        if pseudo is None and pseudo_candidates:
+            title, release_id, language = min(
+                pseudo_candidates, key=lambda item: (item[1], item[0]))
+            pseudo = {"title": title, "release_id": release_id,
+                      "language": language}
+    if pseudo is None:
+        # Reuse the durable Approval pseudo-title cache (when initialized).
+        # Language requires no network request during the read-only review.
+        try:
+            row = con.execute(
+                """SELECT payload FROM approval_prefetch_cache
+                   WHERE kind='pseudo_title' AND cache_key=?""",
+                (recording_id,),
+            ).fetchone()
+            if row:
+                pseudo = json.loads(row["payload"])
+        except (sqlite3.OperationalError, TypeError, ValueError):
+            pseudo = None
+    if isinstance(pseudo, dict) and _english_track_title(pseudo.get("title"), canonical):
+        release_id = str(pseudo.get("release_id") or "")
+        if release_id:
+            return {"title": str(pseudo["title"]).strip()[:1000],
+                    "source": "pseudo_release", "release_id": release_id,
+                    "language": str(pseudo.get("language") or "")}
+    return base
 
 
 def native_names(recording, release=None):

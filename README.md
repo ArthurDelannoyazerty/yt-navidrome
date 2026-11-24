@@ -239,6 +239,19 @@ operation is reversible when the original file/tag backup is still valid. Use
 Language afterward only if display names need review. The Help tab documents
 the full process, missing tracks, cache states, source cleanup and recovery.
 
+**MusicBrainz English track titles:** Approval shows the native Recording title
+plus a verified English alternative when available. Both Approval and Language
+now resolve titles in the same order: English Recording alias, English track
+title on an official release containing the *same Recording MBID*, then an
+English pseudo-release, otherwise the canonical title. Approval is
+**display-only**; Language requires its read-only review and confirmation before
+changing any audio tags. It preserves the canonical name in `ORIGINALTITLE`
+and keeps the selected Recording ID and `audio/<track-id>.opus` path fixed.
+Album edition selection does **not** change `TITLE`. English official
+tracklists are fetched sparingly in Approval (at most two editions per
+recording) and reused from Catalogue; missing indexed tracklists are never
+replaced by guessed translations.
+
 The Music screen provides search, server-side pagination, status filters and an
 Ignored music view. Approval keeps its one-recording-at-a-time full-width workflow.
 Sources support one-off links and monitored playlists; Activity follows recent
