@@ -52,7 +52,7 @@ def preferred_english_name(data, *, field="title"):
     return min(suitable)[2] if suitable else canonical
 
 
-def _english_language(value):
+def english_release_language(value):
     """MusicBrainz release text-language codes (not release countries/scripts)."""
     code = str(value or "").strip().casefold().replace("_", "-")
     return code in {"en", "eng"} or code.startswith(("en-", "eng-"))
@@ -115,7 +115,7 @@ def preferred_recording_title(con, recording_id, recording, *,
                 if str(release.get("status") or "").casefold() != "official":
                     continue
                 language = (release.get("text-representation") or {}).get("language")
-                if not _english_language(language):
+                if not english_release_language(language):
                     continue
                 title = str(row["title"] or "").strip()[:1000]
                 if _english_track_title(title, canonical):
