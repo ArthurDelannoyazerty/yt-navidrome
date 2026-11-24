@@ -58,6 +58,11 @@ def english_release_language(value):
     return code in {"en", "eng"} or code.startswith(("en-", "eng-"))
 
 
+def has_non_latin_letters(value):
+    return any(char.isalpha() and "LATIN" not in unicodedata.name(char, "")
+               for char in str(value or ""))
+
+
 def _english_track_title(title, canonical):
     """A genuine Latin-script alternate title, never an invented translation.
 
@@ -97,8 +102,7 @@ def preferred_recording_title(con, recording_id, recording, *,
     # Only translate a non-Latin canonical title. A distinct English-language
     # version name of an English recording can denote a remix or alternate
     # title rather than a translation.
-    non_latin = any(char.isalpha() and "LATIN" not in unicodedata.name(char, "")
-                    for char in canonical)
+    non_latin = has_non_latin_letters(canonical)
     if non_latin:
         candidates = []
         # release_tracks is written atomically after a *complete* exact-release
