@@ -449,3 +449,45 @@ test('switching account releases old poll actors without settling a newer poll',
   assert.equal(result.settled, false);
   assert.equal(result.pending, true);
 });
+
+
+test('unavailable video can search and merge with a selected local recording', async () => {
+  const b=browser(); b.app.state.user='admin';
+  vm.runInContext('refreshTracks=async()=>{}; loadDisabledOrigins=async()=>{};',b.context);
+  const track={id:'missing',user_id:'admin',title:'Old upload',health:'UNAVAILABLE',operation_state:'STOPPED',
+    playlists:[],choices:[],needs_source:true,can_merge_local:true,origins:[{id:'bad',downloadable:true,download_enabled:0}]};
+  const row=vm.runInContext('renderTrack',b.context)(track);
+  const merge=row.children[3].children[0].children.find(c=>c.textContent==='Merge with existing music…');
+  assert.ok(merge);
+  const opened=merge.listeners.click();
+  assert.match(b.requests[0].url,/\/api\/tracks\/missing\/merge-local\/candidates\?user_id=admin/);
+  b.requests[0].resolve({total:0,limit:40,tracks:[]});
+  await opened;
+  b.get('localMergeQuery').value='Artist & Song';
+  const searched=b.get('localMergeSearchForm').listeners.submit({preventDefault(){}});
+  assert.match(b.requests[1].url,/q=Artist\+%26\+Song/);
+  b.requests[1].resolve({total:1,limit:40,tracks:[{id:'local',title:'Artist & Song',discovered_at:'2023-01-01T00:00:00Z'}]});
+  await searched;
+  const select=b.get('localMergeResults').children[0].children.at(-1);
+  assert.equal(select.textContent,'Merge into this track');
+  const submitted=select.listeners.click();
+  await select.listeners.click();
+  assert.equal(b.requests.length,3);
+  assert.equal(b.requests[2].url,'/api/tracks/missing/merge-local');
+  assert.deepEqual(JSON.parse(b.requests[2].options.body),{user_id:'admin',target_id:'local'});
+  b.requests[2].resolve({message:'Local merge queued'});
+  await submitted;
+  assert.equal(b.app.state.localMergeSession,null);
+  assert.equal(b.get('notice').textContent,'Local merge queued');
+});
+
+test('local merge search ignores late results after switching libraries', async () => {
+  const b=browser(); b.app.state.user='admin';
+  const opened=vm.runInContext('openLocalMerge',b.context)({id:'missing',user_id:'admin',title:'Old upload'});
+  b.app.state.user='guest';
+  b.get('localMergeStatus').textContent='New library';
+  b.requests[0].resolve({total:1,limit:40,tracks:[{id:'old',title:'Old user'}]});
+  await opened;
+  assert.equal(b.get('localMergeStatus').textContent,'New library');
+  assert.equal(b.get('localMergeResults').children.length,0);
+});
