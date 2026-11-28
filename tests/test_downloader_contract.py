@@ -1,6 +1,7 @@
 """Offline regression checks of the retained download function, without networking."""
 import ast
 import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ import pytest
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "downloader.py"
 
 
-def load_function(error=None, cookies=""):
+def load_function(error=None, cookies="", fallback_success=False):
     calls = []
 
     class DownloadError(Exception):
@@ -17,6 +18,7 @@ def load_function(error=None, cookies=""):
 
     class Client:
         def __init__(self, options):
+            self.options = options
             calls.append(options)
 
         def __enter__(self):
@@ -27,8 +29,10 @@ def load_function(error=None, cookies=""):
 
         def download(self, urls):
             calls.append(urls)
-            if error:
+            if error and (not fallback_success or len(calls) == 2):
                 raise DownloadError(error)
+            if fallback_success:
+                Path(self.options["outtmpl"].replace("%(ext)s", "opus")).write_bytes(b"converted")
 
     tree = ast.parse(SOURCE.read_text())
     tree.body = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))]
@@ -37,6 +41,7 @@ def load_function(error=None, cookies=""):
             node.decorator_list = []
     values = {
         "os": os,
+        "tempfile": tempfile,
         "yt_dlp": SimpleNamespace(
             YoutubeDL=Client,
             utils=SimpleNamespace(DownloadError=DownloadError),
@@ -50,13 +55,13 @@ def load_function(error=None, cookies=""):
     return values, calls
 
 
-def test_download_options_and_call_are_unchanged():
+def test_download_options_exclude_iamf_and_preserve_other_settings():
     values, calls = load_function()
     assert values["download_audio_file"](
         "https://youtube.com/watch?v=abcdefghijk", "track-id"
     ) == "temp_track-id.opus"
     assert calls == [{
-        "format": "bestaudio/best",
+        "format": "bestaudio[acodec!^=iamf]/best[acodec!^=iamf]",
         "outtmpl": "temp_track-id.%(ext)s",
         "noplaylist": True,
         "playlistend": 1,
@@ -108,3 +113,23 @@ def test_retry_contract():
         "retry=retry_if_exception_type(DownloadNetworkError), reraise=True)"
     )
     assert "cobalt" not in SOURCE.read_text().lower()
+
+
+def test_conversion_failure_retries_once_with_conventional_audio(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    values, calls = load_function(error="ERROR: Postprocessing: audio conversion failed: Conversion failed!", fallback_success=True)
+    assert values["download_audio_file"]("url", "id") == "temp_id.opus"
+    assert len(calls) == 4
+    assert calls[2]["format"] == "bestaudio[acodec^=mp4a]/bestaudio[acodec=opus]/best[acodec^=mp4a]"
+    assert calls[2]["outtmpl"] != calls[0]["outtmpl"]
+    assert (tmp_path / "temp_id.opus").read_bytes() == b"converted"
+    assert list(tmp_path.iterdir()) == [tmp_path / "temp_id.opus"]
+
+
+def test_conversion_failure_remains_actionable_after_one_fallback(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    values, calls = load_function(error="Postprocessing: audio conversion failed: Conversion failed!")
+    with pytest.raises(values["DownloadPermanentError"]):
+        values["download_audio_file"]("url", "id")
+    assert len(calls) == 4
+    assert not list(tmp_path.iterdir())
