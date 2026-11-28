@@ -118,6 +118,14 @@ def queue(store, source_id: str, user: str, url: str) -> dict:
     with store.db() as con:
         con.execute("BEGIN IMMEDIATE")
         source = _source(con, source_id, user, url)
+        exclusive, shared = _plan(con, source_id, user)
+        for track_id in (*exclusive, *shared):
+            if store._local_merge_reserved_locked(con, user, track_id) or con.execute(
+                """SELECT 1 FROM jobs WHERE kind='track' AND target=? AND user_id=?
+                   AND state IN ('PENDING','RUNNING') AND json_extract(payload,'$.mode')='merge_local'""",
+                (track_id, user),
+            ).fetchone():
+                raise ValueError("Finish the local music merge before purging this source")
         event = "retry_purge" if source["status"] == "PURGE_FAILED" else "purge"
         store.transition_source(con, source_id, user, event, error=None)
         result = cancel_work(store, con, source_id, user)

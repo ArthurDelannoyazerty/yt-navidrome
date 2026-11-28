@@ -5,6 +5,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -209,8 +210,14 @@ class Artwork:
                     return candidate  # Do not relabel our own fallback or recompress it repeatedly.
             except (LookupError, ValueError, OSError):
                 pass
-        return self.cache(track, data, source_type, "Album cover" if source_type == "coverart" else "Existing embedded cover",
-            origin=origin, recording=track.get("mbid"), release=track.get("release_id"))
+        try:
+            return self.cache(track, data, source_type, "Album cover" if source_type == "coverart" else "Existing embedded cover",
+                origin=origin, recording=track.get("mbid"), release=track.get("release_id"))
+        except ValueError as exc:
+            # Optional embedded art must not abort audio processing or prevent
+            # fallback to a valid cached/YouTube cover. Uploads remain strict.
+            logging.getLogger(__name__).warning("Skipping unusable embedded artwork: %s", exc)
+            return None
 
     @staticmethod
     def thumbnail_url(url, video):

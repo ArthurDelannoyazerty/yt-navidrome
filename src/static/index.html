@@ -813,6 +813,19 @@
   </form>
 </dialog>
 
+<dialog id="localMergeDialog" aria-labelledby="localMergeHeading">
+  <h2 id="localMergeHeading">Merge with existing music</h2>
+  <p id="localMergeTitle" class="dialog-track"></p>
+  <p class="hint">Select the same recording in this library. Its audio, identity and artwork stay unchanged. The unavailable video's discovery history, source links and playlist memberships follow it; the duplicate entry is removed.</p>
+  <form id="localMergeSearchForm">
+    <label>Search local music<input id="localMergeQuery" type="search" maxlength="200" placeholder="Artist, title or source title"></label>
+    <button type="submit">Search</button>
+  </form>
+  <p id="localMergeStatus" role="status" aria-live="polite"></p>
+  <div id="localMergeResults" class="details-list"></div>
+  <div class="dialog-actions"><button id="localMergePrevious" type="button" class="secondary">Previous</button><button id="localMergeNext" type="button" class="secondary">Next</button><button id="cancelLocalMerge" type="button" class="secondary">Cancel</button></div>
+</dialog>
+
 <dialog id="operationDialog">
   <form id="operationForm">
     <h2 id="operationTitle">Run operation</h2>

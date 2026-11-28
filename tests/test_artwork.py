@@ -282,3 +282,21 @@ print("RESULT="+json.dumps(result))
     assert result.returncode == 0, result.stdout + result.stderr
     final = json.loads(next(line[7:] for line in result.stdout.splitlines() if line.startswith("RESULT=")))
     assert packets(Path(final["file_path"])) == before
+
+
+@pytest.mark.parametrize("size", [(16, 16), (5000, 4100)])
+def test_automatic_capture_skips_out_of_bounds_cover(db, audio, monkeypatch, size):
+    import artwork
+    track, origin, path = audio
+    data = io.BytesIO()
+    Image.new("RGB", size).save(data, "PNG")
+    invalid = data.getvalue()
+    monkeypatch.setattr(artwork, "embedded", lambda _: invalid)
+    service = Artwork(db)
+    with pytest.raises(ValueError, match="at least 32 pixels"):
+        service.cache(track, invalid, "upload", "Invalid upload")
+    assert service.capture(track, path, origin=origin, source_type="coverart") is None
+    valid = service.cache(track, picture(), "youtube", "Fallback", origin=origin)
+    monkeypatch.setattr(service, "collect", lambda *args, **kwargs: [])
+    result = service.apply(track, path)
+    assert result["candidate_id"] == valid["id"]

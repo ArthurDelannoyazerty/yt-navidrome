@@ -33,3 +33,20 @@ Neither action deletes the music, approvals, origins or retained discovery dates
 The online YouTube/Spotify playlists are never edited. Music absent from All is
 not automatically deleted. An already queued/running sync may finish after pause;
 resuming monitoring queues a fresh sync without redownloading unchanged audio.
+
+
+## Merge an unavailable video with existing music
+
+In **Music > Needs attention**, an unavailable/private/removed video with no
+local audio can be linked using **Merge with existing music…**. Search your
+library, select the same recording and confirm. The destination must have
+idle, verified local audio; tracks with source audio history cannot be
+discarded using this action. No new download or MusicBrainz match is needed.
+
+The destination keeps its audio file, recording identity, album and artwork.
+The unavailable entry's origins (including disabled URLs), playlist
+memberships, source links and discovery history move to that recording. The
+existing discovery-date policy takes the earliest known playlist-added
+date, falling back to first-seen. The worker refreshes the destination's
+discovery/source tags and local playlist exports, then removes the empty
+placeholder. Online playlists are never edited.

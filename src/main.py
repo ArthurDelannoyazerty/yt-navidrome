@@ -80,6 +80,11 @@ class ReplacementInput(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
 
 
+class LocalMergeInput(BaseModel):
+    user_id: str
+    target_id: str = Field(min_length=1, max_length=64)
+
+
 class EventHandler(logging.Handler):
     def __init__(self, store):
         super().__init__(logging.WARNING)
@@ -438,6 +443,15 @@ def create_app(store=None, start_workers=True):
     @app.post("/api/tracks/{track_id}/origins/{origin_id}/enable")
     def enable_origin(track_id: str, origin_id: str, data: OriginControlInput):
         return store.enable_origin(track_id, origin_id, data.user_id)
+
+    @app.get("/api/tracks/{track_id}/merge-local/candidates")
+    def local_merge_candidates(track_id: str, user_id: str, q: str = Query("", max_length=200),
+                               page: int = Query(1, ge=1)):
+        return store.local_merge_candidates(track_id, user_id, q, page)
+
+    @app.post("/api/tracks/{track_id}/merge-local")
+    def local_merge(track_id: str, data: LocalMergeInput):
+        return store.queue_local_merge(track_id, data.target_id, data.user_id)
 
     @app.post("/api/tracks/{track_id}/replacement")
     def replace_source(track_id: str, data: ReplacementInput):

@@ -59,6 +59,7 @@ const state = {
   ignoredCount: 0,
   ignoredRulesCount: 0,
   disabledCount: 0,
+  localMergeSession: null,
   replacementTrack: null,
   get replacementPending() { return activity.replacement.pending; },
   ignoredPage: 1,
@@ -390,6 +391,7 @@ function changeUser() {
   state.ignoredCount = 0;
   state.ignoredRulesCount = 0;
   state.disabledCount = 0;
+  state.localMergeSession = null;
   state.replacementTrack = null;
   $("replacementStatus").textContent = "";
   $("replacementSubmit").disabled = false;
@@ -786,6 +788,87 @@ async function setOriginDownload(track, origin, enabled) {
   if (state.user === user && $("detailsDialog").open) await showDetails(track);
 }
 
+async function searchLocalMerge(page = 1) {
+  const session = state.localMergeSession;
+  if (!session || session.pending || session.track.user_id !== state.user) return;
+  const serial = ++session.serial;
+  const current = () => state.localMergeSession === session && session.serial === serial && state.user === session.track.user_id;
+  $("localMergeStatus").textContent = "Searching local music…";
+  $("localMergeResults").replaceChildren();
+  $("localMergePrevious").disabled = $("localMergeNext").disabled = true;
+  try {
+    const params = new URLSearchParams({user_id: session.track.user_id, q: session.query, page: String(page)});
+    const data = await api(`/api/tracks/${encodeURIComponent(session.track.id)}/merge-local/candidates?${params}`, null, null, current);
+    if (!current()) return;
+    session.page = page;
+    $("localMergeStatus").textContent = data.total ? `${data.total} matching local track(s). Select the same recording.` : "No matching playable local music. Try another title or artist.";
+    $("localMergePrevious").disabled = page <= 1;
+    $("localMergeNext").disabled = page * data.limit >= data.total;
+    for (const target of data.tracks) {
+      const entry = node("div", null, "details-entry");
+      entry.append(node("strong", target.matched_title || target.title));
+      if (target.matched_title && target.title !== target.matched_title) entry.append(node("small", target.title));
+      entry.append(node("small", `Discovery: ${time(target.discovered_at)}`));
+      entry.append(button("Merge into this track", () => {
+        if (current()) return submitLocalMerge(session, target);
+      }));
+      $("localMergeResults").append(entry);
+    }
+  } catch (error) {
+    if (current()) $("localMergeStatus").textContent = error.message || String(error);
+  }
+}
+
+async function submitLocalMerge(session, target) {
+  if (session !== state.localMergeSession || session.pending || session.track.user_id !== state.user) return;
+  if (!confirm(`Merge "${session.track.matched_title || session.track.title}" into "${target.matched_title || target.title}"? The local audio stays unchanged and the unavailable entry's history and playlists are transferred.`)) return;
+  session.pending = true;
+  const current = () => state.localMergeSession === session && state.user === session.track.user_id;
+  $("localMergeStatus").textContent = "Queuing merge…";
+  try {
+    const result = await api(`/api/tracks/${encodeURIComponent(session.track.id)}/merge-local`, {user_id: session.track.user_id, target_id: target.id}, null, current);
+    if (!current()) return;
+    state.localMergeSession = null;
+    $("localMergeDialog").close();
+    $("detailsDialog").close();
+    notice(result.message);
+    await Promise.all([refreshTracks(false), loadDisabledOrigins(false)]);
+  } catch (error) {
+    if (current()) $("localMergeStatus").textContent = error.message || String(error);
+  } finally {
+    session.pending = false;
+  }
+}
+
+function openLocalMerge(track) {
+  if (track.user_id !== state.user) throw new Error("Library changed; reopen this action.");
+  state.localMergeSession = {track: {...track}, query: "", page: 1, serial: 0, pending: false};
+  $("localMergeTitle").textContent = track.matched_title || track.title;
+  $("localMergeQuery").value = "";
+  $("localMergeDialog").showModal();
+  $("localMergeQuery").focus?.();
+  return searchLocalMerge();
+}
+
+$("localMergeSearchForm").addEventListener("submit", guard(async event => {
+  event.preventDefault();
+  const session = state.localMergeSession;
+  if (!session || session.pending) return;
+  session.query = $("localMergeQuery").value.trim();
+  await searchLocalMerge(1);
+}));
+$("localMergePrevious").addEventListener("click", guard(() => searchLocalMerge(Math.max(1, (state.localMergeSession?.page || 1) - 1))));
+$("localMergeNext").addEventListener("click", guard(() => searchLocalMerge((state.localMergeSession?.page || 1) + 1)));
+$("cancelLocalMerge").addEventListener("click", () => {
+  if (state.localMergeSession?.pending) return;
+  state.localMergeSession = null;
+  $("localMergeDialog").close();
+});
+$("localMergeDialog").addEventListener("cancel", event => {
+  if (state.localMergeSession?.pending) event.preventDefault();
+  else state.localMergeSession = null;
+});
+
 function openReplacement(track) {
   if (track.user_id !== state.user) throw new Error("Library changed; reopen this action.");
   state.replacementTrack = {...track};
@@ -875,7 +958,9 @@ async function showDetails(track) {
   }
   const replacement = button("Use another URL…", () => openReplacement(details), "secondary replace-source");
   replacement.disabled = ["QUEUED", "RUNNING", "DEFERRED"].includes(details.operation_state);
-  origins.append(originList, replacement, node("p", "Disabling downloads keeps the track and its audio. A replacement video is checked before it replaces existing audio.", "hint"));
+  origins.append(originList, replacement);
+  if (details.can_merge_local) origins.append(button("Merge with existing music…", () => openLocalMerge(details), "secondary merge-local"));
+  origins.append(node("p", "Disabling downloads keeps the track and its audio. A replacement video is checked before it replaces existing audio.", "hint"));
 
   const assets = node("div", null, "details-block");
   assets.append(node("h3", "Asset history"));
@@ -1044,6 +1129,12 @@ function renderTrack(track) {
     replacement.dataset.trackId = track.id;
     controls.append(replacement);
   }
+  if (track.can_merge_local) {
+    const merge = button("Merge with existing music…", () => openLocalMerge(track), "secondary merge-local");
+    merge.disabled = busy || Boolean(track.cancellation_pending);
+    merge.dataset.trackId = track.id;
+    controls.append(merge);
+  }
 
   const menu = node("details", null, "action-menu");
   menu.append(node("summary", "More"));
@@ -1108,6 +1199,7 @@ function trackSignature(track) {
     cancellation_pending: track.cancellation_pending,
     download_failures: track.download_failures,
     needs_source: track.needs_source,
+    can_merge_local: track.can_merge_local,
     choices: track.choices,
     issue_count: track.issue_count,
     approval_token: track.approval_token,

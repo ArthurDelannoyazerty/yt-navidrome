@@ -1,8 +1,9 @@
 """The original working yt-dlp download path, isolated in a fresh process.
-Download options are preserved; only error classification is application policy.
+Prefer conventional audio formats and recover once from conversion failures.
 """
 import os
 import sys
+import tempfile
 import traceback
 import yt_dlp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -38,7 +39,8 @@ class DownloadPermanentError(Exception): pass
 def download_audio_file(url: str, track_uuid: str):
     temp_filename = f"temp_{track_uuid}"
     ydl_opts = {
-        'format': 'bestaudio/best',
+        # IAMF can outrank ordinary streams but fail in the installed FFmpeg.
+        'format': 'bestaudio[acodec!^=iamf]/best[acodec!^=iamf]',
         'outtmpl': f'{temp_filename}.%(ext)s',
         'noplaylist': True,
         'playlistend': 1,
@@ -54,8 +56,25 @@ def download_audio_file(url: str, track_uuid: str):
         ydl_opts['cookiefile'] = YT_COOKIES_FILE
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+        except yt_dlp.utils.DownloadError as first:
+            if "audio conversion failed" not in str(first).lower():
+                raise
+            # A mislabeled/unsupported codec can still slip through. Retry
+            # once using known conventional AAC or plain Opus in clean staging.
+            print("WARNING Audio conversion failed; retrying with conventional audio", flush=True)
+            with tempfile.TemporaryDirectory(dir=".") as retry_dir:
+                retry_base = os.path.join(retry_dir, temp_filename)
+                fallback = {
+                    **ydl_opts,
+                    "format": "bestaudio[acodec^=mp4a]/bestaudio[acodec=opus]/best[acodec^=mp4a]",
+                    "outtmpl": f"{retry_base}.%(ext)s",
+                }
+                with yt_dlp.YoutubeDL(fallback) as ydl:
+                    ydl.download([url])
+                os.replace(f"{retry_base}.opus", f"{temp_filename}.opus")
         return f"{temp_filename}.opus"
     except yt_dlp.utils.DownloadError as e:
         err = str(e).lower()
