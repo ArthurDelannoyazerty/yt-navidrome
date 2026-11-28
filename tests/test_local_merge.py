@@ -25,7 +25,7 @@ def pair(db, track, environment):
     source_origin = db.one("SELECT * FROM track_origins WHERE media_key=?", ("lmnopqrstuv",))
     source = db.owned("tracks", source_origin["track_id"], "admin")
     reason = "Video unavailable, private, or removed. Choose another video."
-    db.execute("UPDATE jobs SET state='DONE' WHERE target=?", (source["id"],))
+    db.execute("UPDATE jobs SET state='DONE' WHERE target IN (?,?)", (source["id"], playlist["id"]))
     db.update("tracks", source["id"], operation_state="STOPPED", operation_error=reason)
     db.update("track_origins", source_origin["id"], availability="UNAVAILABLE", download_enabled=0,
               disabled_reason=reason, last_error=reason)

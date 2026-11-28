@@ -601,7 +601,9 @@ class Store:
                 return self.enqueue(kind, target, user, payload, con=connection)
         if kind == "track" and self._local_merge_reserved_locked(con, user, target):
             return False
-        if kind == "album":
+        if kind == "album" and con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='album_changes'"
+        ).fetchone():
             album_track = con.execute("SELECT track_id FROM album_changes WHERE id=?", (target,)).fetchone()
             if album_track and self._local_merge_reserved_locked(con, user, album_track["track_id"]):
                 return False
