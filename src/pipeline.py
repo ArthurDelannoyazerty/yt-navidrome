@@ -326,7 +326,15 @@ class Pipeline:
             if old_path != new_path and old_path.is_relative_to(user_root):
                 old_path.unlink(missing_ok=True)
         if result.get("source_orphan") and source_id:
-            await self.cleanup_orphan_track(job, source_id)
+            if result.get("local_merge"):
+                # The placeholder has no asset, path or beets item. Never
+                # invoke beets deletion/lookup using the old video's title.
+                if self.store.one("SELECT id FROM tracks WHERE id=?", (source_id,)):
+                    if self.store.track_has_origins(source_id):
+                        raise ValueError("Unexpected origins on the merged placeholder")
+                    self.store.delete_track(source_id, receipt["user_id"])
+            else:
+                await self.cleanup_orphan_track(job, source_id)
         elif source_id and source_id != target_id:
             if self.store.one("SELECT id FROM tracks WHERE id=?", (source_id,)):
                 self.store.complete_operation(source_id)
@@ -909,9 +917,29 @@ class Pipeline:
         completed = self.store.operation_receipt(operation)
         if completed:
             self.checkpoint(job, "applying")
-            await self.finish_operation_receipt(job, completed, directory)
+            try:
+                await self.finish_operation_receipt(job, completed, directory)
+            except Exception as exc:
+                if mode == "merge_local":
+                    raise DeferredOperation(f"Local merge committed; cleanup will retry: {exc}") from exc
+                raise
             return
         track = self.store.owned("tracks", job["target"], job["user_id"])
+        if mode == "merge_local":
+            target = self.store.owned("tracks", payload["target_id"], job["user_id"])
+            asset = self.store.current_asset(target["id"])
+            if (not asset or asset["id"] != payload["asset_id"]
+                    or asset["sha256"] != payload["asset_sha256"]
+                    or not await self.usable_asset(target, asset)):
+                raise ValueError("Destination audio is missing or changed; verify it before merging")
+            self.checkpoint(job, "applying")
+            self.store.commit_local_merge(job, payload, operation)
+            try:
+                await self.finish_operation_receipt(job, self.store.operation_receipt(operation), directory)
+            except Exception as exc:
+                raise DeferredOperation(f"Local merge committed; cleanup will retry: {exc}") from exc
+            self.report(job)("INFO", "Merged unavailable entry into existing local music; discovery and playlists retained")
+            return
         if mode == "publish_waiting":
             pending = json.loads(track["pending_operation"] or "{}")
             origin = self.store.owned("track_origins", pending["origin_id"], track["user_id"])

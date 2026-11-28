@@ -599,6 +599,12 @@ class Store:
             with self.db() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 return self.enqueue(kind, target, user, payload, con=connection)
+        if kind == "track" and self._local_merge_reserved_locked(con, user, target):
+            return False
+        if kind == "album":
+            album_track = con.execute("SELECT track_id FROM album_changes WHERE id=?", (target,)).fetchone()
+            if album_track and self._local_merge_reserved_locked(con, user, album_track["track_id"]):
+                return False
         if kind == "track":
             has_albums = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='album_changes'").fetchone()
             if has_albums and con.execute("""SELECT 1 FROM jobs j JOIN album_changes a ON a.id=j.target
@@ -814,6 +820,144 @@ class Store:
                FROM track_origins o JOIN tracks t ON t.id=o.track_id
                WHERE o.user_id=? AND o.download_enabled=0 ORDER BY o.disabled_at DESC,o.id""", (user,),
         )
+
+    @staticmethod
+    def _can_merge_local(track, origins):
+        """Only failed/stopped unavailable-video placeholders without audio."""
+        reason = "video unavailable, private, or removed"
+        return (
+            track["operation_state"] in {"FAILED", "STOPPED"}
+            and track["health"] in {"UNAVAILABLE", "MISSING"}
+            and not track["current_asset_id"] and not track["file_path"] and not track["beets_id"]
+            and any(o["provider"] == "youtube" and (
+                reason in (o["disabled_reason"] or "").lower()
+                or "replacement video is unavailable" in (o["disabled_reason"] or "").lower()
+                or reason in (o["last_error"] or "").lower()
+                or (o["availability"] == "UNAVAILABLE" and reason in (track["operation_error"] or "").lower())
+            ) for o in origins)
+        )
+
+    @staticmethod
+    def _local_merge_reserved_locked(con, user, track_id, except_job=None):
+        return con.execute(
+            """SELECT 1 FROM jobs WHERE user_id=? AND kind='track'
+               AND state IN ('PENDING','RUNNING') AND json_extract(payload,'$.mode')='merge_local'
+               AND json_extract(payload,'$.target_id')=? AND id<>COALESCE(?, -1)""",
+            (user, track_id, except_job),
+        ).fetchone()
+
+    def local_merge_candidates(self, track_id, user, query="", page=1, limit=40):
+        self.require_user(user)
+        self.owned("tracks", track_id, user)
+        where, params = track_where(user, "AVAILABLE", query)
+        where += """ AND t.id<>? AND t.operation_state='IDLE' AND t.current_asset_id IS NOT NULL
+            AND t.file_path=a.path AND a.state='CURRENT' AND a.track_id=t.id AND a.sha256 IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.user_id=t.user_id AND j.kind='track'
+                AND j.state IN ('PENDING','RUNNING') AND
+                (j.target=t.id OR (json_extract(j.payload,'$.mode')='merge_local'
+                AND json_extract(j.payload,'$.target_id')=t.id)))"""
+        with self.db() as con:
+            con.execute("BEGIN")
+            total = con.execute(
+                f"SELECT COUNT(*) FROM tracks t JOIN assets a ON a.id=t.current_asset_id WHERE {where}",
+                (*params, track_id),
+            ).fetchone()[0]
+            rows = con.execute(
+                f"""SELECT t.id,t.title,t.matched_title,t.discovered_at,t.mbid
+                    FROM tracks t JOIN assets a ON a.id=t.current_asset_id WHERE {where}
+                    ORDER BY COALESCE(NULLIF(t.matched_title,''),t.title) COLLATE NOCASE,t.id LIMIT ? OFFSET ?""",
+                (*params, track_id, limit, (page - 1) * limit),
+            ).fetchall()
+        return {"tracks": [dict(row) for row in rows], "total": total, "page": page, "limit": limit}
+
+    def _local_merge_pair_locked(self, con, source_id, target_id, user, *, job_id=None):
+        if source_id == target_id:
+            raise ValueError("Choose a different existing track")
+        source = con.execute("SELECT * FROM tracks WHERE id=? AND user_id=?", (source_id, user)).fetchone()
+        target = con.execute("SELECT * FROM tracks WHERE id=? AND user_id=?", (target_id, user)).fetchone()
+        if not source or not target:
+            raise LookupError("Both tracks must belong to the selected library")
+        origins = con.execute("SELECT * FROM track_origins WHERE track_id=? ORDER BY id", (source_id,)).fetchall()
+        if job_id is None:
+            if not self._can_merge_local(source, origins):
+                raise ValueError("Only an unavailable video without local audio can be merged")
+        elif source["operation_state"] != "RUNNING" or source["operation_kind"] != "MERGE_LOCAL":
+            raise ValueError("The unavailable entry changed; reopen the merge")
+        if (source["health"] not in {"UNAVAILABLE", "MISSING"} or source["current_asset_id"]
+                or source["file_path"] or source["beets_id"] or not origins
+                or con.execute("SELECT 1 FROM assets WHERE track_id=?", (source_id,)).fetchone()):
+            raise ValueError("The source has audio history; refusing to discard it")
+        if target["health"] != "AVAILABLE" or target["operation_state"] != "IDLE":
+            raise ValueError("Choose an idle, playable local track")
+        asset = con.execute(
+            "SELECT * FROM assets WHERE id=? AND track_id=? AND state='CURRENT'",
+            (target["current_asset_id"], target_id),
+        ).fetchone()
+        if not asset or not asset["sha256"] or target["file_path"] != asset["path"]:
+            raise ValueError("The destination has no verified current audio")
+        for identity in (source_id, target_id):
+            if con.execute(
+                """SELECT 1 FROM jobs WHERE kind='track' AND target=? AND state IN ('PENDING','RUNNING')
+                   AND id<>COALESCE(?, -1)""", (identity, job_id),
+            ).fetchone() or self._local_merge_reserved_locked(con, user, identity, job_id):
+                raise ValueError("Finish the current track operation before merging")
+            if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='album_changes'").fetchone() and con.execute(
+                """SELECT 1 FROM jobs j JOIN album_changes a ON a.id=j.target
+                   WHERE j.kind='album' AND a.track_id=? AND j.state IN ('PENDING','RUNNING')""",
+                (identity,),
+            ).fetchone():
+                raise ValueError("An album-only operation is pending for this music")
+            if con.execute("""SELECT 1 FROM source_origins so JOIN sources s ON s.id=so.source_id
+                    JOIN track_origins o ON o.id=so.origin_id WHERE o.track_id=?
+                    AND s.status IN ('PURGING','PURGE_FAILED')""", (identity,)).fetchone():
+                raise ValueError("Finish source cleanup before merging")
+            if (STATE / "staging" / identity / "apply-request.json").exists():
+                raise ValueError("Retry the interrupted metadata application before merging")
+        return source, target, origins, asset
+
+    def queue_local_merge(self, source_id, target_id, user):
+        """Reserve the placeholder and its destination until receipt cleanup finishes."""
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            source, target, origins, asset = self._local_merge_pair_locked(con, source_id, target_id, user)
+            payload = {"mode": "merge_local", "target_id": target_id, "asset_id": asset["id"],
+                       "asset_sha256": asset["sha256"], "origin_ids": [o["id"] for o in origins]}
+            if not self.enqueue("track", source_id, user, payload, con=con):
+                raise ValueError("The unavailable entry already has an active job")
+            con.execute("""UPDATE tracks SET operation_state='QUEUED',operation_kind='MERGE_LOCAL',
+                operation_error=NULL,updated_at=? WHERE id=?""", (utcnow(), source_id))
+        return {"message": "Local merge queued. Existing audio is kept; discovery and playlists will be combined."}
+
+    def commit_local_merge(self, job, payload, operation):
+        """Move associations, not audio; the receipt finalizer rewrites tags/playlists."""
+        source_id, target_id, user = job["target"], payload["target_id"], job["user_id"]
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            source, target, origins, asset = self._local_merge_pair_locked(
+                con, source_id, target_id, user, job_id=job["id"],
+            )
+            if ([o["id"] for o in origins] != payload["origin_ids"]
+                    or asset["id"] != payload["asset_id"] or asset["sha256"] != payload["asset_sha256"]):
+                raise ValueError("Tracks or current audio changed; reopen the merge")
+            # Memberships, Spotify links and source metadata reference origin IDs.
+            # Preserve disabled URLs so a monitored sync cannot re-download them.
+            con.execute("UPDATE track_origins SET track_id=? WHERE track_id=?", (target_id, source_id))
+            con.execute("UPDATE artwork_candidates SET track_id=? WHERE track_id=?", (target_id, source_id))
+            con.execute("UPDATE identity_history SET track_id=? WHERE track_id=? AND user_id=?",
+                        (target_id, source_id, user))
+            con.execute("UPDATE tracks SET first_seen_at=?,playlist_discovered_at=? WHERE id=?", (
+                _earliest(target["first_seen_at"], source["first_seen_at"]),
+                _earliest(target["playlist_discovered_at"], source["playlist_discovered_at"]), target_id,
+            ))
+            self._recompute_discovery_locked(con, target_id)
+            for origin in origins:
+                self._insert_history_locked(con, {
+                    "source_track": dict(source), "working_track": dict(target), "origin": dict(origin),
+                }, dict(target), "merge_local")
+            result = {"kind": "DEDUPLICATED", "local_merge": True, "source_id": source_id,
+                      "target_id": target_id, "source_orphan": True, "new_path": asset["path"]}
+            self._record_receipt_locked(con, operation, user, source_id, target_id, "merge_local", result)
+        return result
 
     def queue_replacement(self, track_id: str, user: str, url: str):
         from providers import parse_source
@@ -1324,6 +1468,13 @@ class Store:
                 else:
                     payload = {"mode": "ingest"}
                 mode = payload.get("mode", "ingest")
+                if mode == "merge_local":
+                    source, target, origins, asset = self._local_merge_pair_locked(
+                        con, track_id, payload["target_id"], user,
+                    )
+                    # Retry only the originally confirmed target and asset.
+                    if asset["id"] != payload["asset_id"] or asset["sha256"] != payload["asset_sha256"]:
+                        raise ValueError("Destination audio changed; reopen the local merge")
                 action = payload.get("action") or payload.get("pending_action") or mode
                 if mode in {"ingest", "redownload", "reprocess", "replace_source", "resume"} and action != "refresh_suggestions":
                     origin = con.execute("SELECT * FROM track_origins WHERE id=? AND track_id=?",
@@ -2054,10 +2205,11 @@ class Store:
             ).fetchone()
             if not track or not origin:
                 raise LookupError("Origin not found on this track in the selected library")
-            if track["operation_state"] != "IDLE" or con.execute(
-                "SELECT 1 FROM jobs WHERE kind='track' AND target=? "
-                "AND state IN ('PENDING','RUNNING')", (track_id,),
-            ).fetchone():
+            if (track["operation_state"] != "IDLE" or self._local_merge_reserved_locked(con, user, track_id)
+                    or con.execute(
+                        "SELECT 1 FROM jobs WHERE kind='track' AND target=? "
+                        "AND state IN ('PENDING','RUNNING')", (track_id,),
+                    ).fetchone()):
                 raise ValueError("Finish the current track operation before changing its origins")
             count = con.execute(
                 "SELECT COUNT(*) FROM track_origins WHERE track_id=?", (track_id,)
@@ -2221,6 +2373,7 @@ class Store:
             row["can_stop_download"] = bool(payload.get("origin_id") and job.get("stage") not in {"applying", "publishing"}
                                                 and _downloads_from_origin(payload))
             row["needs_source"] = not row.get("current_asset_id") and not any(o["downloadable"] and o["download_enabled"] for o in row["origins"])
+            row["can_merge_local"] = self._can_merge_local(row, row["origins"])
             row["playlists"] = playlists.get(row["id"], [])
             row["issue_count"] = issues.get(row["id"], 0)
         stats_rows = self.rows(
@@ -2262,6 +2415,7 @@ class Store:
         track["needs_source"] = not track.get("current_asset_id") and not any(
             origin["downloadable"] and origin["download_enabled"] for origin in track["origins"]
         )
+        track["can_merge_local"] = self._can_merge_local(track, track["origins"])
         return track
 
     def replace_integrity_issues(self, user: str, issues: list[dict]):
