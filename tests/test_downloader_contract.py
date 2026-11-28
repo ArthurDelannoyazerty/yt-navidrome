@@ -116,6 +116,10 @@ def test_retry_contract():
 
 
 def test_conversion_failure_retries_once_with_conventional_audio(tmp_path, monkeypatch):
+    # The autouse environment fixture creates state/ and library/ under tmp_path.
+    # Assert cleanup only inside the downloader's dedicated working directory.
+    tmp_path = tmp_path / "download"
+    tmp_path.mkdir()
     monkeypatch.chdir(tmp_path)
     values, calls = load_function(error="ERROR: Postprocessing: audio conversion failed: Conversion failed!", fallback_success=True)
     assert values["download_audio_file"]("url", "id") == "temp_id.opus"
@@ -127,6 +131,10 @@ def test_conversion_failure_retries_once_with_conventional_audio(tmp_path, monke
 
 
 def test_conversion_failure_remains_actionable_after_one_fallback(tmp_path, monkeypatch):
+    # The autouse environment fixture creates state/ and library/ under tmp_path.
+    # Assert cleanup only inside the downloader's dedicated working directory.
+    tmp_path = tmp_path / "download"
+    tmp_path.mkdir()
     monkeypatch.chdir(tmp_path)
     values, calls = load_function(error="Postprocessing: audio conversion failed: Conversion failed!")
     with pytest.raises(values["DownloadPermanentError"]):
